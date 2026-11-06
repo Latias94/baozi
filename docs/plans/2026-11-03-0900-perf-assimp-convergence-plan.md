@@ -790,3 +790,14 @@ negative case only for a genuinely new boundary, not for incidental private layo
   [reserved typed-storage row](2026-11-06-0800-typed-storage-reserved-row-plan.md), then
   separately qualify document-local OBJ/MTL token reuse. All builds remain in the
   current repository target; all original convergence targets remain active.
+- The [reserved typed-storage checkpoint](../reviews/2026-11-06-typed-storage-reserved-row.md)
+  qualifies source `9744b35`: the exclusive actual-row loan hoists fresh reserved-state
+  checks and retains immediate transfers, the actual remainder gate, 256-unit typed
+  polling and outer-host cleanup. Seven fresh integrated gates pass with 972 stable
+  Rust/Cargo inputs. Twelve independently reviewed instruction profiles show all six
+  original tasks lower, including STL -13.009%, with identical nonclock observations
+  and work. Retain +86,488 diagnostic binary bytes, both grid profiler warnings and
+  the pre-Cargo PATH startup failure. This supports native qualification only; no
+  native time, heap, main merge or release acceptance follows. Separately qualify
+  document-local OBJ/MTL token reuse before a cumulative ordinary campaign. Release
+  HOLD and every original Windows/GNU convergence target remain active.

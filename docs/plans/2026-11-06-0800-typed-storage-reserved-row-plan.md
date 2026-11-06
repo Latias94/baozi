@@ -1,9 +1,10 @@
 # Reserve Typed Materialization Once, Then Transfer Actual Units
 
-Status: source and fresh final qualification complete on
-`refactor/typed-storage-reserved-row`, based on `7974435` (runtime `247ff99`). Independent
-design, source and final QA reviews found no actionable findings and permit a qualified
-source commit and locating measurement. All preceding closed-text ordinary and heap
+Status: source `9744b35` and fresh final qualification complete, based on `7974435`
+(runtime `247ff99`). Independent design, source and final QA reviews found no actionable
+findings. The [six-case instruction checkpoint](../reviews/2026-11-06-typed-storage-reserved-row.md)
+passes its predetermined predicate and independent evidence review; native time and
+heap qualification remain pending. All preceding closed-text ordinary and heap
 attempts are terminal; later disk cleanup and surviving GNU-original recovery are
 recorded in the linked checkpoint. Their incomplete campaign brackets and remaining
 threshold failures grant no measured keep or main merge. This plan supersedes the
@@ -19,7 +20,7 @@ and an exclusive loan prevents policy or competing work changes.
 
 | Alternative | Consequence | Decision |
 | --- | --- | --- |
-| Check a reserved-row invariant once in the actual fresh typed host | Immediate actual counter transfers with entry-only budget/lifecycle checks; keeps the existing factory and cleanup owner. | Implemented; fresh QA passed, measurement pending. |
+| Check a reserved-row invariant once in the actual fresh typed host | Immediate actual counter transfers with entry-only budget/lifecycle checks; keeps the existing factory and cleanup owner. | Implemented; fresh QA and six-case instruction predicate passed; native/heap qualification pending. |
 | Accept arbitrary existing Producer frames and project every unit | Preserves general post-tightening failure states, but creates an obligation absent from the sole typed caller. | Retain the existing general API for those callers; do not introduce another broad row API. |
 | Add singleton specialization to the current grouped call | Smaller host edit, repeated lifecycle/position work and numeric projection remain. | Fallback if a real required interleaving invalidates the short-loan premise. |
 
@@ -181,3 +182,10 @@ measured improvement, local-main integration nor release acceptance. The first G
 diagnostic launcher fails before Cargo because its non-login PATH omits `rustc`; the
 separate startup-failure receipt and first source archive remain. The second launcher
 sets only its process PATH and keeps build output in the current repository target.
+
+The completed diagnostic checkpoint retains every result: STL whole-worker Ir falls
+13.009%; the other five fall 0.488-3.151%, with identical full nonclock observations
+and reported work. All twelve raw profiles and their annotations, stdout/stderr,
+immutable source/build identities and warnings are independently reviewed. Candidate
+binary growth of 86,488 bytes is retained. This permits the next native qualification
+step only; it is not ordinary time/memory acceptance or local-main disposition.
