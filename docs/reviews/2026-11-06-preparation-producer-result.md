@@ -1,10 +1,13 @@
 # Preparation Producer Result and Real Output Ownership
 
-Status: four-file source 1 is frozen on `refactor/prepare-consuming-result`.
+Status: four-file source 1 is qualified at runtime `e8c4802` on
+`refactor/prepare-consuming-result`.
 Independent production and oracle reviews accept the exact formatted source. Affected
 and all seven integrated gates pass; independent final receipt/source association is
-still under review. No performance, runtime main integration or release acceptance
-follows.
+closed. The GNU diagnostic worker is built from the current repository and target;
+six-task instruction and eighteen-worker heap diagnostics are independently reviewed.
+Ordinary time/process-memory qualification remains open. No native performance keep,
+runtime main integration or release acceptance follows.
 
 ## Actual deletion
 
@@ -88,10 +91,104 @@ The source-oracle audit accepts all four groups and verifies their completed foc
 execution while preserving the facade limits above. Its report is
 `prepare-consuming-result-oracles-review-1.md`, SHA-256
 `770e454046525d60402cc6b80ddb0e6af8b25e8386890ad2f573d7258dd269d2`.
-Independent final-log/source association is still open. These are Windows-host
+Independent final-log/source association is closed in
+`prepare-consuming-result-final-qa-review-1.md`, SHA-256
+`a509eb952e2fe16c7dd980e9f84c2265b566f71887d64ce26b84fc3a53352e3c`.
+It verifies all ten final/focused logs, all 972 current/frozen input bindings and nine
+key test executions, reusing the closed production/oracle proof. These are Windows-host
 all-features checks, not wasm, every feature combination or ignored manual execution.
 
-## Remaining lifecycle and measurement
+## Same six whole-worker instruction tasks
+
+The exact retained `6e7c1c0` opt3/debug1/System worker and profiles are the control;
+candidate `e8c4802` has six fresh original pipeline/memory profiles. No fresh control
+or paired native-time campaign is claimed. Full nonclock JSON agrees, including
+`import_work` and numeric spelling; only `stage_ns` is excluded.
+
+| Original task | Control Ir | Candidate Ir | Change |
+| --- | ---: | ---: | ---: |
+| Shared glTF 1 | 5,850,377 | 5,843,936 | -0.110095% |
+| Shared glTF 32 | 25,609,645 | 25,576,790 | -0.128292% |
+| F64 PLY neighbors | 2,482,302 | 2,476,096 | -0.250010% |
+| Binary STL 1024 | 12,231,900 | 12,225,364 | -0.053434% |
+| Repeated OBJ 16384 | 718,971,790 | 719,198,788 | +0.031573% |
+| Grid OBJ 128 | 2,266,764,458 | 2,267,263,735 | +0.022026% |
+
+The prospective whole-worker guard passes: none exceeds +1%, and every full nonclock
+observation agrees. Both positive OBJ signs remain. This guard alone does not establish
+an owner-specific result, native speed, repeatability or a performance keep.
+
+Separate raw call-edge attribution verifies the same actual one-call
+`prepare_triangles -> prepare::run` boundary on each side:
+
+| Actual preparation entry | Control Ir | Candidate Ir | Change in entry Ir |
+| --- | ---: | ---: | ---: |
+| Shared glTF 1 | 53,915 | 47,315 | -12.241491% |
+| Binary STL 1024 | 53,541 | 47,015 | -12.188790% |
+
+The output scratch constructor, unchanged descriptor append, direct second-context
+acquisition, decision region and discarded-output drop leave these executed paths.
+The first-region wrapper outside its input costs 76 more Ir and unattached request
+costs 17 more Ir; these increases remain in the entry totals. Inlining and other
+compiled contexts also change, so the entire reduction is not labeled saved call
+overhead. Overlapping file/function inclusive rows are not added together.
+
+The surviving planning/binding cluster is 22,623/22,780 Ir, approximately
+47.813590%/48.452622% of these candidate entry costs. It still includes necessary
+domain/source/account/budget qualification. Those are instruction-context shares,
+not native-time shares or wholly removable costs. Both selection scratch owners and
+their real inspections remain; no result for changed/mixed preparation is inferred
+from these two unchanged profiles.
+
+Independent instruction/build review verifies all sixty control/candidate raw files
+and the source/QA chain. Both grid profiles retain Valgrind `brk` warnings. Single
+profiles, different build source roots, inlining/code generation and unrecorded runtime
+state limit attribution of tiny unrelated deltas. The symbol-bearing GNU executable
+shrinks from 76,898,800 to 76,827,800 bytes; its 71,000-byte change does not establish
+stripped size, heap, RSS or latency. The local instruction receipt is
+`prepare-consuming-result-instructions-1/report.json`, SHA-256
+`0ed855804cd6d7ca4d24a255d3baf16928f80ffb2a4a0ad763a321367c7940fa`.
+Its independent authority is `prepare-consuming-result-instruction-review-1.md`.
+
+## Separate whole-worker heap observations
+
+Eighteen fresh workers cover the same six tasks for exact control, candidate and
+Assimp 6.0.5. Independent review verifies all 72 raw stdout/stderr/trace/analysis files,
+trace events, complete observations and source bindings. Candidate/control equality
+again excludes only `stage_ns`, including unchanged `import_work`.
+
+| Original task | Control / candidate allocation calls | Both displayed peak values |
+| --- | ---: | --- |
+| Shared glTF 1 | 671 / 670 | 174.48K |
+| Shared glTF 32 | 1,126 / 1,125 | 389.91K |
+| F64 PLY neighbors | 518 / 517 | 135.97K |
+| Binary STL 1024 | 488 / 487 | 456.56K |
+| Repeated OBJ 16384 | 17,001 / 17,001 | 12.18M |
+| Grid OBJ 128 | 33,373 / 33,372 | 28.82M |
+
+These rounded decimal tool displays are unchanged; equal displays do not prove equal
+exact-byte peaks. The five one-call reductions coexist with one more reported temporary
+allocation in each of those tasks; repeated OBJ is unchanged. Analysis-versus-recorder
+temporary-count disagreements also remain. All Baozi analyses retain a 544B exit-live
+label, Assimp 4.10K, with one outstanding allocation each. They remain unattributed,
+neither confirmed application leaks nor leak freedom.
+
+Shared-32's candidate/Assimp displayed peak remains approximately 2.236235, and its
+candidate allocation count remains above Assimp. Favorable other tasks do not hide
+the adverse glTF, STL and grid displays. Whole-worker tracked heap includes startup,
+preload, validation/serialization and teardown; it is not stage heap, native RSS or
+ordinary speed. No displayed peak reduction or broad memory gain follows.
+
+`calibration` is empty: no new sanity/calibration worker ran. Two positive observations
+for exact surviving Rust/C++ sanity executables are reused from the prior OBJ receipt.
+Original source/build/older trace provenance remains missing; this does not establish
+universal interception or renew that attestation. Assimp's declared upstream pin is
+not runtime Git verification. The local heap receipt is
+`prepare-consuming-result-heap-1/report.json`, SHA-256
+`6b93eeaaaa04caf906ad2ad49eafddfdf24375547537b6fd943f0d1a62d1fcc6`.
+Its independent authority is `prepare-consuming-result-heap-review-1.md`.
+
+## Remaining lifecycle and ordinary measurement
 
 Nonempty unchanged calls still own sorted/selected scratch. Planning and terminal
 evidence remain dynamically backed. This slice therefore establishes neither a
@@ -100,9 +197,26 @@ The separately reviewed [owned finite invocation plan](../plans/2026-11-06-1240-
 replaces that deeper owner; its terminal/error contracts and actual compiler cuts are
 separate from this producer algorithm.
 
-After final source qualification, compare the same six original instruction tasks
-against exact `6e7c1c0` control, preserving observations, physical work, binary/heap
-costs and all adverse signs. The original Windows/GNU fourteen-case/110-lane ordinary
+The GNU opt3/debug1/System worker is built directly from
+`/mnt/f/SourceCodes/Rust/baozi`, with output in that repository's `target`. The committed
+archive and all 972 before/after build inputs equal final QA; compiler, arguments and
+selected overrides match the exact `6e7c1c0` diagnostic control. This records build-policy
+equivalence, not a hermetic reproducible build. The completed diagnostics above retain
+observations, physical work, binary/heap costs and all adverse signs; they remain
+separate from native acceptance. Both new ordinary debug0 workers are built from the
+same source and current repository/target, serially. Windows executable SHA-256 is
+`0069719f863827b10c5f6ee061c267ae82fb6e5ac327a9d6995908c584a64046`;
+GNU is `b76a2015bf815725843fa24c131acad77a5db71b7aef36402b6a3e0b173aeea1`.
+The exact prior `6e7c1c0` ordinary candidate workers become this attempt's retained
+control, without a control rebuild or new control QA. All four archives, PAX revisions,
+972-input maps, logs and executable hashes agree with their respective qualified
+source; recorded compiler/arguments/selected overrides match within each platform.
+This association is `prepare-consuming-result-ordinary-build-association-1.json` in
+the local evidence tree. Its status qualifies build identity, not native performance.
+
+The new cohort retains the reviewed first-clear quiet guard and unchanged collector,
+with the collector's bytes also checked against the committed candidate archive.
+Its original Windows/GNU fourteen-case/110-lane ordinary
 protocol, three warmup/twenty retained AB/BA pairs, memory boundaries and missing/load
 records remain required. No earlier candidate-only result supplies this source's
 native acceptance. All build output stays in the current repository target; release

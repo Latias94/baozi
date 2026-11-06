@@ -170,8 +170,16 @@ The first focused attempt passes 303 tests, strict Clippy and fmt. All seven fre
 integrated gates pass: 3,643 workspace tests, 190 doctests, 138 consumer tests, both
 strict lint gates and both formatting gates, with 972 stable inputs. Existing skipped
 manual cases and passing unwind panic stderr remain. Final receipt association is
-under independent review; instruction/native/heap qualification remains open in the
-[checkpoint](../reviews/2026-11-06-preparation-producer-result.md). No main runtime
-merge or release acceptance follows. The separately reviewed
+independently closed. Source `e8c4802` builds its GNU diagnostic worker directly from
+the current F repository, preserving all 972 qualified inputs and matching the exact
+`6e7c1c0` control's recorded compiler/arguments/selected overrides.
+The [checkpoint](../reviews/2026-11-06-preparation-producer-result.md) records six
+independently audited instruction tasks: four whole-worker decreases, two small OBJ
+increases, identical full nonclock output including work, and actual glTF-1/STL-1024
+preparation-entry Ir decreases of 12.241491%/12.188790%. All eighteen separately audited
+heap workers retain five one-call reductions, unchanged repeated OBJ, unchanged rounded
+peaks, temporary-count/exit-live limitations and reused-sanity provenance gaps. Both
+ordinary debug0 candidates are built and source-associated; original native qualification
+remains open. No main runtime merge or release acceptance follows. The separately reviewed
 [owned finite invocation plan](2026-11-06-1240-owned-finite-invocation-plan.md) covers
 the larger fixed startup/terminal owner; its implementation is not part of this slice.

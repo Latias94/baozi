@@ -860,3 +860,20 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Core/postprocess ownership. Neither cut is implemented or compiler-qualified.
   The current producer-result slice remains separate; no finite allocation, layout,
   performance, main integration or release claim follows from design GO.
+- The [preparation producer result](../reviews/2026-11-06-preparation-producer-result.md)
+  qualifies `e8c4802`: only real effects materialize output, unchanged prefixes/suffixes
+  retain complete ordered evidence, and caller rediscovery is removed. Independent
+  production, oracle and final-QA association reviews close. All seven fresh gates
+  pass with 972 stable inputs: 3,643 workspace tests, 190 doctests and 138 consumer
+  tests, retaining existing manual skips and intentional passing unwind stderr.
+  Actual output/backfill admission denial and both exact control boundaries run on
+  the original owner. GNU diagnostic build uses the current repository/target with
+  archive inputs equal to QA. Independent instruction review retains four whole-worker
+  reductions, both small OBJ increases and actual unchanged preparation-entry Ir
+  reductions of 12.241491%/12.188790%. Planning/binding remains about 48% of those
+  entry instructions, not native time. Independent eighteen-worker heap review retains
+  five one-call reductions, unchanged repeated OBJ and all rounded peak displays,
+  temporary-count/exit-live facts and the existing sanity provenance limit. Both new
+  ordinary debug0 candidates are built and bound to QA against exact retained `6e7c1c0`
+  controls. Fixed startup and nonempty selection scratch remain. Native qualification
+  is open; no finite-root implementation, main runtime merge or release follows.
