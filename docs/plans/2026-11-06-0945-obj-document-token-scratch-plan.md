@@ -130,7 +130,8 @@ directory, SHA-256
 All seven logs and all 972 before/after/current Rust/Cargo hashes agree. The existing
 passing postprocess unwind test's intentional panic stderr remains in the log. This
 is Windows-host source qualification; it is not new wasm, skipped-fixture or native
-performance coverage. Independent final QA receipt review is a separate sidecar.
+performance coverage. Independent final QA receipt review confirms all seven gates,
+logs, totals/skips and source association with no actionable findings.
 
 Existing actual-face cancellation, later comment/token rejection, recovery-frontier
 and multiple-library/origin tests exercise the retained document owner. High-water
@@ -144,3 +145,13 @@ associations are independently reviewed. Only candidate observations are fresh i
 that comparison. Record that reuse explicitly; do not label it a fresh control run or
 paired native campaign. The unchanged ordinary protocol still requires fresh serial
 campaigns with all original lanes and sampling.
+
+The [completed diagnostic checkpoint](../reviews/2026-11-06-obj-document-token-scratch.md)
+retains both OBJ Ir reductions (-4.870098%/-6.125671%), all four non-OBJ increases
+(+0.008089% to +0.122759%), equal full nonclock observations/work, 4,720 additional
+diagnostic binary bytes and both grid profiler warnings. Independent instruction
+review accepts the predetermined diagnostic predicate only. Eighteen separate fresh
+heap workers report 16,388/66,052 fewer OBJ allocation calls and unchanged rounded
+displayed peaks. Independent heap audit verifies all 80 task/sanity artifacts and
+retains recorder/analysis temporary-count discrepancies, exit-live labels and missing
+historical calibration source/build evidence. Native qualification remains open.

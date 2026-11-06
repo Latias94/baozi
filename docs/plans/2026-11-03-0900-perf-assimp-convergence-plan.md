@@ -801,3 +801,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   native time, heap, main merge or release acceptance follows. Separately qualify
   document-local OBJ/MTL token reuse before a cumulative ordinary campaign. Release
   HOLD and every original Windows/GNU convergence target remain active.
+- The [document token checkpoint](../reviews/2026-11-06-obj-document-token-scratch.md)
+  qualifies source `7c1a7d9` with all seven integrated gates and 972 stable inputs.
+  One token owner per immutable OBJ/MTL document replaces per-line ownership; actual
+  retained capacity stays charged. Independently reviewed Ir falls 4.870%/6.126% in
+  the two OBJ tasks, with four smaller increases and identical observations/work.
+  Independently audited heap collection observes 16,388/66,052 fewer allocation calls
+  and unchanged displayed rounded peaks. Preserve temporary-count discrepancies,
+  exit-live labels, unfavorable heap ratios, profiler warnings, binary growth and
+  missing historical calibration source/build attestation. Native qualification
+  remains open. The reviewed [glTF owner-run plan](2026-11-06-1030-gltf-owner-source-runs-plan.md)
+  replaces global full-row relation ordering and repeated authoring identity searches;
+  its isolated source work grants no performance acceptance. All builds use the
+  current repository target; release HOLD and original convergence gates remain.
