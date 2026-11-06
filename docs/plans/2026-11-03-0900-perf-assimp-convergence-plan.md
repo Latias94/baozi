@@ -850,3 +850,13 @@ negative case only for a genuinely new boundary, not for incidental private layo
   bounded deletion while the larger finite invocation/backing/terminal interface
   receives concrete design review. No numeric algorithm or benchmark boundary is
   changed, and every original convergence target remains active.
+- The [owned finite invocation plan](2026-11-06-1240-owned-finite-invocation-plan.md)
+  replaces the old external-backing-lifetime sketch with two concrete owned roots
+  and shared short numeric/storage views. Independent source design and bounded
+  amendment review close the three actual terminal/error P1 omissions and the
+  disjoint-loan P2 at the plan-contract level. The dynamic-first cut includes all
+  three whole-Ledger transfers, the sibling pre-freeze classifier and real fail-closed
+  state retention; the finite cut includes every Start/Body error carrier and actual
+  Core/postprocess ownership. Neither cut is implemented or compiler-qualified.
+  The current producer-result slice remains separate; no finite allocation, layout,
+  performance, main integration or release claim follows from design GO.
