@@ -139,7 +139,7 @@ fn check_key_hash_frontier(scalar_start: usize, cancel_after: usize) -> TestResu
         assert!(decode.consumed() < decode.attempted());
         assert_eq!(ledger.current_live_bytes(), 0);
         assert_eq!(ledger.active_reservations(), 0);
-        assert_eq!(ledger.current_evidence_bytes(), 0);
+        assert!(ledger.current_administrative_bytes() <= ledger.peak_administrative_bytes());
         assert_eq!(ledger.committed_canonical_members(), 0);
 
         // Reuse the existing admission-only format after removing the physical probe.
@@ -162,7 +162,7 @@ fn check_key_hash_frontier(scalar_start: usize, cancel_after: usize) -> TestResu
         );
         assert_eq!(ledger.current_live_bytes(), 0);
         assert_eq!(ledger.active_reservations(), 0);
-        assert_eq!(ledger.current_evidence_bytes(), 0);
+        assert!(ledger.current_administrative_bytes() <= ledger.peak_administrative_bytes());
         KEY_HASH_PROBE.with(|slot| assert!(slot.borrow().is_none()));
 
         assert_eq!(

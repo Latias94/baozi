@@ -1,3 +1,4 @@
+use super::storage::{SharedStorage, WeakStorage};
 use super::{
     AttributionBatchCreateError, CanonicalOutput, DestinationKind, DestinationState,
     DimensionEntry, LedgerCause, LedgerState, OutcomeEvidenceDestination, OutputCommitment,
@@ -110,9 +111,9 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    pub(super) owner: Option<Arc<Mutex<LedgerState<P, D>>>>,
+    pub(super) owner: Option<SharedStorage<P, D>>,
     pub(super) retained_output: bool,
-    retained_output_owner: Option<Weak<Mutex<LedgerState<P, D>>>>,
+    retained_output_owner: Option<WeakStorage<P, D>>,
     pub(super) phase: P,
     pub(super) phase_position: usize,
     pub(super) dimension: D,
@@ -129,7 +130,7 @@ where
     D: Copy + Ord,
 {
     pub(super) fn new(
-        owner: Arc<Mutex<LedgerState<P, D>>>,
+        owner: Arc<Mutex<Option<LedgerState<P, D>>>>,
         phase: P,
         phase_position: usize,
         dimension: D,
@@ -150,7 +151,7 @@ where
         }
     }
 
-    pub(super) fn is_owned_by(&self, owner: &Arc<Mutex<LedgerState<P, D>>>) -> bool {
+    pub(super) fn is_owned_by(&self, owner: &Arc<Mutex<Option<LedgerState<P, D>>>>) -> bool {
         self.owner
             .as_ref()
             .is_some_and(|candidate| Arc::ptr_eq(candidate, owner))
@@ -193,7 +194,7 @@ where
         self.active = false;
     }
 
-    pub(super) fn detach_owner(&mut self, expected: &Arc<Mutex<LedgerState<P, D>>>) {
+    pub(super) fn detach_owner(&mut self, expected: &Arc<Mutex<Option<LedgerState<P, D>>>>) {
         let Some(owner) = self.owner.take() else {
             return;
         };
@@ -455,6 +456,26 @@ where
     }
 }
 
+pub(super) enum AttributionBatchOwner<P, D> {
+    Empty(super::storage::LedgerIdentity),
+    Shared(super::storage::SharedStorage<P, D>),
+}
+
+impl<P, D> From<super::storage::SharedStorage<P, D>> for AttributionBatchOwner<P, D> {
+    fn from(owner: super::storage::SharedStorage<P, D>) -> Self {
+        Self::Shared(owner)
+    }
+}
+
+impl<P, D> AttributionBatchOwner<P, D> {
+    fn shared(&self) -> Option<&super::storage::SharedStorage<P, D>> {
+        match self {
+            Self::Empty(_) => None,
+            Self::Shared(owner) => Some(owner),
+        }
+    }
+}
+
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
@@ -471,7 +492,7 @@ where
     pub(super) capacity_cover: Option<StorageCoveringReservation<O, P, D>>,
     pub(super) attribution_limit: usize,
     pub(super) commitment_limit: usize,
-    pub(super) owner: Arc<Mutex<LedgerState<P, D>>>,
+    pub(super) owner: AttributionBatchOwner<P, D>,
 }
 
 /// One destination-qualified attribution batch after its shared ledger handles are consumed.
@@ -634,9 +655,12 @@ where
         let Some(cover) = self.capacity_cover.as_ref() else {
             return Err(token);
         };
+        let Some(owner) = self.owner.shared() else {
+            return Err(token);
+        };
         if !self.has_attribution_slot()
-            || !cover.core.is_owned_by(&self.owner)
-            || !token.core.is_owned_by(&self.owner)
+            || !cover.core.is_owned_by(owner)
+            || !token.core.is_owned_by(owner)
         {
             return Err(token);
         }
@@ -751,16 +775,28 @@ where
             .map_or(0, |cover| cover.core.bytes)
     }
 
-    pub(super) fn validate_owner(&self, owner: &Arc<Mutex<LedgerState<P, D>>>) -> bool {
-        Arc::ptr_eq(&self.owner, owner)
-            && self
-                .attributions
-                .iter()
-                .all(|token| token.core.active && token.core.is_owned_by(owner))
-            && self
-                .capacity_cover
-                .as_ref()
-                .is_none_or(|cover| cover.core.active && cover.core.is_owned_by(owner))
+    pub(super) fn validate_selected_owner(&self, ledger: &super::Ledger<O, P, D>) -> bool {
+        match &self.owner {
+            AttributionBatchOwner::Empty(identity) => {
+                *identity == ledger.identity
+                    && self.attributions.capacity() == 0
+                    && self.commitments.capacity() == 0
+                    && self.capacity_cover.is_none()
+                    && self.attribution_limit == 0
+                    && self.commitment_limit == 0
+            }
+            AttributionBatchOwner::Shared(owner) => {
+                ledger.state.owns(owner)
+                    && self
+                        .attributions
+                        .iter()
+                        .all(|token| token.core.active && token.core.is_owned_by(owner))
+                    && self
+                        .capacity_cover
+                        .as_ref()
+                        .is_none_or(|cover| cover.core.active && cover.core.is_owned_by(owner))
+            }
+        }
     }
 
     pub(super) fn is_empty_storage_shell(&self) -> bool {
@@ -871,7 +907,11 @@ where
         drop(std::mem::take(&mut self.commitments));
         if let Some(mut capacity_cover) = self.capacity_cover.take() {
             {
-                let mut state = lock(&self.owner);
+                let mut state = lock(
+                    self.owner
+                        .shared()
+                        .expect("a capacity cover retains its actual shared owner"),
+                );
                 capacity_cover.core.release_bound_locked(&mut state);
             }
             drop(capacity_cover);
@@ -880,9 +920,16 @@ where
 
     pub(super) fn into_detached(
         mut self,
-        expected: &Arc<Mutex<LedgerState<P, D>>>,
+        expected: &Arc<Mutex<Option<LedgerState<P, D>>>>,
     ) -> DetachedAttributionBatch<O, P, D, Destination> {
-        debug_assert!(Arc::ptr_eq(&self.owner, expected));
+        debug_assert!(match &self.owner {
+            AttributionBatchOwner::Empty(_) => {
+                self.attributions.capacity() == 0
+                    && self.commitments.capacity() == 0
+                    && self.capacity_cover.is_none()
+            }
+            AttributionBatchOwner::Shared(owner) => Arc::ptr_eq(owner, expected),
+        });
         for attribution in &mut self.attributions {
             attribution.core.detach_owner(expected);
         }

@@ -290,13 +290,13 @@ fn semantic_progress_capacity_obeys_the_evidence_limit_and_latches() {
         .expect_err("the evidence limit failure remains terminal");
     let (cause, snapshot) = failure.into_parts();
     assert_eq!(cause, baozi_operation::PublicationCause::Control(error));
-    assert_eq!(snapshot.current_evidence_bytes(), 0);
+    assert_eq!(snapshot.current_administrative_bytes(), 0);
 }
 
 #[test]
-fn semantic_progress_capacity_contributes_to_evidence_peak_then_releases() {
+fn semantic_progress_capacity_contributes_to_evidence_peak_and_final_capture() {
     let limits = LedgerLimits::new(0, []).expect("empty control-only policy");
-    let frozen_evidence_bytes = limits.frozen_evidence_bytes();
+    let frozen_evidence_bytes = limits.frozen_administrative_bytes();
     let mut coordinator = Coordinator::try_new(OperationControl::default(), limits, &[])
         .expect("empty ledger phase catalog is complete for control-only operations");
 
@@ -310,13 +310,16 @@ fn semantic_progress_capacity_contributes_to_evidence_peak_then_releases() {
     let interim = coordinator
         .try_ledger_snapshot()
         .expect("bounded interim evidence");
-    assert!(interim.current_evidence_bytes() > frozen_evidence_bytes);
-    assert!(interim.peak_evidence_bytes() >= interim.current_evidence_bytes());
+    assert!(interim.current_administrative_bytes() > frozen_evidence_bytes);
+    assert!(interim.peak_administrative_bytes() >= interim.current_administrative_bytes());
 
     let final_snapshot = coordinator.finish().expect("clean final evidence");
-    assert_eq!(final_snapshot.current_evidence_bytes(), 0);
+    assert_eq!(
+        final_snapshot.current_administrative_bytes(),
+        interim.current_administrative_bytes()
+    );
     assert!(
-        final_snapshot.peak_evidence_bytes() >= interim.current_evidence_bytes(),
+        final_snapshot.peak_administrative_bytes() >= interim.current_administrative_bytes(),
         "the final high-water mark must retain progress evidence capacity"
     );
 }

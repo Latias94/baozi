@@ -652,7 +652,11 @@ fn admission_first_direct_fallback_ends_in_finalization_containment() {
         .unwrap_or_else(|_| panic!("poison thread must be contained"));
     let before_prepare = account.snapshot();
     let first_evidence = before_prepare.first_poison_evidence();
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let active_before = ledger.active_reservations();
     let live_before = ledger.current_live_bytes();
     assert!(active_before > 0);
@@ -935,7 +939,11 @@ fn eligibility_first_capability_completes_preparation_after_later_account_poison
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let eligibility_entered = StdArc::new(Barrier::new(2));
     let eligibility_resume = StdArc::new(Barrier::new(2));
     let worker_entered = StdArc::clone(&eligibility_entered);
@@ -989,7 +997,11 @@ fn poisoned_joint_commit_account_cannot_be_substituted_with_healthy_foreign_acco
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("poison-first publication must open"));
@@ -1106,7 +1118,11 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("primary eligibility publication must open"));
@@ -1341,7 +1357,7 @@ fn side_owner_escape_keeps_physical_and_operation_attribution_fail_closed() {
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let account = assembly
         .fields
         .account
@@ -1477,7 +1493,7 @@ fn allocation_failure_rolls_back_block_attribution_before_build() {
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
 

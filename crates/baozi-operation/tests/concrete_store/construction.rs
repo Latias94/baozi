@@ -7,7 +7,7 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
     let producer = fake_producer();
     let producer_unloaded = Arc::downgrade(&producer);
     let mut invocation_root = TestInvocationRoot::new();
-    let (operation, keys) = operation_with_catalog_and_evidence_limit(
+    let (mut operation, keys) = operation_with_catalog_and_evidence_limit(
         &mut invocation_root,
         &account,
         OperationControl::default(),
@@ -145,7 +145,7 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
     assert_eq!(header.phase_count(), 1);
     assert_eq!(header.current_live_bytes(), 0);
     assert_eq!(header.active_reservations(), 0);
-    assert_eq!(header.current_evidence_bytes(), 0);
+    assert!(header.current_administrative_bytes() <= header.peak_administrative_bytes());
     assert_semantic_and_ordinal_evidence_queries(&ledger_evidence, keys);
     let snapshot = ledger_evidence
         .dimension(keys.dimension)

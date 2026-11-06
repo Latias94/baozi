@@ -4,6 +4,15 @@ use super::*;
 
 struct FixtureFormat;
 
+pub(crate) fn observation_live_bytes<'op>(
+    exec: &ParseRoot<'_, 'op, '_>,
+    observation: &baozi_operation::__retained_store_integration::authority::StoreStorageObservation<
+        'op,
+    >,
+) -> u64 {
+    exec.store.observation_live_bytes(observation)
+}
+
 pub(crate) fn storage_observation<'op>(
     exec: &ParseRoot<'_, 'op, '_>,
     dimension: ImportDimension,

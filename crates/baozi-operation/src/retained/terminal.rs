@@ -52,24 +52,6 @@ pub(super) struct TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, Evi
     account: Option<PhysicalStorageAccount>,
 }
 
-struct ExactPreDiscardSuccess<P, D, F, CanonicalBlock, EvidenceBlock> {
-    fallback: DetachedRetainedPart<F>,
-    evidence: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
-    canonical_table: RetainedTableAllocation<CanonicalBlock>,
-    evidence_table: RetainedTableAllocation<EvidenceBlock>,
-    account: PhysicalStorageAccount,
-    canonical_root: RetainedSlotIdentity,
-    evidence_root: RetainedSlotIdentity,
-}
-
-type TerminalPhysicalParts<P, D, F, CanonicalBlock, EvidenceBlock> = (
-    DetachedRetainedPart<F>,
-    DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
-    Option<RetainedTableAllocation<CanonicalBlock>>,
-    Option<RetainedTableAllocation<EvidenceBlock>>,
-    Option<PhysicalStorageAccount>,
-);
-
 impl<P, D, F, CanonicalBlock, EvidenceBlock>
     TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>
 {
@@ -86,20 +68,6 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
             canonical_table,
             evidence_table,
             account,
-        }
-    }
-
-    fn account(&self) -> &PhysicalStorageAccount {
-        match self.account.as_ref() {
-            Some(account) => account,
-            None => unreachable_final_owner_state(),
-        }
-    }
-
-    fn evidence(&self) -> &DetachedRetainedPart<TerminalLedgerEvidence<P, D>> {
-        match self.evidence.as_ref() {
-            Some(evidence) => evidence,
-            None => unreachable_final_owner_state(),
         }
     }
 
@@ -146,22 +114,6 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
                     .as_ref()
                     .and_then(DetachedRetainedPart::allocation_anchor)
             })
-    }
-
-    fn has_exact_fallback_shape(&self) -> bool {
-        let (Some(fallback), Some(evidence)) = (self.fallback.as_ref(), self.evidence.as_ref())
-        else {
-            return false;
-        };
-        self.canonical_table.is_none()
-            && self.evidence_table.is_none()
-            && fallback.has_exact_owner()
-            && evidence.has_exact_owner()
-            && fallback.account().is_same_account(evidence.account())
-            && self
-                .account
-                .as_ref()
-                .is_none_or(|account| account.is_same_account(evidence.account()))
     }
 
     fn record_forgotten_physical_edges(
@@ -244,132 +196,6 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
         );
         self.contain_after_recorded(reason)
     }
-
-    pub(super) fn into_parts(
-        mut self,
-    ) -> TerminalPhysicalParts<P, D, F, CanonicalBlock, EvidenceBlock> {
-        let fallback = match self.fallback.take() {
-            Some(fallback) => fallback,
-            None => unreachable_final_owner_state(),
-        };
-        let evidence = match self.evidence.take() {
-            Some(evidence) => evidence,
-            None => unreachable_final_owner_state(),
-        };
-        (
-            fallback,
-            evidence,
-            self.canonical_table.take(),
-            self.evidence_table.take(),
-            self.account.take(),
-        )
-    }
-
-    fn qualifies_pre_discard_success(&self) -> bool {
-        let (
-            Some(fallback),
-            Some(evidence),
-            Some(canonical),
-            Some(outcome_evidence),
-            Some(account),
-        ) = (
-            self.fallback.as_ref(),
-            self.evidence.as_ref(),
-            self.canonical_table.as_ref(),
-            self.evidence_table.as_ref(),
-            self.account.as_ref(),
-        )
-        else {
-            return false;
-        };
-        fallback.has_exact_owner()
-            && evidence.has_exact_owner()
-            && fallback.account().is_same_account(account)
-            && evidence.account().is_same_account(account)
-            && canonical.belongs_to(account)
-            && outcome_evidence.belongs_to(account)
-    }
-
-    pub(super) fn qualifies_pre_cleanup_rich(&self, expect_canonical: bool) -> bool {
-        let (Some(fallback), Some(evidence), Some(evidence_table), Some(account)) = (
-            self.fallback.as_ref(),
-            self.evidence.as_ref(),
-            self.evidence_table.as_ref(),
-            self.account.as_ref(),
-        ) else {
-            return false;
-        };
-        self.canonical_table.is_some() == expect_canonical
-            && fallback.has_exact_owner()
-            && evidence.has_exact_owner()
-            && fallback.account().is_same_account(account)
-            && evidence.account().is_same_account(account)
-            && evidence_table.belongs_to(account)
-            && self
-                .canonical_table
-                .as_ref()
-                .is_none_or(|table| table.belongs_to(account))
-    }
-
-    pub(super) fn qualifies_pre_cleanup_fallback(
-        &self,
-        expect_canonical: bool,
-        expect_evidence: bool,
-    ) -> bool {
-        let (Some(fallback), Some(evidence)) = (self.fallback.as_ref(), self.evidence.as_ref())
-        else {
-            return false;
-        };
-        let table_expected = expect_canonical || expect_evidence;
-        self.canonical_table.is_some() == expect_canonical
-            && self.evidence_table.is_some() == expect_evidence
-            && self.account.is_some() == table_expected
-            && fallback.has_exact_owner()
-            && evidence.has_exact_owner()
-            && fallback.account().is_same_account(evidence.account())
-            && self.account.as_ref().is_none_or(|account| {
-                fallback.account().is_same_account(account)
-                    && self
-                        .canonical_table
-                        .as_ref()
-                        .is_none_or(|table| table.belongs_to(account))
-                    && self
-                        .evidence_table
-                        .as_ref()
-                        .is_none_or(|table| table.belongs_to(account))
-            })
-    }
-
-    fn finish_pre_discard_success(
-        mut self,
-        canonical_root: RetainedSlotIdentity,
-        evidence_root: RetainedSlotIdentity,
-    ) -> ExactPreDiscardSuccess<P, D, F, CanonicalBlock, EvidenceBlock> {
-        ExactPreDiscardSuccess {
-            fallback: self
-                .fallback
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state()),
-            evidence: self
-                .evidence
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state()),
-            canonical_table: self
-                .canonical_table
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state()),
-            evidence_table: self
-                .evidence_table
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state()),
-            account: self
-                .account
-                .take()
-                .unwrap_or_else(|| unreachable_final_owner_state()),
-            canonical_root,
-            evidence_root,
-        }
-    }
 }
 
 impl<P, D, F, CanonicalBlock, EvidenceBlock> Drop
@@ -385,95 +211,118 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock> Drop
     }
 }
 
-impl<P, D, F, CanonicalBlock, EvidenceBlock>
-    ExactPreDiscardSuccess<P, D, F, CanonicalBlock, EvidenceBlock>
-{
-    fn account(&self) -> &PhysicalStorageAccount {
-        &self.account
-    }
-
-    fn into_terminal(
-        self,
-    ) -> TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
-        TerminalPhysicalOwnershipManifest::new(
-            self.fallback,
-            self.evidence,
-            Some(self.canonical_table),
-            Some(self.evidence_table),
-            Some(self.account),
-        )
-    }
-}
-
-pub(super) struct TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+pub(super) struct TerminalSuccessFreezeGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
-    physical: Option<ExactPreDiscardSuccess<P, D, F, CanonicalBlock, EvidenceBlock>>,
+    proof: Option<crate::ledger::TypedFreezeProof<'inv, O, P, PP, U, D>>,
+    physical: Option<BorrowedExactPreDiscardSuccess<'inv, P, D, F, CanonicalBlock, EvidenceBlock>>,
 }
 
-pub(super) enum EvidenceOnlySuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
+pub(super) enum EvidenceOnlySuccessPrimaryTransition<
+    'inv,
+    O,
+    P,
+    PP,
+    U,
+    D,
+    F,
+    CanonicalBlock,
+    EvidenceBlock,
+> where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    Success(TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+    Success(
+        TerminalEvidenceOnlySuccessFreezeGuard<
+            'inv,
+            O,
+            P,
+            PP,
+            U,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
+    ),
     Fallback(
-        TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        TerminalFallbackGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         PreparationFailureCode,
     ),
 }
 
-struct QualifiedSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+struct QualifiedSuccessGraph<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    state: Option<QualifiedSuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "the state preserves one invocation loan with its exact ledger and payload brands"
+    )]
+    state: Option<QualifiedSuccessState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>>,
 }
 
-struct QualifiedSuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>
+struct QualifiedSuccessState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
-    proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+    physical: BorrowedQualifiedSuccessPhysical<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
+    proof: QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>,
 }
 
-struct QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock> {
-    fallback: DetachedRetainedPart<F>,
-    evidence: FreezeReadyDetachedTerminalEvidence<P, D>,
-    canonical_table: RetainedTableAllocation<CanonicalBlock>,
-    evidence_table: RetainedTableAllocation<EvidenceBlock>,
-    account: PhysicalStorageAccount,
+struct BorrowedQualifiedSuccessPhysical<'inv, P, D, F, CanonicalBlock, EvidenceBlock> {
+    fallback: TerminalPartLoan<'inv, F>,
+    evidence: BorrowedFreezeReadyDetachedTerminalEvidence<'inv, P, D>,
+    canonical_table: TerminalTableLoan<'inv, CanonicalBlock>,
+    evidence_table: TerminalTableLoan<'inv, EvidenceBlock>,
+    account: TerminalAccountLoan<'inv>,
     canonical_root: RetainedSlotIdentity,
     evidence_root: RetainedSlotIdentity,
 }
 
-struct PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+struct PublicationReadySuccessGraph<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    state: Option<PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "the state preserves one invocation loan with its exact ledger and payload brands"
+    )]
+    state: Option<
+        PublicationReadySuccessState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    >,
 }
 
-struct PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>
+struct PublicationReadySuccessState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
-    proof: FreezeReadyTypedProof<O, P, D>,
+    physical: BorrowedQualifiedSuccessPhysical<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
+    proof: FreezeReadyTypedProof<'inv, O, P, PP, U, D>,
     set_id: RetainedSetId,
 }
 
@@ -488,29 +337,34 @@ where
     set_id: RetainedSetId,
 }
 
-struct VerifiedSuccessPhysicalDiscard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+struct VerifiedSuccessPhysicalDiscard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    state: VerifiedSuccessPhysicalDiscardState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+    state:
+        VerifiedSuccessPhysicalDiscardState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
 }
 
 #[allow(
     clippy::large_enum_variant,
     reason = "the pending variant is the single linear owner; boxing would add allocation and split the ownership proof"
 )]
-enum VerifiedSuccessPhysicalDiscardState<O, P, D, F, CanonicalBlock, EvidenceBlock>
+enum VerifiedSuccessPhysicalDiscardState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     Pending {
         acknowledgement: SuccessDiscardAcknowledgement,
-        physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
-        proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+        physical: BorrowedQualifiedSuccessPhysical<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
+        proof: QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>,
         set_id: RetainedSetId,
         discarded_account: PhysicalStorageAccount,
     },
@@ -523,8 +377,8 @@ enum SuccessDiscardAcknowledgement {
     InProgress,
 }
 
-pub(super) struct FreezeReadyDetachedTerminalEvidence<P, D> {
-    owner: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
+pub(super) struct BorrowedFreezeReadyDetachedTerminalEvidence<'inv, P, D> {
+    owner: TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>,
     qualification: TerminalEvidenceFreezeQualification,
 }
 
@@ -577,16 +431,18 @@ struct EligibilityReadySuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock> {
     fallback_type: PhantomData<fn() -> F>,
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalSuccessFreezeGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
     fn new(
-        proof: crate::ledger::TypedFreezeProof<O, P, D>,
-        physical: ExactPreDiscardSuccess<P, D, F, CanonicalBlock, EvidenceBlock>,
+        proof: crate::ledger::TypedFreezeProof<'inv, O, P, PP, U, D>,
+        physical: BorrowedExactPreDiscardSuccess<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
     ) -> Self {
         Self {
             proof: Some(proof),
@@ -626,7 +482,7 @@ where
                 );
             }
         };
-        let ExactPreDiscardSuccess {
+        let BorrowedExactPreDiscardSuccess {
             fallback,
             evidence,
             canonical_table,
@@ -640,11 +496,13 @@ where
             .unwrap_or_else(|| unreachable_final_owner_state());
 
         let qualified_evidence =
-            match QualifiedDetachedTerminalEvidence::try_from_success_proof(evidence, &proof) {
-                DetachedTerminalEvidenceQualification::Qualified(evidence) => evidence,
-                DetachedTerminalEvidenceQualification::Rejected(evidence)
-                | DetachedTerminalEvidenceQualification::Panicked(evidence) => {
-                    let physical = ExactPreDiscardSuccess {
+            match BorrowedQualifiedDetachedTerminalEvidence::try_from_success_proof(
+                evidence, &proof,
+            ) {
+                BorrowedDetachedTerminalEvidenceQualification::Qualified(evidence) => evidence,
+                BorrowedDetachedTerminalEvidenceQualification::Rejected(evidence)
+                | BorrowedDetachedTerminalEvidenceQualification::Panicked(evidence) => {
+                    let physical = BorrowedExactPreDiscardSuccess {
                         fallback,
                         evidence,
                         canonical_table,
@@ -663,7 +521,7 @@ where
 
         let qualified = QualifiedSuccessGraph {
             state: Some(QualifiedSuccessState {
-                physical: QualifiedSuccessPhysical {
+                physical: BorrowedQualifiedSuccessPhysical {
                     fallback,
                     evidence: qualified_evidence.into_freeze_ready(),
                     canonical_table,
@@ -681,14 +539,18 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    QualifiedSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    QualifiedSuccessGraph<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
-    fn take_state(&mut self) -> QualifiedSuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+    fn take_state(
+        &mut self,
+    ) -> QualifiedSuccessState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         self.state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state())
@@ -767,12 +629,14 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for QualifiedSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for QualifiedSuccessGraph<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(QualifiedSuccessState { physical, proof }) = self.state.take() {
@@ -784,12 +648,13 @@ where
     }
 }
 
-impl<P, D, F, CanonicalBlock, EvidenceBlock>
-    QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+    BorrowedQualifiedSuccessPhysical<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
 {
     fn into_terminal(
         self,
-    ) -> TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+    {
         let Self {
             fallback,
             evidence,
@@ -799,7 +664,7 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
             canonical_root: _,
             evidence_root: _,
         } = self;
-        TerminalPhysicalOwnershipManifest::new(
+        BorrowedTerminalPhysicalOwnershipManifest::new(
             fallback,
             evidence.into_unfrozen_owner(),
             Some(canonical_table),
@@ -809,16 +674,18 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    PublicationReadySuccessGraph<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
     fn take_state(
         &mut self,
-    ) -> PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> PublicationReadySuccessState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         self.state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state())
@@ -845,6 +712,7 @@ where
                 return Err(cause);
             }
         };
+        let physical = physical.into_owned();
         let state = DetachedReadySuccessState {
             physical,
             proof,
@@ -935,12 +803,14 @@ fn contain_detached_ready_success_state<O, P, D, F, CanonicalBlock, EvidenceBloc
     proof.retain_fail_closed();
 }
 
-fn contain_publication_ready_success_state<O, P, D, F, CanonicalBlock, EvidenceBlock>(
-    state: PublicationReadySuccessState<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+fn contain_publication_ready_success_state<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>(
+    state: PublicationReadySuccessState<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
 ) where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     let PublicationReadySuccessState {
         physical,
@@ -953,12 +823,14 @@ fn contain_publication_ready_success_state<O, P, D, F, CanonicalBlock, EvidenceB
     proof.retain_fail_closed();
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for PublicationReadySuccessGraph<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
@@ -967,16 +839,18 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    VerifiedSuccessPhysicalDiscard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    VerifiedSuccessPhysicalDiscard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn new(
-        physical: QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>,
-        proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+        physical: BorrowedQualifiedSuccessPhysical<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
+        proof: QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>,
         set_id: RetainedSetId,
         discarded_account: PhysicalStorageAccount,
     ) -> Self {
@@ -993,7 +867,7 @@ where
 
     fn acknowledge(
         mut self,
-    ) -> PublicationReadySuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> PublicationReadySuccessGraph<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         let freeze_ready = match &mut self.state {
             VerifiedSuccessPhysicalDiscardState::Pending {
                 acknowledgement,
@@ -1033,12 +907,14 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for VerifiedSuccessPhysicalDiscard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for VerifiedSuccessPhysicalDiscard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         let state = std::mem::replace(
@@ -1247,12 +1123,14 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalSuccessFreezeGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(physical) = self.physical.take() {
@@ -1266,85 +1144,110 @@ where
     }
 }
 
-pub(super) struct TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
+pub(super) struct TerminalEvidenceOnlySuccessFreezeGuard<
+    'inv,
+    O,
+    P,
+    PP,
+    U,
+    D,
+    F,
+    CanonicalBlock,
+    EvidenceBlock,
+> where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
-    physical: Option<TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>>,
+    proof: Option<crate::ledger::TypedFreezeProof<'inv, O, P, PP, U, D>>,
+    physical: Option<
+        BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
+    >,
 }
 
-struct QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
-    fallback: DetachedRetainedPart<F>,
-    evidence: FreezeReadyDetachedTerminalEvidence<P, D>,
+struct BorrowedQualifiedEvidenceOnlySuccessPhysical<'inv, P, D, F> {
+    fallback: TerminalPartLoan<'inv, F>,
+    evidence: BorrowedFreezeReadyDetachedTerminalEvidence<'inv, P, D>,
 }
 
-struct QualifiedEvidenceOnlySuccessState<O, P, D, F>
+struct QualifiedEvidenceOnlySuccessState<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    physical: QualifiedEvidenceOnlySuccessPhysical<P, D, F>,
-    proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+    physical: BorrowedQualifiedEvidenceOnlySuccessPhysical<'inv, P, D, F>,
+    proof: QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>,
 }
 
-struct QualifiedEvidenceOnlySuccessGraph<O, P, D, F>
+struct QualifiedEvidenceOnlySuccessGraph<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    state: Option<QualifiedEvidenceOnlySuccessState<O, P, D, F>>,
+    state: Option<QualifiedEvidenceOnlySuccessState<'inv, O, P, PP, U, D, F>>,
 }
 
 #[allow(
     clippy::large_enum_variant,
     reason = "the bounded discard proof stays inline so terminal acknowledgement cannot allocate"
 )]
-enum VerifiedEvidenceOnlySuccessDiscardState<O, P, D, F>
+enum VerifiedEvidenceOnlySuccessDiscardState<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     Pending {
         acknowledgement: SuccessDiscardAcknowledgement,
-        physical: QualifiedEvidenceOnlySuccessPhysical<P, D, F>,
-        proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+        physical: BorrowedQualifiedEvidenceOnlySuccessPhysical<'inv, P, D, F>,
+        proof: QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>,
         discarded_account: PhysicalStorageAccount,
     },
     Acknowledged,
 }
 
-struct VerifiedEvidenceOnlySuccessDiscard<O, P, D, F>
+struct VerifiedEvidenceOnlySuccessDiscard<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    state: VerifiedEvidenceOnlySuccessDiscardState<O, P, D, F>,
+    state: VerifiedEvidenceOnlySuccessDiscardState<'inv, O, P, PP, U, D, F>,
 }
 
-struct FreezeReadyEvidenceOnlySuccessState<O, P, D, F>
+struct FreezeReadyEvidenceOnlySuccessState<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    physical: QualifiedEvidenceOnlySuccessPhysical<P, D, F>,
-    proof: FreezeReadyTypedProof<O, P, D>,
+    physical: BorrowedQualifiedEvidenceOnlySuccessPhysical<'inv, P, D, F>,
+    proof: FreezeReadyTypedProof<'inv, O, P, PP, U, D>,
 }
 
-struct FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F>
+struct FreezeReadyEvidenceOnlySuccessGraph<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    state: Option<FreezeReadyEvidenceOnlySuccessState<O, P, D, F>>,
+    state: Option<FreezeReadyEvidenceOnlySuccessState<'inv, O, P, PP, U, D, F>>,
 }
 
 struct DetachedReadyEvidenceOnlySuccessState<O, P, D, F>
@@ -1373,16 +1276,25 @@ where
     state: Option<EligibilityReadyEvidenceOnlySuccessJointCommit<O, P, D>>,
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalEvidenceOnlySuccessFreezeGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
     fn new(
-        proof: crate::ledger::TypedFreezeProof<O, P, D>,
-        physical: TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>,
+        proof: crate::ledger::TypedFreezeProof<'inv, O, P, PP, U, D>,
+        physical: BorrowedTerminalPhysicalOwnershipManifest<
+            'inv,
+            P,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
     ) -> Self {
         Self {
             proof: Some(proof),
@@ -1438,7 +1350,7 @@ where
             .unwrap_or_else(|| unreachable_final_owner_state())
             .into_parts();
         if canonical_table.is_some() || evidence_table.is_some() || account.is_some() {
-            let physical = TerminalPhysicalOwnershipManifest::new(
+            let physical = BorrowedTerminalPhysicalOwnershipManifest::new(
                 fallback,
                 evidence,
                 canonical_table,
@@ -1449,25 +1361,26 @@ where
             proof.retain_fail_closed();
             return Err(cause);
         }
-        let evidence =
-            match QualifiedDetachedTerminalEvidence::try_from_success_proof(evidence, &proof) {
-                DetachedTerminalEvidenceQualification::Qualified(evidence) => {
-                    evidence.into_freeze_ready()
-                }
-                DetachedTerminalEvidenceQualification::Rejected(evidence)
-                | DetachedTerminalEvidenceQualification::Panicked(evidence) => {
-                    let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), ()>::new(
-                        fallback, evidence, None, None, None,
-                    );
-                    let cause = physical
-                        .contain_new_fault(AccountPoisonReason::TerminalEvidenceFreezeUnverified);
-                    proof.retain_fail_closed();
-                    return Err(cause);
-                }
-            };
+        let evidence = match BorrowedQualifiedDetachedTerminalEvidence::try_from_success_proof(
+            evidence, &proof,
+        ) {
+            BorrowedDetachedTerminalEvidenceQualification::Qualified(evidence) => {
+                evidence.into_freeze_ready()
+            }
+            BorrowedDetachedTerminalEvidenceQualification::Rejected(evidence)
+            | BorrowedDetachedTerminalEvidenceQualification::Panicked(evidence) => {
+                let physical = BorrowedTerminalPhysicalOwnershipManifest::<P, D, F, (), ()>::new(
+                    fallback, evidence, None, None, None,
+                );
+                let cause = physical
+                    .contain_new_fault(AccountPoisonReason::TerminalEvidenceFreezeUnverified);
+                proof.retain_fail_closed();
+                return Err(cause);
+            }
+        };
         QualifiedEvidenceOnlySuccessGraph {
             state: Some(QualifiedEvidenceOnlySuccessState {
-                physical: QualifiedEvidenceOnlySuccessPhysical { fallback, evidence },
+                physical: BorrowedQualifiedEvidenceOnlySuccessPhysical { fallback, evidence },
                 proof,
             }),
         }
@@ -1475,12 +1388,24 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalEvidenceOnlySuccessFreezeGuard<
+        'inv,
+        O,
+        P,
+        PP,
+        U,
+        D,
+        F,
+        CanonicalBlock,
+        EvidenceBlock,
+    >
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(physical) = self.physical.take() {
@@ -1492,9 +1417,9 @@ where
     }
 }
 
-impl<P, D, F> QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
-    fn into_terminal(self) -> TerminalPhysicalOwnershipManifest<P, D, F, (), ()> {
-        TerminalPhysicalOwnershipManifest::new(
+impl<'inv, P, D, F> BorrowedQualifiedEvidenceOnlySuccessPhysical<'inv, P, D, F> {
+    fn into_terminal(self) -> BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, (), ()> {
+        BorrowedTerminalPhysicalOwnershipManifest::new(
             self.fallback,
             self.evidence.into_unfrozen_owner(),
             None,
@@ -1504,13 +1429,15 @@ impl<P, D, F> QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
     }
 }
 
-impl<O, P, D, F> QualifiedEvidenceOnlySuccessGraph<O, P, D, F>
+impl<'inv, O, P, PP, U, D, F> QualifiedEvidenceOnlySuccessGraph<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
-    fn take_state(&mut self) -> QualifiedEvidenceOnlySuccessState<O, P, D, F> {
+    fn take_state(&mut self) -> QualifiedEvidenceOnlySuccessState<'inv, O, P, PP, U, D, F> {
         self.state
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state())
@@ -1583,11 +1510,13 @@ where
     }
 }
 
-impl<O, P, D, F> Drop for QualifiedEvidenceOnlySuccessGraph<O, P, D, F>
+impl<'inv, O, P, PP, U, D, F> Drop for QualifiedEvidenceOnlySuccessGraph<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
@@ -1600,13 +1529,15 @@ where
     }
 }
 
-impl<O, P, D, F> VerifiedEvidenceOnlySuccessDiscard<O, P, D, F>
+impl<'inv, O, P, PP, U, D, F> VerifiedEvidenceOnlySuccessDiscard<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    fn acknowledge(mut self) -> FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F> {
+    fn acknowledge(mut self) -> FreezeReadyEvidenceOnlySuccessGraph<'inv, O, P, PP, U, D, F> {
         let proof = match &mut self.state {
             VerifiedEvidenceOnlySuccessDiscardState::Pending {
                 acknowledgement,
@@ -1643,11 +1574,13 @@ where
     }
 }
 
-impl<O, P, D, F> Drop for VerifiedEvidenceOnlySuccessDiscard<O, P, D, F>
+impl<'inv, O, P, PP, U, D, F> Drop for VerifiedEvidenceOnlySuccessDiscard<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         let state = std::mem::replace(
@@ -1670,8 +1603,10 @@ where
     }
 }
 
-impl<O, P, D, F> FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F>
+impl<'inv, O, P, PP, U, D, F> FreezeReadyEvidenceOnlySuccessGraph<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey,
@@ -1695,7 +1630,7 @@ where
             }
         };
         let state = DetachedReadyEvidenceOnlySuccessState {
-            physical: state.physical,
+            physical: state.physical.into_owned(),
             proof,
         };
         let mut state =
@@ -1724,11 +1659,13 @@ where
     }
 }
 
-impl<O, P, D, F> Drop for FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F>
+impl<'inv, O, P, PP, U, D, F> Drop for FreezeReadyEvidenceOnlySuccessGraph<'inv, O, P, PP, U, D, F>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
@@ -1844,23 +1781,37 @@ where
     }
 }
 
-struct TerminalPrimaryAttribution<O, P, D>
+struct TerminalPrimaryAttribution<'inv, O, P, PP, U, D>
 where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    ledger: Ledger<O, P, D>,
-    baseline: FallbackBatchBaseline<O, P, D>,
-    batches: PrimaryPublicationBatches<O, P, D>,
-}
-
-impl<O, P, D> TerminalPrimaryAttribution<O, P, D>
-where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug,
 {
+    ledger: TerminalInvocationLoan<'inv, O, P, PP, U, D>,
+    baseline: FallbackBatchBaseline<O, P, D>,
+    batches: PrimaryPublicationBatches<O, P, D>,
+}
+
+impl<'inv, O, P, PP, U, D> TerminalPrimaryAttribution<'inv, O, P, PP, U, D>
+where
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn retain_fail_closed(self) {
+        let Self {
+            ledger,
+            baseline,
+            batches,
+        } = self;
+        ledger.retain_fail_closed();
+        std::mem::forget((baseline, batches));
+    }
+
     fn try_bind(&mut self, publish_canonical: bool) -> Result<(), LedgerCause<D>> {
         self.ledger.try_bind_primary(
             &mut self.baseline,
@@ -1870,7 +1821,10 @@ where
         )
     }
 
-    fn finish(self, publish_canonical: bool) -> crate::ledger::TypedFreezeProof<O, P, D> {
+    fn finish(
+        self,
+        publish_canonical: bool,
+    ) -> crate::ledger::TypedFreezeProof<'inv, O, P, PP, U, D> {
         self.ledger.finish_bound_primary(
             self.baseline,
             self.batches.canonical,
@@ -1879,7 +1833,7 @@ where
         )
     }
 
-    fn into_fallback(self) -> TerminalFallbackAttribution<O, P, D> {
+    fn into_fallback(self) -> TerminalFallbackAttribution<'inv, O, P, PP, U, D> {
         TerminalFallbackAttribution {
             ledger: self.ledger,
             baseline: self.baseline,
@@ -1888,25 +1842,39 @@ where
     }
 }
 
-pub(super) struct TerminalFallbackAttribution<O, P, D>
+pub(super) struct TerminalFallbackAttribution<'inv, O, P, PP, U, D>
 where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    ledger: Ledger<O, P, D>,
-    baseline: FallbackBatchBaseline<O, P, D>,
-    discard: PrimaryPublicationBatches<O, P, D>,
-}
-
-impl<O, P, D> TerminalFallbackAttribution<O, P, D>
-where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
     D: Copy + Ord + fmt::Debug,
 {
+    ledger: TerminalInvocationLoan<'inv, O, P, PP, U, D>,
+    baseline: FallbackBatchBaseline<O, P, D>,
+    discard: PrimaryPublicationBatches<O, P, D>,
+}
+
+impl<'inv, O, P, PP, U, D> TerminalFallbackAttribution<'inv, O, P, PP, U, D>
+where
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn retain_fail_closed(self) {
+        let Self {
+            ledger,
+            baseline,
+            discard,
+        } = self;
+        ledger.retain_fail_closed();
+        std::mem::forget((baseline, discard));
+    }
+
     pub(super) fn new(
-        ledger: Ledger<O, P, D>,
+        ledger: TerminalInvocationLoan<'inv, O, P, PP, U, D>,
         baseline: FallbackBatchBaseline<O, P, D>,
         discard: PrimaryPublicationBatches<O, P, D>,
     ) -> Self {
@@ -1925,7 +1893,7 @@ where
         )
     }
 
-    fn finish(self) -> crate::ledger::TypedFreezeProof<O, P, D> {
+    fn finish(self) -> crate::ledger::TypedFreezeProof<'inv, O, P, PP, U, D> {
         self.baseline.finish_prepared_fallback_proof(
             self.ledger,
             self.discard.canonical,
@@ -1935,38 +1903,43 @@ where
 }
 
 #[must_use = "the selected unqualified terminal graph must be finished or contained"]
-pub(super) enum TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
+pub(super) enum TerminalPreFreezeTransition<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     Success {
-        guard: TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        guard: TerminalPrimaryGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         canonical_root: RetainedSlotIdentity,
         evidence_root: RetainedSlotIdentity,
     },
     Rich {
-        guard: TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        guard: TerminalPrimaryGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         evidence_root: RetainedSlotIdentity,
         cause: PreparationFailureCode,
     },
     Fallback {
-        guard: TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        guard: TerminalFallbackGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         cause: PreparationFailureCode,
     },
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalPreFreezeTransition<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
     fn physical(
         &self,
-    ) -> &TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> &BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+    {
         match self {
             Self::Success { guard, .. } | Self::Rich { guard, .. } => guard.physical(),
             Self::Fallback { guard, .. } => guard
@@ -2089,28 +2062,41 @@ where
     }
 }
 
-pub(super) struct TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+pub(super) struct TerminalPrimaryGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    attribution: Option<TerminalPrimaryAttribution<O, P, D>>,
-    physical: Option<TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>>,
+    attribution: Option<TerminalPrimaryAttribution<'inv, O, P, PP, U, D>>,
+    physical: Option<
+        BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
+    >,
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalPrimaryGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
     pub(super) fn new(
-        ledger: Ledger<O, P, D>,
+        ledger: TerminalInvocationLoan<'inv, O, P, PP, U, D>,
         baseline: FallbackBatchBaseline<O, P, D>,
         batches: PrimaryPublicationBatches<O, P, D>,
-        physical: TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>,
+        physical: BorrowedTerminalPhysicalOwnershipManifest<
+            'inv,
+            P,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
     ) -> Self {
         Self {
             attribution: Some(TerminalPrimaryAttribution {
@@ -2122,7 +2108,7 @@ where
         }
     }
 
-    fn attribution_mut(&mut self) -> &mut TerminalPrimaryAttribution<O, P, D> {
+    fn attribution_mut(&mut self) -> &mut TerminalPrimaryAttribution<'inv, O, P, PP, U, D> {
         match self.attribution.as_mut() {
             Some(attribution) => attribution,
             None => unreachable_final_owner_state(),
@@ -2131,7 +2117,8 @@ where
 
     fn physical(
         &self,
-    ) -> &TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> &BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+    {
         match self.physical.as_ref() {
             Some(physical) => physical,
             None => unreachable_final_owner_state(),
@@ -2140,7 +2127,7 @@ where
 
     fn retain_attribution_after_physical_containment(&mut self) {
         if let Some(attribution) = self.attribution.take() {
-            std::mem::forget(attribution);
+            attribution.retain_fail_closed();
         }
     }
 
@@ -2167,7 +2154,9 @@ where
         cause
     }
 
-    fn into_fallback(mut self) -> TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+    fn into_fallback(
+        mut self,
+    ) -> TerminalFallbackGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         let attribution = match self.attribution.take() {
             Some(attribution) => attribution.into_fallback(),
             None => unreachable_final_owner_state(),
@@ -2202,11 +2191,15 @@ where
         RetainedPublicationPrepareError::FinalizationContainment(containment)
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the transition preserves the invocation lifetime and exact ledger and payload brands"
+    )]
     pub(super) fn try_classify_frozen_success(
         mut self,
         terminal: RetainedTerminalMode,
     ) -> Result<
-        TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        TerminalPreFreezeTransition<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
         let RetainedTerminalMode::Success {
@@ -2243,10 +2236,24 @@ where
         })
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "both linear branches preserve the invocation lifetime and exact ledger and payload brands"
+    )]
     pub(super) fn try_advance_evidence_only_success(
         mut self,
     ) -> Result<
-        EvidenceOnlySuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        EvidenceOnlySuccessPrimaryTransition<
+            'inv,
+            O,
+            P,
+            PP,
+            U,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
         RetainedPublicationPrepareError,
     > {
         match self.try_bind_once(false) {
@@ -2279,11 +2286,15 @@ where
         ))
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "the transition preserves the invocation lifetime and exact ledger and payload brands"
+    )]
     pub(super) fn try_classify(
         mut self,
         mut terminal: RetainedTerminalMode,
     ) -> Result<
-        TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        TerminalPreFreezeTransition<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
         let publish_canonical = matches!(terminal, RetainedTerminalMode::Success { .. });
@@ -2359,43 +2370,58 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for TerminalPrimaryGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalPrimaryGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(physical) = self.physical.take() {
             let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
         }
         if let Some(attribution) = self.attribution.take() {
-            std::mem::forget(attribution);
+            attribution.retain_fail_closed();
         }
     }
 }
 
-pub(super) struct TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+pub(super) struct TerminalFallbackGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    attribution: Option<TerminalFallbackAttribution<O, P, D>>,
-    physical: Option<TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>>,
+    attribution: Option<TerminalFallbackAttribution<'inv, O, P, PP, U, D>>,
+    physical: Option<
+        BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
+    >,
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalFallbackGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
 {
     pub(super) fn new(
-        attribution: TerminalFallbackAttribution<O, P, D>,
-        physical: TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>,
+        attribution: TerminalFallbackAttribution<'inv, O, P, PP, U, D>,
+        physical: BorrowedTerminalPhysicalOwnershipManifest<
+            'inv,
+            P,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
     ) -> Self {
         Self {
             attribution: Some(attribution),
@@ -2403,7 +2429,7 @@ where
         }
     }
 
-    fn attribution_mut(&mut self) -> &mut TerminalFallbackAttribution<O, P, D> {
+    fn attribution_mut(&mut self) -> &mut TerminalFallbackAttribution<'inv, O, P, PP, U, D> {
         match self.attribution.as_mut() {
             Some(attribution) => attribution,
             None => unreachable_final_owner_state(),
@@ -2412,7 +2438,7 @@ where
 
     fn retain_attribution_after_physical_containment(&mut self) {
         if let Some(attribution) = self.attribution.take() {
-            std::mem::forget(attribution);
+            attribution.retain_fail_closed();
         }
     }
 
@@ -2481,19 +2507,21 @@ where
     }
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalFallbackGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(physical) = self.physical.take() {
             let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
         }
         if let Some(attribution) = self.attribution.take() {
-            std::mem::forget(attribution);
+            attribution.retain_fail_closed();
         }
     }
 }
@@ -2596,26 +2624,26 @@ where
     ledger.catalog_shape_is_strictly_ordered(expected_dimensions, expected_phases)
 }
 
-pub(super) struct QualifiedDetachedTerminalEvidence<P, D> {
-    owner: Option<DetachedRetainedPart<TerminalLedgerEvidence<P, D>>>,
+pub(super) struct BorrowedQualifiedDetachedTerminalEvidence<'inv, P, D> {
+    owner: Option<TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>>,
     qualification: Option<TerminalEvidenceFreezeQualification>,
 }
 
-pub(super) enum DetachedTerminalEvidenceQualification<P, D> {
-    Qualified(QualifiedDetachedTerminalEvidence<P, D>),
-    Rejected(DetachedRetainedPart<TerminalLedgerEvidence<P, D>>),
-    Panicked(DetachedRetainedPart<TerminalLedgerEvidence<P, D>>),
+pub(super) enum BorrowedDetachedTerminalEvidenceQualification<'inv, P, D> {
+    Qualified(BorrowedQualifiedDetachedTerminalEvidence<'inv, P, D>),
+    Rejected(TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>),
+    Panicked(TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>),
 }
 
-impl<P, D> QualifiedDetachedTerminalEvidence<P, D>
+impl<'inv, P, D> BorrowedQualifiedDetachedTerminalEvidence<'inv, P, D>
 where
     P: TerminalEvidenceKey,
-    D: TerminalEvidenceKey,
+    D: TerminalEvidenceKey + fmt::Debug,
 {
-    pub(super) fn try_from_success_proof<O>(
-        owner: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
-        proof: &QualifiedEvidenceDiscardFreezeProof<O, P, D>,
-    ) -> DetachedTerminalEvidenceQualification<P, D>
+    pub(super) fn try_from_success_proof<O, PP: ProgressPhase, U: ProgressUnit>(
+        owner: TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>,
+        proof: &QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>,
+    ) -> BorrowedDetachedTerminalEvidenceQualification<'inv, P, D>
     where
         O: OperationOwner,
     {
@@ -2629,22 +2657,24 @@ where
             )
         }));
         match qualification {
-            Ok(Ok(qualification)) => DetachedTerminalEvidenceQualification::Qualified(Self {
-                owner: Some(owner),
-                qualification: Some(qualification),
-            }),
-            Ok(Err(_)) => DetachedTerminalEvidenceQualification::Rejected(owner),
+            Ok(Ok(qualification)) => {
+                BorrowedDetachedTerminalEvidenceQualification::Qualified(Self {
+                    owner: Some(owner),
+                    qualification: Some(qualification),
+                })
+            }
+            Ok(Err(_)) => BorrowedDetachedTerminalEvidenceQualification::Rejected(owner),
             Err(payload) => {
                 discard_untrusted_panic_payload(payload);
-                DetachedTerminalEvidenceQualification::Panicked(owner)
+                BorrowedDetachedTerminalEvidenceQualification::Panicked(owner)
             }
         }
     }
 
-    pub(super) fn try_from_discard_proof<O>(
-        owner: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
-        proof: &QualifiedTypedDiscardFreezeProof<O, P, D>,
-    ) -> DetachedTerminalEvidenceQualification<P, D>
+    pub(super) fn try_from_discard_proof<O, PP: ProgressPhase, U: ProgressUnit>(
+        owner: TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>,
+        proof: &QualifiedTypedDiscardFreezeProof<'inv, O, P, PP, U, D>,
+    ) -> BorrowedDetachedTerminalEvidenceQualification<'inv, P, D>
     where
         O: OperationOwner,
     {
@@ -2658,21 +2688,25 @@ where
             )
         }));
         match qualification {
-            Ok(Ok(qualification)) => DetachedTerminalEvidenceQualification::Qualified(Self {
-                owner: Some(owner),
-                qualification: Some(qualification),
-            }),
-            Ok(Err(_)) => DetachedTerminalEvidenceQualification::Rejected(owner),
+            Ok(Ok(qualification)) => {
+                BorrowedDetachedTerminalEvidenceQualification::Qualified(Self {
+                    owner: Some(owner),
+                    qualification: Some(qualification),
+                })
+            }
+            Ok(Err(_)) => BorrowedDetachedTerminalEvidenceQualification::Rejected(owner),
             Err(payload) => {
                 discard_untrusted_panic_payload(payload);
-                DetachedTerminalEvidenceQualification::Panicked(owner)
+                BorrowedDetachedTerminalEvidenceQualification::Panicked(owner)
             }
         }
     }
 }
 
-impl<P, D> QualifiedDetachedTerminalEvidence<P, D> {
-    pub(super) fn into_freeze_ready(mut self) -> FreezeReadyDetachedTerminalEvidence<P, D> {
+impl<'inv, P, D> BorrowedQualifiedDetachedTerminalEvidence<'inv, P, D> {
+    pub(super) fn into_freeze_ready(
+        mut self,
+    ) -> BorrowedFreezeReadyDetachedTerminalEvidence<'inv, P, D> {
         let qualification = self
             .qualification
             .take()
@@ -2681,7 +2715,7 @@ impl<P, D> QualifiedDetachedTerminalEvidence<P, D> {
             .owner
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state());
-        FreezeReadyDetachedTerminalEvidence {
+        BorrowedFreezeReadyDetachedTerminalEvidence {
             owner,
             qualification,
         }
@@ -2689,11 +2723,110 @@ impl<P, D> QualifiedDetachedTerminalEvidence<P, D> {
 
     pub(super) fn into_unfrozen_owner(
         mut self,
-    ) -> DetachedRetainedPart<TerminalLedgerEvidence<P, D>> {
+    ) -> TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>> {
         self.owner
             .take()
             .unwrap_or_else(|| unreachable_final_owner_state())
     }
+}
+
+impl<'inv, P, D> BorrowedFreezeReadyDetachedTerminalEvidence<'inv, P, D>
+where
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    pub(super) fn freeze_in_place(
+        &mut self,
+        terminal_cause: TerminalEvidenceCause,
+        snapshot: &crate::ledger::LedgerSnapshot<P, D>,
+    ) {
+        self.owner
+            .allocation()
+            .as_ref()
+            .freeze_from(&self.qualification, terminal_cause, snapshot);
+    }
+}
+
+impl<'inv, P, D> BorrowedFreezeReadyDetachedTerminalEvidence<'inv, P, D> {
+    pub(super) fn account(&self) -> &PhysicalStorageAccount {
+        self.owner.account()
+    }
+
+    pub(super) fn into_frozen_owner(self) -> TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>> {
+        self.owner
+    }
+
+    pub(super) fn into_unfrozen_owner(
+        self,
+    ) -> TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>> {
+        self.owner
+    }
+}
+
+impl<'inv, P, D> Drop for BorrowedQualifiedDetachedTerminalEvidence<'inv, P, D> {
+    fn drop(&mut self) {
+        if let Some(mut owner) = self.owner.take() {
+            owner.record_forgotten_physical_edge();
+            owner.fail_closed_after_recorded_poison();
+        }
+    }
+}
+
+struct QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock> {
+    fallback: DetachedRetainedPart<F>,
+    evidence: FreezeReadyDetachedTerminalEvidence<P, D>,
+    canonical_table: RetainedTableAllocation<CanonicalBlock>,
+    evidence_table: RetainedTableAllocation<EvidenceBlock>,
+    account: PhysicalStorageAccount,
+    canonical_root: RetainedSlotIdentity,
+    evidence_root: RetainedSlotIdentity,
+}
+
+impl<P, D, F, CanonicalBlock, EvidenceBlock>
+    QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock>
+{
+    fn into_terminal(
+        self,
+    ) -> TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock> {
+        let Self {
+            fallback,
+            evidence,
+            canonical_table,
+            evidence_table,
+            account,
+            canonical_root: _,
+            evidence_root: _,
+        } = self;
+        TerminalPhysicalOwnershipManifest::new(
+            fallback,
+            evidence.into_unfrozen_owner(),
+            Some(canonical_table),
+            Some(evidence_table),
+            Some(account),
+        )
+    }
+}
+
+struct QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
+    fallback: DetachedRetainedPart<F>,
+    evidence: FreezeReadyDetachedTerminalEvidence<P, D>,
+}
+
+impl<P, D, F> QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
+    fn into_terminal(self) -> TerminalPhysicalOwnershipManifest<P, D, F, (), ()> {
+        TerminalPhysicalOwnershipManifest::new(
+            self.fallback,
+            self.evidence.into_unfrozen_owner(),
+            None,
+            None,
+            None,
+        )
+    }
+}
+
+pub(super) struct FreezeReadyDetachedTerminalEvidence<P, D> {
+    owner: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
+    qualification: TerminalEvidenceFreezeQualification,
 }
 
 impl<P, D> FreezeReadyDetachedTerminalEvidence<P, D>
@@ -2727,11 +2860,36 @@ impl<P, D> FreezeReadyDetachedTerminalEvidence<P, D> {
     }
 }
 
-impl<P, D> Drop for QualifiedDetachedTerminalEvidence<P, D> {
-    fn drop(&mut self) {
-        if let Some(mut owner) = self.owner.take() {
-            owner.record_forgotten_physical_edge();
-            owner.fail_closed_after_recorded_poison();
+impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+    BorrowedQualifiedSuccessPhysical<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+{
+    fn into_owned(self) -> QualifiedSuccessPhysical<P, D, F, CanonicalBlock, EvidenceBlock> {
+        QualifiedSuccessPhysical {
+            fallback: self.fallback.into_owned(),
+            evidence: self.evidence.into_owned(),
+            canonical_table: self.canonical_table.into_owned(),
+            evidence_table: self.evidence_table.into_owned(),
+            account: self.account.into_owned(),
+            canonical_root: self.canonical_root,
+            evidence_root: self.evidence_root,
+        }
+    }
+}
+
+impl<'inv, P, D, F> BorrowedQualifiedEvidenceOnlySuccessPhysical<'inv, P, D, F> {
+    fn into_owned(self) -> QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
+        QualifiedEvidenceOnlySuccessPhysical {
+            fallback: self.fallback.into_owned(),
+            evidence: self.evidence.into_owned(),
+        }
+    }
+}
+
+impl<'inv, P, D> BorrowedFreezeReadyDetachedTerminalEvidence<'inv, P, D> {
+    pub(super) fn into_owned(self) -> FreezeReadyDetachedTerminalEvidence<P, D> {
+        FreezeReadyDetachedTerminalEvidence {
+            owner: self.owner.into_owned(),
+            qualification: self.qualification,
         }
     }
 }

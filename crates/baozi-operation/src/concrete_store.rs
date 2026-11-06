@@ -1748,7 +1748,7 @@ type RawStoreAttachment<'inv, 'account, O, PP, U> = crate::retained::PendingReta
 >;
 type BoundStoreParts<'inv, 'account, O, PP, U> = (
     RawStoreAttachment<'inv, 'account, O, PP, U>,
-    StoreKeyDomain,
+    StoreDomainLoan<'inv>,
     StoreFallbackEnvelope,
 );
 type RawStoreControlCheckpoint<'a, O, PP, U> =
@@ -1882,7 +1882,7 @@ where
 /// ) -> Result<u64, StoreInvocationError> {
 ///     operation.with_exclusive_execution(|context| {
 ///         let observation = context.storage_observation(dimension)?;
-///         Ok(observation.live_bytes())
+///         Ok(observation.live_bytes(&context))
 ///     })
 /// }
 /// ```
@@ -1904,7 +1904,7 @@ where
 /// use baozi_operation::__retained_store_integration::authority::StoreStorageObservation;
 /// fn cross_thread(observation: StoreStorageObservation<'_>) {
 ///     std::thread::scope(|threads| {
-///         threads.spawn(move || observation.live_bytes());
+///         threads.spawn(move || std::hint::black_box(observation));
 ///     });
 /// }
 /// ```
@@ -1914,15 +1914,36 @@ where
 /// fn require_sync<T: Sync>() {}
 /// require_sync::<StoreStorageObservation<'static>>();
 /// ```
+///
+/// An observation cannot read another invocation's current storage:
+///
+/// ```compile_fail
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreDimensionKey};
+/// use baozi_operation::__retained_store_integration::authority::RetainedStoreOperation;
+/// use baozi_operation::__retained_store_integration::activation::StoreInvocationError;
+/// fn foreign_context<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     first: &mut RetainedStoreOperation<'_, O, P, U>,
+///     second: &mut RetainedStoreOperation<'_, O, P, U>,
+///     dimension: StoreDimensionKey,
+/// ) -> Result<u64, StoreInvocationError> {
+///     first.with_exclusive_execution(|context| {
+///         let observation = context.storage_observation(dimension)?;
+///         second.with_exclusive_execution(|other| Ok(observation.live_bytes(&other)))
+///     })
+/// }
+/// ```
 #[derive(Clone, Copy)]
 pub struct StoreStorageObservation<'op> {
     raw: crate::ledger::LedgerStorageObservation<'op, StorePhaseKey, StoreDimensionKey>,
 }
 
-impl StoreStorageObservation<'_> {
+impl<'op> StoreStorageObservation<'op> {
     /// Returns the issuing dimension's logical live bytes within this execution region.
-    pub fn live_bytes(&self) -> u64 {
-        self.raw.live_bytes()
+    pub fn live_bytes<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>(
+        &self,
+        context: &StoreInvocation<'op, O, PP, U>,
+    ) -> u64 {
+        context.observation_live_bytes(self.raw)
     }
 }
 
@@ -2473,6 +2494,53 @@ where
         StoredBlock,
         StoredBlock,
     >,
+    domain: Option<StoreKeyDomain>,
+}
+
+struct StoreDomainLoan<'inv> {
+    slot: &'inv mut Option<StoreKeyDomain>,
+}
+
+struct StoreDomainStamp {
+    identity: *const (),
+}
+
+impl std::ops::Deref for StoreDomainLoan<'_> {
+    type Target = StoreKeyDomain;
+
+    fn deref(&self) -> &Self::Target {
+        self.slot
+            .as_ref()
+            .expect("the root retains its original domain")
+    }
+}
+
+impl<'inv> StoreDomainLoan<'inv> {
+    fn into_owned(self) -> StoreKeyDomain {
+        self.slot
+            .take()
+            .expect("detached evidence consumes the original domain once")
+    }
+
+    fn defer(self) -> StoreDomainStamp {
+        StoreDomainStamp {
+            identity: std::ptr::from_ref(&*self.slot).cast(),
+        }
+    }
+
+    fn resume(slot: &'inv mut Option<StoreKeyDomain>, stamp: StoreDomainStamp) -> Option<Self> {
+        (slot.is_some() && std::ptr::from_ref(&*slot).cast::<()>() == stamp.identity)
+            .then_some(Self { slot })
+    }
+}
+
+impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> Drop for StoreInvocationRoot<O, PP, U> {
+    fn drop(&mut self) {
+        self.raw.cleanup_owned_state();
+        if self.raw.must_retain_domain() {
+            let _retained_domain = std::mem::ManuallyDrop::new(self.domain.take());
+        }
+    }
 }
 
 /// Short startup permission. The physical root remains installed in its lexical owner.
@@ -2539,7 +2607,7 @@ where
     U: ProgressUnit,
 {
     raw: RawStoreAttachment<'inv, 'account, O, PP, U>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
     fallback: StoreFallbackEnvelope,
     lineage: L,
 }
@@ -2594,6 +2662,7 @@ where
     pub const fn new() -> Self {
         Self {
             raw: crate::retained::InvocationRoot::new(),
+            domain: None,
         }
     }
 
@@ -2655,7 +2724,7 @@ where
     U: ProgressUnit,
 {
     raw: RawStoreOperation<'inv, O, PP, U>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
     lineage: L,
 }
 
@@ -2729,7 +2798,7 @@ where
     }
 
     /// Records one semantically completed phase after concrete domain and catalog validation.
-    pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+    pub fn try_complete_phase(&mut self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
         if self.raw.is_terminal_only() {
             return Err(StoreRuntimeError::FallbackOnly);
         }
@@ -2952,7 +3021,7 @@ where
         let domain = self.domain;
         self.raw
             .prepare_evidence_only_success(final_progress)
-            .map(|raw| classify_prepared_evidence_only(raw, domain))
+            .map(|raw| classify_prepared_evidence_only(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 
@@ -2964,7 +3033,7 @@ where
         let domain = self.domain;
         self.raw
             .prepare_minimal_fallback(PreparationFailureCode::domain(cause))
-            .map(|raw| classify_prepared_fallback(raw, domain))
+            .map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -3128,9 +3197,14 @@ where
     )
     .with_failure_terminal_work(failure_terminal_work);
     let (domain, ledger_limits, phases) = ledger_plan.into_parts();
+    let StoreInvocationRoot {
+        raw: raw_root,
+        domain: domain_slot,
+    } = root;
+    let installs_original_domain = !raw_root.has_started();
     let result = match source {
         Some(source) => RetainedOperation::bind_derived_with_phase_catalog(
-            &mut root.raw,
+            raw_root,
             control,
             (ledger_limits, &phases),
             account,
@@ -3138,15 +3212,18 @@ where
             raw_plan,
         ),
         None => RetainedOperation::bind_with_phase_catalog(
-            &mut root.raw,
+            raw_root,
             control,
             (ledger_limits, &phases),
             account,
             raw_plan,
         ),
     };
+    if installs_original_domain {
+        *domain_slot = Some(domain);
+    }
     result
-        .map(|raw| (raw, domain, fallback))
+        .map(|raw| (raw, StoreDomainLoan { slot: domain_slot }, fallback))
         .map_err(map_store_start_error)
 }
 
@@ -3424,7 +3501,7 @@ where
     raw: RawStoreAssembly<'inv, O, PP, U>,
     fallback_cause: Option<PreparationFailureCode>,
     success_rejection: Option<PreparationFailureCode>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
     lineage: L,
 }
 
@@ -4759,7 +4836,7 @@ where
             .or(success_rejection)
             .unwrap_or(PreparationFailureCode::domain(cause));
         let raw = raw.prepare_minimal_fallback_with(cause);
-        raw.map(|raw| classify_prepared_fallback(raw, domain))
+        raw.map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -5107,13 +5184,13 @@ pub struct ValidatedStoreSuccess<
     raw: RawValidatedStoreSuccess<'inv, O, PP, U>,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
 }
 
 pub(super) struct DeferredStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag> {
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainStamp,
 }
 
 impl<O, PP, U> StoreInvocationRoot<O, PP, U>
@@ -5130,7 +5207,7 @@ where
             raw: self.raw.resume_deferred_success()?,
             canonical_root: pending.canonical_root,
             evidence_root: pending.evidence_root,
-            domain: pending.domain,
+            domain: StoreDomainLoan::resume(&mut self.domain, pending.domain)?,
         })
     }
 }
@@ -5160,7 +5237,7 @@ where
             Ok(()) => Ok(DeferredStoreSuccess {
                 canonical_root,
                 evidence_root,
-                domain,
+                domain: domain.defer(),
             }),
             Err(raw) => Err(Self {
                 raw,
@@ -5281,7 +5358,12 @@ where
         self.raw
             .try_prepare(final_progress)
             .map(|raw| {
-                classify_prepared_success(raw, self.canonical_root, self.evidence_root, domain)
+                classify_prepared_success(
+                    raw,
+                    self.canonical_root,
+                    self.evidence_root,
+                    domain.into_owned(),
+                )
             })
             .map_err(StorePrepareError::from_raw)
     }
@@ -5291,7 +5373,7 @@ where
         let domain = self.domain;
         self.raw
             .prepare_minimal_fallback()
-            .map(|raw| classify_prepared_fallback(raw, domain))
+            .map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -5337,7 +5419,7 @@ pub(super) struct StoreSuccessFreezePermit<
     raw: RawStoreSuccessFreezePermit<'inv, O, PP, U>,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
 }
 
 pub(super) enum StoreSuccessFreezePermitIssue<
@@ -5394,7 +5476,7 @@ pub(super) struct StoreSuccessFreezeContribution<
     raw: RawStoreSuccessFreezeContribution<'inv, O, PP, U>,
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
 }
 
 impl<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
@@ -5490,7 +5572,7 @@ where
             intent.qualify_and_commit_frozen_exact()?,
             self.canonical_root,
             self.evidence_root,
-            self.domain,
+            self.domain.into_owned(),
         ))
     }
 }
@@ -5510,7 +5592,7 @@ where
     fallback_only: bool,
     forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
 }
 
 impl<'inv, O, PP, U, PreservedEvidenceKind, PreservedEvidenceTag>
@@ -5825,7 +5907,7 @@ where
             None => raw.with_fallback_cause(PreparationFailureCode::domain(cause)),
         };
         raw.prepare_minimal_fallback()
-            .map(|raw| classify_prepared_fallback(raw, domain))
+            .map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -5843,9 +5925,9 @@ where
     FallbackOnly(StoreFallbackOnly<'inv, O, PP, U>),
 }
 
-fn map_failure_validation<O, PP, U, EvidenceKind, EvidenceTag>(
+fn map_failure_validation<'inv, O, PP, U, EvidenceKind, EvidenceTag>(
     validation: RetainedFailureValidation<
-        '_,
+        'inv,
         O,
         StorePhaseKey,
         PP,
@@ -5856,9 +5938,9 @@ fn map_failure_validation<O, PP, U, EvidenceKind, EvidenceTag>(
         StoredBlock,
     >,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
     forced_cause: Option<PreparationFailureCode>,
-) -> StoreFailureValidation<'_, O, PP, U, EvidenceKind, EvidenceTag>
+) -> StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -5905,7 +5987,7 @@ where
     raw: RawValidatedStoreFailure<'inv, O, PP, U>,
     forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
 }
 
 impl<'inv, O, PP, U, EvidenceKind, EvidenceTag>
@@ -5952,7 +6034,7 @@ where
             forced_cause.unwrap_or(PreparationFailureCode::domain(cause)),
             final_progress,
         )
-        .map(|raw| classify_prepared_failure(raw, evidence_root, domain))
+        .map(|raw| classify_prepared_failure(raw, evidence_root, domain.into_owned()))
         .map_err(StorePrepareError::from_raw)
     }
 
@@ -5979,7 +6061,7 @@ where
         )
         .map(|(raw, control_cause)| {
             (
-                classify_prepared_failure(raw, evidence_root, domain),
+                classify_prepared_failure(raw, evidence_root, domain.into_owned()),
                 control_cause,
             )
         })
@@ -6001,7 +6083,7 @@ where
             Some(cause) => raw.prepare_minimal_fallback_with(cause),
             None => raw.prepare_minimal_fallback(),
         };
-        raw.map(|raw| classify_prepared_fallback(raw, domain))
+        raw.map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 
@@ -6015,7 +6097,7 @@ where
             domain,
         } = self;
         raw.try_prepare_frozen(forced_cause.unwrap_or(PreparationFailureCode::domain(0)))
-            .map(|raw| classify_prepared_failure(raw, evidence_root, domain))
+            .map(|raw| classify_prepared_failure(raw, evidence_root, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 }
@@ -6043,7 +6125,7 @@ where
     U: ProgressUnit,
 {
     state: StoreFallbackState<'inv, O, PP, U>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
 }
 
 impl<'inv, O, PP, U> StoreFallbackOnly<'inv, O, PP, U>
@@ -6075,7 +6157,7 @@ where
             StoreFallbackState::FailureAssembly(raw) => raw.prepare_minimal_fallback(),
             StoreFallbackState::Validated(raw) => raw.prepare_minimal_fallback(),
         };
-        raw.map(|raw| classify_prepared_fallback(raw, domain))
+        raw.map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
     }
 }

@@ -18,7 +18,7 @@ pub(crate) fn fail_next_canonical_joint_evidence_qualification() {
 #[cfg(test)]
 pub(crate) use terminal::panic_next_canonical_primary_bind;
 mod final_owner;
-mod operation;
+pub(crate) mod operation;
 mod operation_start;
 mod ownership;
 mod physical;
@@ -27,9 +27,10 @@ mod range;
 mod startup;
 mod terminal;
 mod terminal_failure;
+mod terminal_loan;
 mod terminal_output;
 
-use operation::OperationInvocation;
+use operation::TerminalInvocationLoan;
 pub(crate) use operation::{DeferredUnattachedBinding, InvocationRoot, PendingRetainedAttachment};
 
 #[cfg(test)]
@@ -79,7 +80,7 @@ type RetainedStorageAdmission<O, P, D> = (
 /// The split work owner uses the existing logical/physical admission and share executor.
 /// `admit_share` is a crate-owned numeric transaction, never an extension callback.
 pub(crate) fn reserve_exclusive_backing<O, P, D, W>(
-    storage: &crate::ledger::ExclusiveStorage<'_, O, P, D>,
+    storage: &mut crate::ledger::ExclusiveStorage<'_, O, P, D>,
     account: &PhysicalStorageAccount,
     phase: P,
     dimension: D,
@@ -206,13 +207,18 @@ use std::sync::{Mutex, MutexGuard};
 pub(crate) use terminal::RetainedPublicationPrepareError;
 pub(crate) use terminal::RetainedSuccessJointCommitIntent;
 use terminal::{
-    DetachedTerminalEvidenceQualification, EvidenceOnlySuccessPrimaryTransition,
-    FreezeReadyDetachedTerminalEvidence, PrimaryPublicationBatches,
-    QualifiedDetachedTerminalEvidence, TerminalFallbackAttribution, TerminalFallbackGuard,
-    TerminalPhysicalOwnershipManifest, TerminalPreFreezeTransition, TerminalPrimaryGuard,
-    drop_retained_table_with_account_anchor, terminal_evidence_catalog_is_qualified,
+    BorrowedDetachedTerminalEvidenceQualification, BorrowedFreezeReadyDetachedTerminalEvidence,
+    BorrowedQualifiedDetachedTerminalEvidence, EvidenceOnlySuccessPrimaryTransition,
+    FreezeReadyDetachedTerminalEvidence, PrimaryPublicationBatches, TerminalFallbackAttribution,
+    TerminalFallbackGuard, TerminalPhysicalOwnershipManifest, TerminalPreFreezeTransition,
+    TerminalPrimaryGuard, drop_retained_table_with_account_anchor,
+    terminal_evidence_catalog_is_qualified,
 };
 use terminal_failure::{TerminalMinimalFreezeGuard, TerminalRichFreezeGuard};
+use terminal_loan::{
+    BorrowedExactPreDiscardSuccess, BorrowedTerminalPhysicalOwnershipManifest, TerminalAccountLoan,
+    TerminalPartLoan, TerminalPhysicalState, TerminalTableLoan,
+};
 use terminal_output::RetainedPublicationPayload;
 #[allow(
     unused_imports,
@@ -759,20 +765,38 @@ where
 
 /// The selected terminal rail before ledger qualification, physical cleanup, or evidence freeze.
 #[must_use = "the unqualified terminal owner must be finished or contained with its payloads"]
-pub(crate) struct RetainedPreFreezeClassification<O, P, D, F, CanonicalBlock, EvidenceBlock>
-where
+pub(crate) struct RetainedPreFreezeClassification<
+    'inv,
+    O,
+    P,
+    PP,
+    U,
+    D,
+    F,
+    CanonicalBlock,
+    EvidenceBlock,
+> where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    state: TerminalPreFreezeTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+    state: TerminalPreFreezeTransition<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
     set_id: RetainedSetId,
     control_cause: Option<ControlCause>,
 }
 
-impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedPreFreezeClassification<O, P, D, F, CanonicalBlock, EvidenceBlock>
+type RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> = Result<
+    RetainedPreFreezeClassification<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    RetainedPublicationPrepareError,
+>;
+
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPreFreezeClassification<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey + fmt::Debug,
@@ -2052,7 +2076,7 @@ where
             .common
             .coordinator
             .retained_ledger()
-            .test_probe()
+            .test_shared_probe()
     }
 
     #[cfg(test)]
@@ -2970,10 +2994,7 @@ where
     fn try_classify_terminal_preparation(
         mut self,
         request: RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U>,
-    ) -> Result<
-        RetainedPreFreezeClassification<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedPublicationPrepareError,
-    > {
+    ) -> RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         if self.fields.containment != AssemblyContainmentProvenance::Healthy {
             let cause = match self.fields.containment {
                 AssemblyContainmentProvenance::NewFaultPending => {
@@ -3232,12 +3253,15 @@ where
         let evidence_table = self.fields.evidence_table.take();
         let canonical_batch = self.fields.canonical_batch.take();
         let RetainedOperation {
-            retained, common, ..
+            retained,
+            common,
+            terminal: terminal_slot,
+            ..
         } = operation;
-        let OperationInvocation { coordinator, .. } = common.into_terminal();
-        let ledger = coordinator.into_ledger_for_typed_publication();
+        let ledger = common.into_terminal();
         let (fallback, evidence, baseline_batches) = retained.baseline.take_parts();
-        let physical = TerminalPhysicalOwnershipManifest::new(
+        let physical = BorrowedTerminalPhysicalOwnershipManifest::from_owned(
+            terminal_slot,
             fallback,
             evidence,
             canonical_table,
@@ -3743,10 +3767,7 @@ where
     pub(crate) fn try_classify_pre_freeze(
         self,
         final_progress: FinalProgress<PP, U>,
-    ) -> Result<
-        RetainedPreFreezeClassification<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedPublicationPrepareError,
-    > {
+    ) -> RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         self.assembly
             .try_classify_terminal_preparation(RetainedTerminalRequest::Success {
                 proof: self.proof,
@@ -3841,10 +3862,7 @@ where
 
     pub(crate) fn try_classify_pre_freeze(
         self,
-    ) -> Result<
-        RetainedPreFreezeClassification<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedPublicationPrepareError,
-    > {
+    ) -> RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         let ValidatedRetainedSuccess { assembly, proof } = self.validated;
         assembly.try_classify_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })
     }

@@ -3,10 +3,15 @@
 Status: architectural direction and contract amendments independently reviewed GO.
 The bounded `owned-finite-invocation-plan-amendments-review-1.md` closes all three P1
 terminal/error omissions and the P2 disjoint-loan issue at the plan-contract level.
-Actual integrated compiler cuts remain required. No finite root implementation,
-compiler proof, allocation result or native keep is claimed.
+The first dynamic compiler cut passes all seven integrated gates: 3,664 workspace
+tests, 191 doctests, 138 assets-consumer tests, both strict Clippy checks and both
+format checks. Its [implementation report](../reviews/2026-11-06-owned-dynamic-invocation.md)
+preserves failed attempts, source-review scopes and the limited layout observation.
+Independent final-receipt review is GO for that source; the real finite compiler cut
+remains required.
+No finite root implementation, allocation improvement or native keep is claimed.
 The [preparation producer-result slice](2026-11-06-1225-prepare-consuming-result-plan.md)
-is separate ongoing work. The parent convergence goal remains active and release HOLD.
+is separately recorded work. The parent convergence goal remains active and release HOLD.
 
 ## Decision and source authority
 

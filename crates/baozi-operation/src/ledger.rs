@@ -1,4 +1,8 @@
-use crate::{CapacityPlan, CapacityPlanError, OperationOwner, ReplacementCapacityPlan};
+use crate::retained::operation::{OperationInvocation, TerminalInvocationLoan};
+use crate::{
+    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
+    ReplacementCapacityPlan,
+};
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -9,13 +13,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 mod commitment;
 mod evidence;
-pub(crate) use evidence::ProgressEvidenceStorage;
 mod exclusive;
 pub(crate) use exclusive::{ExclusiveStorage, ExclusiveWork};
 mod reservation;
 mod snapshot;
 mod startup;
+mod storage;
 mod work;
+use storage::{DynamicStorage, LedgerIdentity, StorageGuard, StorageView, StorageViewMut};
 
 pub(crate) use work::{
     InternalWork, ParserChannel, ParserFrame, ParserReadRow, ParserWorkError, ReservedProducerRow,
@@ -175,6 +180,8 @@ pub enum LedgerEvidencePurpose {
     Publication,
     /// Retained semantic progress state.
     Progress,
+    /// The known payload of the shared storage owner.
+    SharedStorage,
 }
 
 /// A bounded ledger evidence allocation could not be completed.
@@ -462,8 +469,8 @@ pub struct LedgerLimits<D> {
     dimension_snapshot_staging: Vec<(D, DimensionSnapshot)>,
     operation_live_byte_limit: u64,
     evidence_byte_limit: u64,
-    current_evidence_bytes: u64,
-    peak_evidence_bytes: u64,
+    current_administrative_bytes: u64,
+    peak_administrative_bytes: u64,
 }
 
 impl<D> LedgerLimits<D>
@@ -492,8 +499,8 @@ where
         let mut work_catalog = Vec::new();
         let mut work_dimensions = Vec::new();
         let mut staging: Vec<(D, DimensionSnapshot)> = Vec::new();
-        let mut current_evidence_bytes = 0;
-        let mut peak_evidence_bytes = 0;
+        let mut current_administrative_bytes = 0;
+        let mut peak_administrative_bytes = 0;
         for (dimension, policy) in dimensions {
             if policy.consumed_limit > policy.attempted_limit {
                 return Err(LedgerLimitsError::ConsumedLimitExceedsAttempted {
@@ -512,8 +519,8 @@ where
             try_grow_evidence_vec(
                 &mut frozen,
                 desired_dimension_capacity,
-                &mut current_evidence_bytes,
-                &mut peak_evidence_bytes,
+                &mut current_administrative_bytes,
+                &mut peak_administrative_bytes,
                 evidence_byte_limit,
                 LedgerEvidencePurpose::Dimensions,
             )
@@ -521,8 +528,8 @@ where
             try_grow_evidence_vec(
                 &mut work_catalog,
                 desired_dimension_capacity,
-                &mut current_evidence_bytes,
-                &mut peak_evidence_bytes,
+                &mut current_administrative_bytes,
+                &mut peak_administrative_bytes,
                 evidence_byte_limit,
                 LedgerEvidencePurpose::Dimensions,
             )
@@ -530,8 +537,8 @@ where
             try_grow_evidence_vec(
                 &mut work_dimensions,
                 desired_dimension_capacity,
-                &mut current_evidence_bytes,
-                &mut peak_evidence_bytes,
+                &mut current_administrative_bytes,
+                &mut peak_administrative_bytes,
                 evidence_byte_limit,
                 LedgerEvidencePurpose::Dimensions,
             )
@@ -540,8 +547,8 @@ where
             try_grow_evidence_vec(
                 &mut staging,
                 desired_staging_capacity,
-                &mut current_evidence_bytes,
-                &mut peak_evidence_bytes,
+                &mut current_administrative_bytes,
+                &mut peak_administrative_bytes,
                 evidence_byte_limit,
                 LedgerEvidencePurpose::Dimensions,
             )
@@ -575,8 +582,8 @@ where
             dimension_snapshot_staging: staging,
             operation_live_byte_limit,
             evidence_byte_limit,
-            current_evidence_bytes,
-            peak_evidence_bytes,
+            current_administrative_bytes,
+            peak_administrative_bytes,
         })
     }
 
@@ -609,8 +616,8 @@ where
     }
 
     /// Returns evidence bytes retained by the frozen policy and final staging buffers.
-    pub const fn frozen_evidence_bytes(&self) -> u64 {
-        self.current_evidence_bytes
+    pub const fn frozen_administrative_bytes(&self) -> u64 {
+        self.current_administrative_bytes
     }
 
     /// Tightens the independent evidence bound without reallocating frozen policy.
@@ -618,11 +625,11 @@ where
         mut self,
         evidence_byte_limit: u64,
     ) -> Result<Self, LedgerLimitsError<D>> {
-        if self.current_evidence_bytes > evidence_byte_limit {
+        if self.current_administrative_bytes > evidence_byte_limit {
             return Err(LedgerLimitsError::Evidence {
                 cause: LedgerEvidenceError::LimitExceeded {
                     purpose: LedgerEvidencePurpose::Dimensions,
-                    value: self.current_evidence_bytes,
+                    value: self.current_administrative_bytes,
                     limit: evidence_byte_limit,
                 },
             });
@@ -665,6 +672,8 @@ pub enum LedgerCause<D> {
     ConsumedBatchOutOfOrder { previous: D, dimension: D },
     /// A reservation was presented to a different ledger instance.
     OwnerMismatch,
+    /// The process exhausted fresh ledger owner identities without reusing one.
+    OwnerIdentityExhausted,
     /// A consumed or otherwise inactive reservation was reused.
     InactiveReservation,
     /// A linear work permit was completed, released, or otherwise resolved more than once.
@@ -758,6 +767,9 @@ impl<D: fmt::Debug> fmt::Display for LedgerCause<D> {
                 "consumed batch dimension {dimension:?} follows later dimension {previous:?}"
             ),
             Self::OwnerMismatch => formatter.write_str("reservation belongs to another ledger"),
+            Self::OwnerIdentityExhausted => {
+                formatter.write_str("ledger owner identities exhausted")
+            }
             Self::InactiveReservation => formatter.write_str("reservation is no longer active"),
             Self::InactiveLinearWorkPermit => {
                 formatter.write_str("linear work permit is no longer active")
@@ -1057,20 +1069,25 @@ struct CompletedPhase<P> {
 }
 
 #[derive(Debug)]
-struct LedgerState<P, D> {
+pub(crate) struct LedgerState<P, D> {
     dimensions: Vec<DimensionEntry<D>>,
     phases: Vec<PhaseEntry<P>>,
     phase_states: Vec<PhaseState>,
     dimension_snapshot_staging: Vec<(D, DimensionSnapshot)>,
     phase_snapshot_staging: Vec<(P, PhaseSnapshot)>,
+    header: LedgerHeader<P>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LedgerHeader<P> {
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
     retained_output_bytes: u64,
     retained_output_reservations: u64,
     evidence_byte_limit: u64,
-    current_evidence_bytes: u64,
-    peak_evidence_bytes: u64,
+    current_administrative_bytes: u64,
+    peak_administrative_bytes: u64,
     publication: PublicationState,
     last_completed_phase: Option<CompletedPhase<P>>,
 }
@@ -1080,6 +1097,7 @@ struct ReservationPositions<D> {
     phase: Result<usize, LedgerCause<D>>,
 }
 
+#[derive(Clone, Copy)]
 struct ReservationProjection {
     dimension_position: usize,
     dimension_live: u64,
@@ -1121,10 +1139,11 @@ impl FallbackBaselineQualification {
 
 /// Shared accounting state branded by one operation domain.
 pub(crate) struct Ledger<O, P, D> {
+    identity: LedgerIdentity,
     work_catalog: Vec<D>,
     work: WorkState<D>,
     phase_catalogue: Vec<PhaseEntry<P>>,
-    state: Arc<Mutex<LedgerState<P, D>>>,
+    state: DynamicStorage<P, D>,
     operation_live_byte_limit: u64,
     operation_owner: PhantomData<fn() -> O>,
 }
@@ -1133,20 +1152,16 @@ pub(crate) struct Ledger<O, P, D> {
 /// Read-only storage evidence borrowed from one local invocation, with no shared ownership.
 #[derive(Clone, Copy)]
 pub(crate) struct LedgerStorageObservation<'op, P, D> {
-    state: &'op Mutex<LedgerState<P, D>>,
     position: usize,
-    local: PhantomData<&'op std::cell::Cell<()>>,
-}
-
-impl<P, D> LedgerStorageObservation<'_, P, D> {
-    pub(crate) fn live_bytes(&self) -> u64 {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .dimensions[self.position]
-            .state
-            .current_live_bytes
-    }
+    #[expect(
+        clippy::type_complexity,
+        reason = "the zero-size marker combines an invariant invocation brand with local-only and key variance constraints"
+    )]
+    local: PhantomData<(
+        &'op std::cell::Cell<()>,
+        fn(&'op mut ()) -> &'op mut (),
+        fn(P, D) -> (P, D),
+    )>,
 }
 
 #[derive(Clone, Copy)]
@@ -1190,7 +1205,7 @@ impl<D> LinearWorkCompletion<D> {
 /// Test-only scalar observation of one ledger's live reservation state.
 #[cfg(test)]
 pub(crate) struct LedgerTestProbe<P, D> {
-    state: Weak<Mutex<LedgerState<P, D>>>,
+    state: Weak<Mutex<Option<LedgerState<P, D>>>>,
 }
 
 #[cfg(test)]
@@ -1209,6 +1224,12 @@ impl<P, D> LedgerTestProbe<P, D> {
         self.state
             .upgrade()
             .map_or(0, |state| lock(&state).current_live_bytes)
+    }
+
+    pub(crate) fn current_administrative_bytes(&self) -> u64 {
+        self.state
+            .upgrade()
+            .map_or(0, |state| lock(&state).current_administrative_bytes)
     }
 
     pub(crate) fn dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot>
@@ -1258,8 +1279,8 @@ where
             dimension_snapshot_staging,
             operation_live_byte_limit,
             evidence_byte_limit,
-            current_evidence_bytes,
-            peak_evidence_bytes,
+            current_administrative_bytes,
+            peak_administrative_bytes,
         } = limits;
         let mut state = LedgerState {
             dimensions,
@@ -1267,45 +1288,61 @@ where
             phase_states: Vec::new(),
             dimension_snapshot_staging,
             phase_snapshot_staging: Vec::new(),
-            current_live_bytes: 0,
-            peak_live_bytes: 0,
-            active_reservations: 0,
-            retained_output_bytes: 0,
-            retained_output_reservations: 0,
-            evidence_byte_limit,
-            current_evidence_bytes,
-            peak_evidence_bytes,
-            publication: PublicationState::Open,
-            last_completed_phase: None,
+            header: LedgerHeader {
+                current_live_bytes: 0,
+                peak_live_bytes: 0,
+                active_reservations: 0,
+                retained_output_bytes: 0,
+                retained_output_reservations: 0,
+                evidence_byte_limit,
+                current_administrative_bytes,
+                peak_administrative_bytes,
+                publication: PublicationState::Open,
+                last_completed_phase: None,
+            },
         };
         for phase in phases {
             try_insert_phase_catalog_entry(&mut state, *phase)?;
         }
         let mut phase_catalogue = Vec::new();
+        let evidence_byte_limit = state.evidence_byte_limit;
         try_grow_evidence_vec(
             &mut phase_catalogue,
             state.phases.len(),
-            &mut state.current_evidence_bytes,
-            &mut state.peak_evidence_bytes,
-            state.evidence_byte_limit,
+            &mut state.header.current_administrative_bytes,
+            &mut state.header.peak_administrative_bytes,
+            evidence_byte_limit,
             LedgerEvidencePurpose::Phases,
         )
         .map_err(|cause| LedgerCause::Evidence { cause })?;
         phase_catalogue.extend_from_slice(&state.phases);
+        let identity = LedgerIdentity::try_new().ok_or(LedgerCause::OwnerIdentityExhausted)?;
         Ok(Self {
+            identity,
             work: WorkState::new(work_catalog.len(), work_dimensions),
             work_catalog,
             phase_catalogue,
-            state: Arc::new(Mutex::new(state)),
+            state: DynamicStorage::Inline(Some(state)),
             operation_live_byte_limit,
             operation_owner: PhantomData,
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn test_probe(&self) -> LedgerTestProbe<P, D> {
+    pub(crate) fn test_probe(&mut self) -> LedgerTestProbe<P, D> {
         LedgerTestProbe {
-            state: Arc::downgrade(&self.state),
+            state: Arc::downgrade(self.state.ensure_shared().expect("test storage promotion")),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_shared_probe(&self) -> LedgerTestProbe<P, D> {
+        LedgerTestProbe {
+            state: Arc::downgrade(
+                self.state
+                    .shared()
+                    .expect("retained startup has issued storage"),
+            ),
         }
     }
 
@@ -1352,7 +1389,7 @@ where
     pub(crate) fn seal_ordinary_work(&mut self) -> Result<(), LedgerCause<D>> {
         self.work.check_quiescent(self.work_catalog.len())?;
         let work = &mut self.work;
-        let mut storage = lock(&self.state);
+        let mut storage = self.state.write();
         match work.header.mode {
             WorkMode::Ordinary => {
                 if storage.publication == PublicationState::Open {
@@ -1487,10 +1524,10 @@ where
             .binary_search(&dimension)
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         let work = &mut self.work;
-        let mut storage = lock(&self.state);
+        let mut storage = self.state.write();
         Self::tighten_policy_in(
             &mut work.view(&self.work_catalog),
-            &mut storage,
+            &mut storage.view_mut(),
             position,
             dimension,
             upper_bound,
@@ -1499,12 +1536,12 @@ where
 
     fn tighten_policy_in(
         work: &mut work::WorkView<'_, D>,
-        storage: &mut LedgerState<P, D>,
+        storage: &mut StorageViewMut<'_, P, D>,
         position: usize,
         dimension: D,
         upper_bound: DimensionPolicy,
     ) -> Result<(), LedgerCause<D>> {
-        Self::ensure_open(storage)?;
+        Self::ensure_open_header(storage.header)?;
         if work.header.mode != WorkMode::Ordinary {
             return Err(LedgerCause::PublicationAlreadyCompleted);
         }
@@ -1548,7 +1585,7 @@ where
         }
         self.work.check_quiescent(self.work_catalog.len())?;
         let work = &mut self.work;
-        let storage = lock(&self.state);
+        let storage = self.state.read();
         Self::ensure_open(&storage)?;
         if work.header.mode != WorkMode::Ordinary {
             return Err(LedgerCause::PublicationAlreadyPending);
@@ -1721,6 +1758,13 @@ where
         state: &LedgerState<P, D>,
         admission: StorageAdmission,
     ) -> Result<(), LedgerCause<D>> {
+        Self::ensure_storage_admission_header(&state.header, admission)
+    }
+
+    fn ensure_storage_admission_header(
+        state: &LedgerHeader<P>,
+        admission: StorageAdmission,
+    ) -> Result<(), LedgerCause<D>> {
         match (state.publication, admission) {
             (PublicationState::Open, StorageAdmission::Ordinary)
             | (PublicationState::Closing, StorageAdmission::ProtectedEvidence) => Ok(()),
@@ -1744,7 +1788,7 @@ where
 
     /// Reserves byte capacity before allocation or backend entry.
     pub fn reserve(
-        &self,
+        &mut self,
         phase: P,
         dimension: D,
         bytes: u64,
@@ -1754,28 +1798,67 @@ where
     }
 
     fn reserve_core(
-        &self,
+        &mut self,
         phase: P,
         dimension: D,
         bytes: u64,
         admission: StorageAdmission,
     ) -> Result<ReservationCore<O, P, D>, LedgerCause<D>> {
-        Self::reserve_core_in(
-            &self.state,
+        let positions = ReservationPositions {
+            dimension: self.bound_dimension_position(dimension),
+            phase: self.bound_phase_position(phase),
+        };
+        Self::reserve_selected_core(
+            &mut self.state,
             self.operation_live_byte_limit,
             phase,
             dimension,
             bytes,
             admission,
-            ReservationPositions {
-                dimension: self.bound_dimension_position(dimension),
-                phase: self.bound_phase_position(phase),
-            },
+            positions,
         )
     }
 
+    fn reserve_selected_core(
+        storage: &mut DynamicStorage<P, D>,
+        operation_live_byte_limit: u64,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        admission: StorageAdmission,
+        positions: ReservationPositions<D>,
+    ) -> Result<ReservationCore<O, P, D>, LedgerCause<D>> {
+        if matches!(storage, DynamicStorage::Inline(_)) {
+            let projection = Self::project_reservation_in(
+                operation_live_byte_limit,
+                &storage.read().view(),
+                dimension,
+                bytes,
+                NonZeroU64::MIN,
+                admission,
+                positions,
+            )?;
+            let shared = storage
+                .ensure_shared()
+                .map_err(|cause| LedgerCause::Evidence { cause })?;
+            Self::install_reservation(shared, phase, dimension, bytes, projection)
+        } else {
+            Self::reserve_core_in(
+                storage
+                    .shared()
+                    .expect("shared selection remains installed"),
+                operation_live_byte_limit,
+                phase,
+                dimension,
+                bytes,
+                admission,
+                positions,
+            )
+        }
+    }
+
     fn reserve_core_in(
-        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        storage: &Arc<Mutex<Option<LedgerState<P, D>>>>,
         operation_live_byte_limit: u64,
         phase: P,
         dimension: D,
@@ -1786,13 +1869,44 @@ where
         let mut state = lock(storage);
         let projection = Self::project_reservation_in(
             operation_live_byte_limit,
-            &state,
+            &state.view(),
             dimension,
             bytes,
             NonZeroU64::MIN,
             admission,
             positions,
         )?;
+        Self::apply_reservation(&mut state.view_mut(), &projection);
+        drop(state);
+        Ok(ReservationCore::new(
+            Arc::clone(storage),
+            phase,
+            projection.phase_position,
+            dimension,
+            projection.dimension_position,
+            bytes,
+        ))
+    }
+
+    fn install_reservation(
+        storage: &Arc<Mutex<Option<LedgerState<P, D>>>>,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        projection: ReservationProjection,
+    ) -> Result<ReservationCore<O, P, D>, LedgerCause<D>> {
+        Self::apply_reservation(&mut lock(storage).view_mut(), &projection);
+        Ok(ReservationCore::new(
+            Arc::clone(storage),
+            phase,
+            projection.phase_position,
+            dimension,
+            projection.dimension_position,
+            bytes,
+        ))
+    }
+
+    fn apply_reservation(state: &mut StorageViewMut<'_, P, D>, projection: &ReservationProjection) {
         let ReservationProjection {
             dimension_position,
             dimension_live,
@@ -1800,7 +1914,7 @@ where
             phase_position,
             phase_live,
             active_reservations,
-        } = projection;
+        } = *projection;
 
         let dimension_state = &mut state.dimensions[dimension_position].state;
         dimension_state.current_live_bytes = dimension_live;
@@ -1811,27 +1925,18 @@ where
         state.current_live_bytes = operation_live;
         state.peak_live_bytes = state.peak_live_bytes.max(operation_live);
         state.active_reservations = active_reservations;
-
-        Ok(ReservationCore::new(
-            Arc::clone(storage),
-            phase,
-            phase_position,
-            dimension,
-            dimension_position,
-            bytes,
-        ))
     }
 
     fn project_reservation_in(
         operation_live_byte_limit: u64,
-        state: &LedgerState<P, D>,
+        state: &StorageView<'_, P, D>,
         dimension: D,
         bytes: u64,
         reservation_count: NonZeroU64,
         admission: StorageAdmission,
         positions: ReservationPositions<D>,
     ) -> Result<ReservationProjection, LedgerCause<D>> {
-        Self::ensure_storage_admission(state, admission)?;
+        Self::ensure_storage_admission_header(state.header, admission)?;
         let dimension_position = positions.dimension?;
         let dimension_entry = &state.dimensions[dimension_position];
         let dimension_limit = dimension_entry
@@ -1911,10 +2016,10 @@ where
     ) -> Result<(), LedgerCause<D>> {
         let dimension_position = self.bound_dimension_position(dimension);
         let phase_position = self.bound_phase_position(phase);
-        let state = lock(&self.state);
+        let state = self.state.read();
         Self::project_reservation_in(
             self.operation_live_byte_limit,
-            &state,
+            &state.view(),
             dimension,
             bytes,
             reservation_count,
@@ -1932,7 +2037,7 @@ where
         reason = "crate-private until the U4 canonical consumers switch atomically"
     )]
     pub(crate) fn reserve_operation_attribution<Destination>(
-        &self,
+        &mut self,
         phase: P,
         dimension: D,
         bytes: u64,
@@ -1953,7 +2058,7 @@ where
         reason = "crate-private until the U4 canonical consumers switch atomically"
     )]
     pub(crate) fn try_attribution_batch<Destination>(
-        &self,
+        &mut self,
         phase: P,
         capacity_dimension: D,
         attribution_limit: usize,
@@ -1976,7 +2081,7 @@ where
         reason = "crate-private until the U4 canonical consumers switch atomically"
     )]
     pub(crate) fn try_attribution_batch_from_plan<Destination>(
-        &self,
+        &mut self,
         plan: AttributionBatchPlan<O, P, D, Destination>,
     ) -> Result<AttributionReservationBatch<O, P, D, Destination>, AttributionBatchCreateError<D>>
     where
@@ -2040,13 +2145,23 @@ where
             (None, _) => return Err(AttributionBatchCreateError::CapacityOverflow),
         }
 
+        let owner = if capacity_cover.is_none() {
+            reservation::AttributionBatchOwner::Empty(self.identity)
+        } else {
+            Arc::clone(
+                self.state
+                    .shared()
+                    .expect("a capacity cover retains the installed shared owner"),
+            )
+            .into()
+        };
         Ok(AttributionReservationBatch {
             attributions,
             commitments,
             capacity_cover,
             attribution_limit,
             commitment_limit,
-            owner: Arc::clone(&self.state),
+            owner,
         })
     }
 
@@ -2062,7 +2177,7 @@ where
     where
         Destination: PublicationDestination,
     {
-        if !Arc::ptr_eq(&batch.owner, &self.state) {
+        if !batch.validate_selected_owner(self) {
             return Err(CommitmentPushError::Ledger {
                 commitment,
                 cause: LedgerCause::OwnerMismatch,
@@ -2077,7 +2192,7 @@ where
             Err(cause) => return Err(CommitmentPushError::Ledger { commitment, cause }),
         };
         let bound_position = self.bound_dimension_position(commitment.dimension);
-        let state = lock(&self.state);
+        let state = self.state.read();
         if let Err(cause) = Self::ensure_storage_admission(&state, admission) {
             return Err(CommitmentPushError::Ledger { commitment, cause });
         }
@@ -2110,9 +2225,9 @@ where
             .check_integrity(self.work_catalog.len())
             .map_err(CommitmentPairPushError::Ledger)?;
         let work = &self.work;
-        let state = lock(&self.state);
-        if !canonical_batch.validate_owner(&self.state)
-            || !evidence_batch.validate_owner(&self.state)
+        let state = self.state.read();
+        if !canonical_batch.validate_selected_owner(self)
+            || !evidence_batch.validate_selected_owner(self)
         {
             return Err(CommitmentPairPushError::Ledger(LedgerCause::OwnerMismatch));
         }
@@ -2163,7 +2278,7 @@ where
         admission: StorageAdmission,
     ) -> Result<(), LedgerCause<D>> {
         Self::resize_core_in(
-            &self.state,
+            self.state.shared().ok_or(LedgerCause::OwnerMismatch)?,
             self.operation_live_byte_limit,
             reservation,
             bytes,
@@ -2172,14 +2287,30 @@ where
     }
 
     fn resize_core_in(
-        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        storage: &Arc<Mutex<Option<LedgerState<P, D>>>>,
         operation_live_byte_limit: u64,
         reservation: &mut ReservationCore<O, P, D>,
         bytes: u64,
         admission: StorageAdmission,
     ) -> Result<(), LedgerCause<D>> {
         let mut state = lock(storage);
-        Self::ensure_storage_admission(&state, admission)?;
+        Self::resize_storage_in(
+            &mut state.view_mut(),
+            operation_live_byte_limit,
+            reservation,
+            bytes,
+            admission,
+        )
+    }
+
+    fn resize_storage_in(
+        state: &mut StorageViewMut<'_, P, D>,
+        operation_live_byte_limit: u64,
+        reservation: &mut ReservationCore<O, P, D>,
+        bytes: u64,
+        admission: StorageAdmission,
+    ) -> Result<(), LedgerCause<D>> {
+        Self::ensure_storage_admission_header(state.header, admission)?;
         if bytes == reservation.bytes {
             return Ok(());
         }
@@ -2276,7 +2407,19 @@ where
         dimension: D,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
-        self.transition_reservations(std::slice::from_mut(reservation), phase, dimension, bytes)
+        let positions = ReservationPositions {
+            dimension: self.bound_dimension_position(dimension),
+            phase: self.bound_phase_position(phase),
+        };
+        Self::transition_reservations_in(
+            self.state.shared().ok_or(LedgerCause::OwnerMismatch)?,
+            self.operation_live_byte_limit,
+            std::slice::from_mut(reservation),
+            phase,
+            dimension,
+            bytes,
+            positions,
+        )
     }
 
     /// Atomically reclassifies a reservation batch into one phase and dimension.
@@ -2287,28 +2430,47 @@ where
     /// projection that preserves the dimension or operation live total does not re-admit that
     /// unchanged total against a policy tightened below already-live evidence.
     pub fn transition_reservations(
-        &self,
+        &mut self,
         reservations: &mut [LiveReservation<O, P, D>],
         phase: P,
         dimension: D,
         bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
+        let positions = ReservationPositions {
+            dimension: self.bound_dimension_position(dimension),
+            phase: self.bound_phase_position(phase),
+        };
+        if reservations.is_empty() {
+            if bytes != 0 {
+                return Err(LedgerCause::SplitExceedsReservation {
+                    requested: bytes,
+                    available: 0,
+                });
+            }
+            return Self::transition_storage_in(
+                &mut self.state.write().view_mut(),
+                self.operation_live_byte_limit,
+                reservations,
+                phase,
+                dimension,
+                bytes,
+                0,
+                positions,
+            );
+        }
         Self::transition_reservations_in(
-            &self.state,
+            self.state.shared().ok_or(LedgerCause::OwnerMismatch)?,
             self.operation_live_byte_limit,
             reservations,
             phase,
             dimension,
             bytes,
-            ReservationPositions {
-                dimension: self.bound_dimension_position(dimension),
-                phase: self.bound_phase_position(phase),
-            },
+            positions,
         )
     }
 
     fn transition_reservations_in(
-        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        storage: &Arc<Mutex<Option<LedgerState<P, D>>>>,
         operation_live_byte_limit: u64,
         reservations: &mut [LiveReservation<O, P, D>],
         phase: P,
@@ -2338,7 +2500,33 @@ where
                 })
         })?;
         let mut state = lock(storage);
-        Self::ensure_open(&state)?;
+        Self::transition_storage_in(
+            &mut state.view_mut(),
+            operation_live_byte_limit,
+            reservations,
+            phase,
+            dimension,
+            bytes,
+            source_bytes,
+            positions,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one atomic storage transition receives its current limit and already-bound source and target positions"
+    )]
+    fn transition_storage_in(
+        state: &mut StorageViewMut<'_, P, D>,
+        operation_live_byte_limit: u64,
+        reservations: &mut [LiveReservation<O, P, D>],
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        source_bytes: u64,
+        positions: ReservationPositions<D>,
+    ) -> Result<(), LedgerCause<D>> {
+        Self::ensure_open_header(state.header)?;
         let dimension_position = positions.dimension?;
         let dimension_limit = state.dimensions[dimension_position]
             .policy
@@ -2414,8 +2602,8 @@ where
         )?;
 
         for reservation in reservations.iter() {
-            release_positioned_bytes_locked(
-                &mut state,
+            release_positioned_bytes_in(
+                state,
                 reservation.core.phase_position,
                 reservation.core.dimension_position,
                 reservation.core.bytes,
@@ -2445,7 +2633,6 @@ where
             reservation.core.bytes = target_bytes;
         }
         debug_assert_eq!(remaining, 0);
-        drop(state);
         Ok(())
     }
 
@@ -2459,7 +2646,7 @@ where
         if reservation.core.retained_output {
             return Err(LedgerCause::OwnerMismatch);
         }
-        let mut state = lock(&self.state);
+        let mut state = lock(self.state.shared().ok_or(LedgerCause::OwnerMismatch)?);
         Self::ensure_open(&state)?;
         if bytes > reservation.core.bytes {
             return Err(LedgerCause::SplitExceedsReservation {
@@ -2523,31 +2710,44 @@ where
         self.work.check_integrity(self.work_catalog.len())?;
         {
             let work = &self.work;
-            let storage = lock(&self.state);
+            let storage = self.state.read();
             Self::preflight_publication(&storage, work, transaction_live_bytes)?;
         }
         // Allocation and key binding occur before either guard. This owner remains armed
         // until every current-state check succeeds and the pending transaction takes it.
-        let aggregate = aggregate_commitments(&self.state, &self.work_catalog, commitments)
+        let mut aggregate = aggregate_commitments(&mut self.state, &self.work_catalog, commitments)
             .map_err(|cause| match cause {
                 AggregateCommitmentError::Ledger(cause) => cause,
                 AggregateCommitmentError::Evidence(cause) => LedgerCause::Evidence { cause },
             })?;
         let work = &mut self.work;
-        let mut storage = lock(&self.state);
-        Self::preflight_publication(&storage, work, transaction_live_bytes)?;
-        validate_commitments(&storage.dimensions, aggregate.entries())?;
-        for commitment in aggregate.entries() {
-            storage.dimensions[commitment.dimension_position]
-                .state
-                .pending_publication += commitment.amount;
-        }
-        storage.publication = PublicationState::Pending;
+        let (selected, entries) = aggregate.parts();
+        let owner = match selected {
+            DynamicStorage::Inline(_) => {
+                {
+                    let storage = selected.read();
+                    Self::preflight_publication(&storage, work, transaction_live_bytes)?;
+                    validate_commitments(&storage.dimensions, entries)?;
+                }
+                let shared = selected
+                    .ensure_shared()
+                    .map_err(|cause| LedgerCause::Evidence { cause })?;
+                Self::install_pending_publication(&mut lock(shared), entries);
+                Arc::clone(shared)
+            }
+            DynamicStorage::Shared(shared) => {
+                let mut storage = lock(shared);
+                Self::preflight_publication(&storage, work, transaction_live_bytes)?;
+                validate_commitments(&storage.dimensions, entries)?;
+                Self::install_pending_publication(&mut storage, entries);
+                drop(storage);
+                Arc::clone(shared)
+            }
+        };
         work.header.mode = WorkMode::OrdinarySealed;
-        drop(storage);
         let (commitments, evidence_bytes) = aggregate.into_parts();
         Ok(PendingPublication {
-            owner: Arc::clone(&self.state),
+            owner,
             reservations: std::mem::take(reservations),
             commitments,
             evidence_bytes,
@@ -2556,12 +2756,24 @@ where
         })
     }
 
+    fn install_pending_publication(
+        storage: &mut LedgerState<P, D>,
+        commitments: &[AggregatedCommitment<D>],
+    ) {
+        for commitment in commitments {
+            storage.dimensions[commitment.dimension_position]
+                .state
+                .pending_publication += commitment.amount;
+        }
+        storage.publication = PublicationState::Pending;
+    }
+
     fn preflight_publication(
         storage: &LedgerState<P, D>,
         work: &WorkState<D>,
         transaction_live_bytes: u64,
     ) -> Result<(), LedgerCause<D>> {
-        Self::ensure_open(storage)?;
+        Self::ensure_open_header(&storage.header)?;
         if work.header.mode != WorkMode::Ordinary {
             return Err(LedgerCause::PublicationAlreadyPending);
         }
@@ -2576,19 +2788,50 @@ where
     }
 
     /// Captures immutable owner-neutral evidence without finalizing the ledger.
-    pub fn try_snapshot(&self) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError> {
-        try_snapshot(&self.state, &self.work_catalog, &self.work)
+    pub fn try_snapshot(&mut self) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError> {
+        try_snapshot(&mut self.state, &self.work_catalog, &self.work)
     }
 
     /// Observes only the transaction-temporary live state under one ledger lock.
     pub(crate) fn planning_state(&self) -> LedgerPlanningState {
-        self.storage_view().planning_state()
+        let state = self.state.read();
+        LedgerPlanningState {
+            current_live_bytes: state.current_live_bytes - state.retained_output_bytes,
+            active_reservations: state.active_reservations - state.retained_output_reservations,
+        }
     }
 
-    pub(crate) fn release_progress_evidence(&self, retained_bytes: u64) {
-        let mut state = lock(&self.state);
-        debug_assert!(state.current_evidence_bytes >= retained_bytes);
-        release_evidence(&mut state, retained_bytes);
+    pub(crate) fn known_administrative_bytes(&self, progress_bytes: u64) -> Option<u64> {
+        let storage = self.state.read();
+        let buffers = [
+            capacity_bytes(&self.work_catalog).ok()?,
+            capacity_bytes(&self.work.rows).ok()?,
+            capacity_bytes(&self.phase_catalogue).ok()?,
+            capacity_bytes(&storage.dimensions).ok()?,
+            capacity_bytes(&storage.phases).ok()?,
+            capacity_bytes(&storage.phase_states).ok()?,
+            capacity_bytes(&storage.dimension_snapshot_staging).ok()?,
+            capacity_bytes(&storage.phase_snapshot_staging).ok()?,
+            progress_bytes,
+            if self.state.shared().is_some() {
+                u64::try_from(size_of::<Mutex<Option<LedgerState<P, D>>>>()).ok()?
+            } else {
+                0
+            },
+        ];
+        buffers.into_iter().try_fold(0_u64, u64::checked_add)
+    }
+
+    pub(crate) fn release_detached_administration(state: &mut LedgerState<P, D>, bytes: u64) {
+        release_evidence(state, bytes);
+    }
+
+    pub(crate) fn retire_detached_indexes(self, state: &mut LedgerState<P, D>) {
+        let bytes = capacity_bytes(&self.work_catalog).expect("qualified work catalog capacity")
+            + capacity_bytes(&self.work.rows).expect("qualified work rows capacity")
+            + capacity_bytes(&self.phase_catalogue).expect("qualified phase catalog capacity");
+        drop(self);
+        release_evidence(state, bytes);
     }
 
     /// Copies one dimension's scalar evidence without allocating a full snapshot.
@@ -2599,7 +2842,7 @@ where
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         self.work.check_integrity(self.work_catalog.len())?;
         let work = &self.work;
-        let storage = lock(&self.state);
+        let storage = self.state.read();
         Ok(dimension_snapshot(DimensionState::join(
             work.rows[position].state,
             storage.dimensions[position].state,
@@ -2652,9 +2895,9 @@ where
     ///
     /// Repeating the current phase is idempotent. Every rejection occurs before the stored
     /// completion position changes.
-    pub(crate) fn try_complete_phase(&self, phase: P) -> Result<(), PhaseCompletionError<P>> {
+    pub(crate) fn try_complete_phase(&mut self, phase: P) -> Result<(), PhaseCompletionError<P>> {
         let bound_position = self.bound_phase_position(phase);
-        let mut state = lock(&self.state);
+        let mut state = self.state.write();
         match state.publication {
             PublicationState::Open => {}
             PublicationState::Closing | PublicationState::Pending => {
@@ -2667,6 +2910,14 @@ where
         if !phase_catalog_shape_is_valid(&state) {
             return Err(PhaseCompletionError::CatalogShapeMismatch);
         }
+        Self::complete_phase_in(&mut state.view_mut(), phase, bound_position)
+    }
+
+    fn complete_phase_in(
+        state: &mut StorageViewMut<'_, P, D>,
+        phase: P,
+        bound_position: Result<usize, LedgerCause<D>>,
+    ) -> Result<(), PhaseCompletionError<P>> {
         let phase_position =
             bound_position.map_err(|_| PhaseCompletionError::UnknownPhase { phase })?;
         let Some(last_completed) = state.last_completed_phase else {
@@ -2704,10 +2955,10 @@ where
     where
         Destination: DestinationState,
     {
-        if !first.validate_owner(&self.state) || !second.validate_owner(&self.state) {
+        if !first.validate_selected_owner(self) || !second.validate_selected_owner(self) {
             return Err(LedgerCause::OwnerMismatch);
         }
-        validate_typed_commitment_pair(&lock(&self.state).dimensions, first, second)
+        validate_typed_commitment_pair(&self.state.read().dimensions, first, second)
     }
 
     #[allow(
@@ -2764,7 +3015,7 @@ where
             }
         }
         let work = &self.work;
-        let state = lock(&self.state);
+        let state = self.state.read();
         self.validate_fallback_baseline_locked(&state, work, baseline, qualification)?;
         preflight_typed_publication_batch(&state, &baseline.canonical_assembly)?;
         preflight_typed_publication_batch(&state, &baseline.evidence_assembly)?;
@@ -2784,10 +3035,10 @@ where
         baseline: &FallbackBatchBaseline<O, P, D>,
         qualification: FallbackBaselineQualification,
     ) -> Result<(), LedgerCause<D>> {
-        if !baseline.canonical_assembly.validate_owner(&self.state)
-            || !baseline.evidence_assembly.validate_owner(&self.state)
-            || !baseline.fallback.validate_owner(&self.state)
-            || !baseline.evidence.validate_owner(&self.state)
+        if !baseline.canonical_assembly.validate_selected_owner(self)
+            || !baseline.evidence_assembly.validate_selected_owner(self)
+            || !baseline.fallback.validate_selected_owner(self)
+            || !baseline.evidence.validate_selected_owner(self)
         {
             return Err(LedgerCause::OwnerMismatch);
         }
@@ -2884,7 +3135,7 @@ where
     ) -> Result<(), LedgerCause<D>> {
         self.work.check_integrity(self.work_catalog.len())?;
         let work = &self.work;
-        let state = lock(&self.state);
+        let state = self.state.read();
         self.preflight_primary_publication_locked(
             &state,
             work,
@@ -2964,16 +3215,16 @@ where
             &mut AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
         >,
     ) -> Result<(), LedgerCause<D>> {
-        if !baseline.canonical_assembly.validate_owner(&self.state)
-            || !baseline.evidence_assembly.validate_owner(&self.state)
-            || !baseline.fallback.validate_owner(&self.state)
-            || !baseline.evidence.validate_owner(&self.state)
+        if !baseline.canonical_assembly.validate_selected_owner(self)
+            || !baseline.evidence_assembly.validate_selected_owner(self)
+            || !baseline.fallback.validate_selected_owner(self)
+            || !baseline.evidence.validate_selected_owner(self)
             || canonical_discard
                 .as_deref()
-                .is_some_and(|batch| !batch.validate_owner(&self.state))
+                .is_some_and(|batch| !batch.validate_selected_owner(self))
             || evidence_discard
                 .as_deref()
-                .is_some_and(|batch| !batch.validate_owner(&self.state))
+                .is_some_and(|batch| !batch.validate_selected_owner(self))
         {
             return Err(LedgerCause::OwnerMismatch);
         }
@@ -2986,7 +3237,7 @@ where
 
         self.work.check_integrity(self.work_catalog.len())?;
         let work = &self.work;
-        let state = lock(&self.state);
+        let state = self.state.read();
         Self::ensure_terminal_preflight(&state, work)?;
         validate_final_snapshot_shape(&state, work)?;
         if let Some(batch) = canonical_discard.as_deref() {
@@ -3006,51 +3257,6 @@ where
         Ok(())
     }
 
-    /// Consumes a primary batch graph only after [`Self::try_bind_primary`] has completed.
-    ///
-    /// Binding and source absorption already completed while the caller retained the coupled
-    /// physical owner. This step performs only field moves and can therefore consume the graph
-    /// without opening a storage-before-attribution unwind window.
-    #[allow(
-        dead_code,
-        reason = "crate-private until the U4 canonical consumers switch atomically"
-    )]
-    pub(crate) fn finish_bound_primary(
-        self,
-        baseline: FallbackBatchBaseline<O, P, D>,
-        canonical_source: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
-        evidence_source: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
-        publish_canonical: bool,
-    ) -> TypedFreezeProof<O, P, D> {
-        let FallbackBatchBaseline {
-            canonical_assembly,
-            evidence_assembly,
-            fallback,
-            evidence,
-        } = baseline;
-        let discard_evidence = if fallback.active_count() == Some(0) {
-            drop(fallback);
-            None
-        } else {
-            Some(fallback)
-        };
-        let (deferred_canonical_storage, discard_canonical) = if publish_canonical {
-            (canonical_source, None)
-        } else {
-            (None, canonical_source)
-        };
-        TypedFreezeProof {
-            canonical: canonical_assembly,
-            evidence: evidence_assembly,
-            deferred_canonical_storage,
-            deferred_evidence_storage_first: Some(evidence),
-            deferred_evidence_storage_second: evidence_source,
-            discard_canonical,
-            discard_evidence,
-            ledger: self,
-        }
-    }
-
     #[allow(
         dead_code,
         clippy::too_many_arguments,
@@ -3067,12 +3273,12 @@ where
         canonical_extra: Option<&OutputCommitment<D, CanonicalOutput>>,
         evidence_extra: Option<&OutputCommitment<D, OutcomeEvidenceDestination>>,
     ) -> Result<(), LedgerCause<D>> {
-        if !baseline.canonical_assembly.validate_owner(&self.state)
-            || !baseline.evidence_assembly.validate_owner(&self.state)
-            || !baseline.fallback.validate_owner(&self.state)
-            || !baseline.evidence.validate_owner(&self.state)
-            || canonical_source.is_some_and(|batch| !batch.validate_owner(&self.state))
-            || evidence_source.is_some_and(|batch| !batch.validate_owner(&self.state))
+        if !baseline.canonical_assembly.validate_selected_owner(self)
+            || !baseline.evidence_assembly.validate_selected_owner(self)
+            || !baseline.fallback.validate_selected_owner(self)
+            || !baseline.evidence.validate_selected_owner(self)
+            || canonical_source.is_some_and(|batch| !batch.validate_selected_owner(self))
+            || evidence_source.is_some_and(|batch| !batch.validate_selected_owner(self))
         {
             return Err(LedgerCause::OwnerMismatch);
         }
@@ -3224,7 +3430,7 @@ where
     /// Copies one phase's scalar evidence without allocating a full snapshot.
     pub fn phase_evidence(&self, phase: P) -> Option<PhaseSnapshot> {
         let position = self.bound_phase_position(phase).ok()?;
-        let state = lock(&self.state);
+        let state = self.state.read();
         state
             .phase_states
             .get(position)
@@ -3236,71 +3442,74 @@ where
         clippy::result_large_err,
         reason = "boxing final evidence would allocate on the invariant-failure path"
     )]
-    pub fn finish(self) -> Result<LedgerSnapshot<P, D>, LedgerFinishError<P, D>> {
-        let Self {
-            mut work,
-            work_catalog,
-            phase_catalogue: _phase_catalogue,
-            state,
-            ..
-        } = self;
-        work.header.integrity_fault |= work.rows.len() != work_catalog.len();
-        let mut state = lock(&state);
-        let shape_cause = validate_final_snapshot_shape(&state, &work).err();
-        let live_cause =
-            (state.current_live_bytes != 0).then_some(LedgerCause::LiveReservationsRemain {
-                bytes: state.current_live_bytes,
-            });
-        let pending_cause = matches!(
-            state.publication,
-            PublicationState::Pending | PublicationState::TerminalQualified
-        )
-        .then_some(LedgerCause::PendingPublicationsRemain);
-        let reservation_cause = (state.current_live_bytes == 0 && state.active_reservations != 0)
-            .then_some(LedgerCause::ActiveReservationsRemain {
-                count: state.active_reservations,
-            });
-        let clean = shape_cause.is_none()
-            && live_cause.is_none()
-            && pending_cause.is_none()
-            && reservation_cause.is_none();
-        let evidence = take_final_snapshot(&mut state, &work, clean);
-        if let Some(cause) = shape_cause {
-            return Err(LedgerFinishError {
-                cause,
-                snapshot: evidence,
-            });
+    pub(crate) fn terminal_residue_cause(&self) -> Option<LedgerCause<D>> {
+        let state = self.state.read();
+        self.work
+            .check_integrity(self.work_catalog.len())
+            .err()
+            .or_else(|| validate_final_snapshot_shape(&state, &self.work).err())
+            .or_else(|| {
+                (state.current_live_bytes != 0).then_some(LedgerCause::LiveReservationsRemain {
+                    bytes: state.current_live_bytes,
+                })
+            })
+            .or_else(|| {
+                matches!(
+                    state.publication,
+                    PublicationState::Pending | PublicationState::TerminalQualified
+                )
+                .then_some(LedgerCause::PendingPublicationsRemain)
+            })
+            .or_else(|| {
+                (state.active_reservations != 0).then_some(LedgerCause::ActiveReservationsRemain {
+                    count: state.active_reservations,
+                })
+            })
+    }
+
+    pub(crate) fn take_terminal_snapshot(
+        &mut self,
+        progress_bytes: u64,
+    ) -> (LedgerSnapshot<P, D>, Option<LedgerCause<D>>) {
+        let known = self.known_administrative_bytes(progress_bytes);
+        let cause = self.terminal_residue_cause();
+        let mut storage = self.state.write();
+        let cause = cause.or_else(|| {
+            (known != Some(storage.current_administrative_bytes))
+                .then_some(LedgerCause::FinalSnapshotShapeMismatch)
+        });
+        let mut snapshot = take_final_snapshot(&mut storage, &self.work, cause.is_none());
+        snapshot.qualify_administrative_coverage(known);
+        (snapshot, cause)
+    }
+
+    #[cfg(test)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "the test-only consuming path preserves the exact non-normalized snapshot without allocating"
+    )]
+    pub fn finish(mut self) -> Result<LedgerSnapshot<P, D>, LedgerFinishError<P, D>> {
+        let (snapshot, cause) = self.take_terminal_snapshot(0);
+        if let Some(cause) = cause {
+            std::mem::forget(self);
+            Err(LedgerFinishError { cause, snapshot })
+        } else {
+            Ok(snapshot)
         }
-        if let Some(cause) = live_cause {
-            return Err(LedgerFinishError {
-                cause,
-                snapshot: evidence,
-            });
-        }
-        if let Some(cause) = pending_cause {
-            return Err(LedgerFinishError {
-                cause,
-                snapshot: evidence,
-            });
-        }
-        if let Some(cause) = reservation_cause {
-            return Err(LedgerFinishError {
-                cause,
-                snapshot: evidence,
-            });
-        }
-        Ok(evidence)
     }
 
     fn check_reservation(
         &self,
         reservation: &LiveReservation<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        Self::check_reservation_in(&self.state, reservation)
+        Self::check_reservation_in(
+            self.state.shared().ok_or(LedgerCause::OwnerMismatch)?,
+            reservation,
+        )
     }
 
     fn check_reservation_in(
-        storage: &Arc<Mutex<LedgerState<P, D>>>,
+        storage: &Arc<Mutex<Option<LedgerState<P, D>>>>,
         reservation: &LiveReservation<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
         if !reservation.core.is_owned_by(storage) {
@@ -3316,14 +3525,14 @@ where
         &self,
         publication: &PendingPublication<O, P, D>,
     ) -> Result<(), LedgerCause<D>> {
-        if !Arc::ptr_eq(&self.state, &publication.owner) {
+        if !self.state.owns(&publication.owner) {
             return Err(LedgerCause::OwnerMismatch);
         }
         if !publication.pending {
             return Err(LedgerCause::InactivePublication);
         }
         let transaction_live_bytes = Self::reservation_bytes(&publication.reservations)?;
-        let state = lock(&self.state);
+        let state = self.state.read();
         if state.publication != PublicationState::Pending {
             return Err(LedgerCause::InactivePublication);
         }
@@ -3343,7 +3552,7 @@ where
         self.check_publication(publication)?;
         self.seal_ordinary_work()?;
         self.close_work()?;
-        let mut state = lock(&self.state);
+        let mut state = self.state.write();
         if state.publication != PublicationState::Pending {
             return Err(LedgerCause::InactivePublication);
         }
@@ -3389,12 +3598,16 @@ where
             .reservations
             .destroy_backing_then_release_cover();
         drop(std::mem::take(&mut publication.commitments));
-        release_evidence(&mut lock(&self.state), publication.evidence_bytes);
+        release_evidence(&mut self.state.write(), publication.evidence_bytes);
         publication.evidence_bytes = 0;
         Ok(())
     }
 
     fn ensure_open(state: &LedgerState<P, D>) -> Result<(), LedgerCause<D>> {
+        Self::ensure_open_header(&state.header)
+    }
+
+    fn ensure_open_header(state: &LedgerHeader<P>) -> Result<(), LedgerCause<D>> {
         match state.publication {
             PublicationState::Open => Ok(()),
             PublicationState::Closing => Err(LedgerCause::PublicationAlreadyPending),
@@ -3551,14 +3764,14 @@ impl<O, P, D> FallbackBatchBaseline<O, P, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    pub(crate) fn finish_prepared_fallback_proof(
+    pub(crate) fn finish_prepared_fallback_proof<'inv, PP: ProgressPhase, U: ProgressUnit>(
         self,
-        ledger: Ledger<O, P, D>,
+        ledger: TerminalInvocationLoan<'inv, O, P, PP, U, D>,
         discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
         discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
-    ) -> TypedFreezeProof<O, P, D> {
+    ) -> TypedFreezeProof<'inv, O, P, PP, U, D> {
         let Self {
             canonical_assembly,
             evidence_assembly,
@@ -3578,12 +3791,12 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn into_fallback_proof(
+    pub(crate) fn into_fallback_proof<'inv, PP: ProgressPhase, U: ProgressUnit>(
         mut self,
-        ledger: Ledger<O, P, D>,
+        ledger: TerminalInvocationLoan<'inv, O, P, PP, U, D>,
         discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
         discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
-    ) -> TypedFreezeProof<O, P, D> {
+    ) -> TypedFreezeProof<'inv, O, P, PP, U, D> {
         assert!(self.try_prepare_fallback_sources().is_ok());
         self.finish_prepared_fallback_proof(ledger, discard_canonical, discard_evidence)
     }
@@ -3593,11 +3806,13 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-pub(crate) struct TypedFreezeProof<O, P, D>
+pub(crate) struct TypedFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     canonical: AttributionReservationBatch<O, P, D, CanonicalOutput>,
     evidence: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
@@ -3608,7 +3823,7 @@ where
         Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
     discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
-    ledger: Ledger<O, P, D>,
+    ledger: TerminalInvocationLoan<'inv, O, P, PP, U, D>,
 }
 
 #[allow(
@@ -3671,13 +3886,15 @@ pub(crate) enum TypedFreezeQualificationError {
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-struct QualifiedTypedFreezeProof<O, P, D>
+struct QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    proof: Option<TypedFreezeProof<O, P, D>>,
+    proof: Option<TypedFreezeProof<'inv, O, P, PP, U, D>>,
     last_completed_phase: Option<P>,
 }
 
@@ -3685,13 +3902,15 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-pub(crate) struct QualifiedEvidenceDiscardFreezeProof<O, P, D>
+pub(crate) struct QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    proof: Option<QualifiedTypedFreezeProof<O, P, D>>,
+    proof: Option<QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>>,
     discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     acknowledgement: QualifiedDiscardAcknowledgement,
 }
@@ -3706,13 +3925,15 @@ enum QualifiedDiscardAcknowledgement {
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-pub(crate) struct QualifiedCanonicalDiscardFreezeProof<O, P, D>
+pub(crate) struct QualifiedCanonicalDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    proof: Option<QualifiedTypedFreezeProof<O, P, D>>,
+    proof: Option<QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>>,
     discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
     acknowledgement: QualifiedDiscardAcknowledgement,
 }
@@ -3721,13 +3942,15 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-pub(crate) struct QualifiedBothDiscardFreezeProof<O, P, D>
+pub(crate) struct QualifiedBothDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    proof: Option<QualifiedTypedFreezeProof<O, P, D>>,
+    proof: Option<QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>>,
     discard_canonical: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
     discard_evidence: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
     acknowledgement: QualifiedDiscardAcknowledgement,
@@ -3737,29 +3960,33 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-pub(crate) enum QualifiedTypedDiscardFreezeProof<O, P, D>
+pub(crate) enum QualifiedTypedDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    None(FreezeReadyTypedProof<O, P, D>),
-    Canonical(QualifiedCanonicalDiscardFreezeProof<O, P, D>),
-    Evidence(QualifiedEvidenceDiscardFreezeProof<O, P, D>),
-    Both(QualifiedBothDiscardFreezeProof<O, P, D>),
+    None(FreezeReadyTypedProof<'inv, O, P, PP, U, D>),
+    Canonical(QualifiedCanonicalDiscardFreezeProof<'inv, O, P, PP, U, D>),
+    Evidence(QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>),
+    Both(QualifiedBothDiscardFreezeProof<'inv, O, P, PP, U, D>),
 }
 
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-pub(crate) struct FreezeReadyTypedProof<O, P, D>
+pub(crate) struct FreezeReadyTypedProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
-    proof: Option<QualifiedTypedFreezeProof<O, P, D>>,
+    proof: Option<QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>>,
 }
 
 /// Why a terminal-qualified ledger could not become an exclusively owned publication capsule.
@@ -3797,37 +4024,6 @@ where
     batches: DetachedTypedBatches<O, P, D>,
 }
 
-enum FailedDetachedLedgerState<P, D> {
-    Shared(Arc<Mutex<LedgerState<P, D>>>),
-    Owned(LedgerState<P, D>),
-}
-
-struct FailedDetachedLiveLedgerCover<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    state: FailedDetachedLedgerState<P, D>,
-    batches: DetachedTypedBatches<O, P, D>,
-}
-
-impl<O, P, D> FailedDetachedLiveLedgerCover<O, P, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    D: Copy + Ord,
-{
-    fn retain_fail_closed(self) {
-        let Self { state, batches } = self;
-        match state {
-            FailedDetachedLedgerState::Shared(state) => std::mem::forget(state),
-            FailedDetachedLedgerState::Owned(state) => std::mem::forget(state),
-        }
-        std::mem::forget(batches);
-    }
-}
-
 /// A terminal-qualified ledger whose physical accounting graph and mutable state are exclusively
 /// owned, but whose physical account has not yet crossed publication eligibility.
 ///
@@ -3846,15 +4042,19 @@ where
 /// A consuming detach failure that still owns every ledger and reservation component.
 ///
 /// This value cannot retry or refund. Dropping it deliberately retains the complete graph.
-pub(crate) struct TypedFreezeDetachError<O, P, D>
+pub(crate) struct TypedFreezeDetachError<O, P, PP, U, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
 {
+    #[cfg(test)]
     kind: TypedFreezeDetachErrorKind,
     projection: Option<LedgerSnapshot<P, D>>,
-    cover: Option<Box<FailedDetachedLiveLedgerCover<O, P, D>>>,
+    invocation: Option<OperationInvocation<O, P, PP, U, D>>,
+    batches: Option<DetachedTypedBatches<O, P, D>>,
 }
 
 #[cfg(test)]
@@ -3862,7 +4062,7 @@ where
 pub(crate) struct DetachedLedgerTerminalScalars {
     pub(crate) current_live_bytes: u64,
     pub(crate) active_reservations: u64,
-    pub(crate) current_evidence_bytes: u64,
+    pub(crate) current_administrative_bytes: u64,
     pub(crate) published: bool,
 }
 
@@ -3870,11 +4070,13 @@ pub(crate) struct DetachedLedgerTerminalScalars {
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-impl<O, P, D> TypedFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> TypedFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn validate_terminal(
         &self,
@@ -3887,34 +4089,34 @@ where
         if !typed_terminal_snapshot_positions_are_valid(state, work) {
             return Err(TypedFreezeQualificationError::SnapshotShape);
         }
-        if !self.canonical.validate_owner(&self.ledger.state)
-            || !self.evidence.validate_owner(&self.ledger.state)
+        if !self.canonical.validate_selected_owner(&self.ledger)
+            || !self.evidence.validate_selected_owner(&self.ledger)
             || self
                 .deferred_canonical_storage
                 .as_ref()
                 .is_some_and(|batch| {
-                    !batch.validate_owner(&self.ledger.state) || !batch.is_empty_storage_shell()
+                    !batch.validate_selected_owner(&self.ledger) || !batch.is_empty_storage_shell()
                 })
             || self
                 .deferred_evidence_storage_first
                 .as_ref()
                 .is_some_and(|batch| {
-                    !batch.validate_owner(&self.ledger.state) || !batch.is_empty_storage_shell()
+                    !batch.validate_selected_owner(&self.ledger) || !batch.is_empty_storage_shell()
                 })
             || self
                 .deferred_evidence_storage_second
                 .as_ref()
                 .is_some_and(|batch| {
-                    !batch.validate_owner(&self.ledger.state) || !batch.is_empty_storage_shell()
+                    !batch.validate_selected_owner(&self.ledger) || !batch.is_empty_storage_shell()
                 })
             || self
                 .discard_canonical
                 .as_ref()
-                .is_some_and(|batch| !batch.validate_owner(&self.ledger.state))
+                .is_some_and(|batch| !batch.validate_selected_owner(&self.ledger))
             || self
                 .discard_evidence
                 .as_ref()
-                .is_some_and(|batch| !batch.validate_owner(&self.ledger.state))
+                .is_some_and(|batch| !batch.validate_selected_owner(&self.ledger))
         {
             return Err(TypedFreezeQualificationError::Ownership);
         }
@@ -4235,14 +4437,26 @@ where
         clippy::result_large_err,
         reason = "qualification rejection must return the intact linear proof without allocation or indirection"
     )]
-    fn qualify_terminal(self) -> Result<QualifiedTypedFreezeProof<O, P, D>, Self> {
+    fn qualify_terminal(self) -> Result<QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>, Self> {
         let qualification = (|| {
+            let known_administrative_bytes = self
+                .ledger
+                .known_administrative_bytes()
+                .ok_or(TypedFreezeQualificationError::SnapshotShape)?;
             self.ledger
                 .work
                 .check_integrity(self.ledger.work_catalog.len())
                 .map_err(|_| TypedFreezeQualificationError::SnapshotShape)?;
             let work = &self.ledger.work;
-            let mut state = lock(&self.ledger.state);
+            let mut state = lock(
+                self.ledger
+                    .state
+                    .shared()
+                    .expect("typed terminal reservations retain shared storage"),
+            );
+            if state.current_administrative_bytes != known_administrative_bytes {
+                return Err(TypedFreezeQualificationError::SnapshotShape);
+            }
             self.validate_terminal(&state, work).inspect(|_| {
                 state.publication = PublicationState::TerminalQualified;
             })
@@ -4263,7 +4477,7 @@ where
     )]
     pub(crate) fn try_into_qualified_evidence_discard(
         self,
-    ) -> Result<QualifiedEvidenceDiscardFreezeProof<O, P, D>, Self> {
+    ) -> Result<QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>, Self> {
         if self.discard_canonical.is_some() || self.discard_evidence.is_none() {
             return Err(self);
         }
@@ -4289,7 +4503,7 @@ where
     )]
     pub(crate) fn try_into_qualified_discards(
         self,
-    ) -> Result<QualifiedTypedDiscardFreezeProof<O, P, D>, Self> {
+    ) -> Result<QualifiedTypedDiscardFreezeProof<'inv, O, P, PP, U, D>, Self> {
         let mut qualified = self.qualify_terminal()?;
         let typed = qualified
             .proof
@@ -4327,7 +4541,26 @@ where
     }
 
     pub(crate) fn retain_fail_closed(self) {
-        std::mem::forget(self);
+        let Self {
+            canonical,
+            evidence,
+            deferred_canonical_storage,
+            deferred_evidence_storage_first,
+            deferred_evidence_storage_second,
+            discard_canonical,
+            discard_evidence,
+            ledger,
+        } = self;
+        ledger.retain_fail_closed();
+        std::mem::forget((
+            canonical,
+            evidence,
+            deferred_canonical_storage,
+            deferred_evidence_storage_first,
+            deferred_evidence_storage_second,
+            discard_canonical,
+            discard_evidence,
+        ));
     }
 }
 
@@ -4335,11 +4568,13 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-impl<O, P, D> QualifiedTypedDiscardFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> QualifiedTypedDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn dimension_count(&self) -> usize {
         match self {
@@ -4400,21 +4635,26 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-impl<O, P, D> QualifiedTypedFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn dimension_count(&self) -> usize {
         self.proof
             .as_ref()
-            .map_or(0, |proof| lock(&proof.ledger.state).dimensions.len())
+            .map_or(0, |proof| proof.ledger.state.read().dimensions.len())
     }
 
     fn dimension_at(&self, index: usize) -> Option<D> {
         self.proof.as_ref().and_then(|proof| {
-            lock(&proof.ledger.state)
+            proof
+                .ledger
+                .state
+                .read()
                 .dimensions
                 .get(index)
                 .map(|entry| entry.dimension)
@@ -4424,12 +4664,15 @@ where
     fn phase_count(&self) -> usize {
         self.proof
             .as_ref()
-            .map_or(0, |proof| lock(&proof.ledger.state).phases.len())
+            .map_or(0, |proof| proof.ledger.state.read().phases.len())
     }
 
     fn phase_at(&self, index: usize) -> Option<P> {
         self.proof.as_ref().and_then(|proof| {
-            lock(&proof.ledger.state)
+            proof
+                .ledger
+                .state
+                .read()
                 .phases
                 .get(index)
                 .map(|entry| entry.phase)
@@ -4441,17 +4684,22 @@ where
     }
 
     fn retain_fail_closed(self) {
-        std::mem::forget(self);
+        drop(self);
     }
 
+    #[expect(
+        clippy::result_large_err,
+        clippy::type_complexity,
+        reason = "detach failure retains the actual invocation and every reservation without failure-path allocation"
+    )]
     fn try_into_detached(
         mut self,
-    ) -> Result<DetachedTypedFreezeProof<O, P, D>, TypedFreezeDetachError<O, P, D>> {
+    ) -> Result<DetachedTypedFreezeProof<O, P, D>, TypedFreezeDetachError<O, P, PP, U, D>> {
         let last_completed_phase = self.last_completed_phase;
         let proof = self
             .proof
             .take()
-            .unwrap_or_else(|| unreachable!("qualified proof disappeared"));
+            .expect("qualified terminal state remains installed");
         let TypedFreezeProof {
             canonical,
             evidence,
@@ -4462,67 +4710,95 @@ where
             discard_evidence,
             ledger,
         } = proof;
-        let unexpected_discard = discard_canonical.is_some() || discard_evidence.is_some();
-        let Ledger {
-            mut work,
-            work_catalog,
-            phase_catalogue: _phase_catalogue,
-            state,
-            ..
-        } = ledger;
-        work.header.integrity_fault |= work.rows.len() != work_catalog.len();
-        let projection = {
-            let mut storage = lock(&state);
+        let known_administrative_bytes = ledger.known_administrative_bytes();
+        let mut invocation = ledger.into_owned();
+        let raw = invocation.terminal_ledger_mut();
+        let shared = raw
+            .state
+            .shared()
+            .expect("typed reservations retain the installed shared identity");
+        let mut projection = {
+            let mut storage = lock(shared);
             take_typed_terminal_projection(
                 &mut storage,
-                &work,
+                &raw.work,
                 last_completed_phase,
                 &canonical,
                 &evidence,
             )
         };
-        drop(work);
+        projection.qualify_administrative_coverage(known_administrative_bytes);
+        let unexpected_discard = discard_canonical.is_some() || discard_evidence.is_some();
         let batches = DetachedTypedBatches {
-            canonical: canonical.into_detached(&state),
-            evidence: evidence.into_detached(&state),
+            canonical: canonical.into_detached(shared),
+            evidence: evidence.into_detached(shared),
             deferred_canonical_storage: deferred_canonical_storage
-                .map(|batch| batch.into_detached(&state)),
+                .map(|batch| batch.into_detached(shared)),
             deferred_evidence_storage_first: deferred_evidence_storage_first
-                .map(|batch| batch.into_detached(&state)),
+                .map(|batch| batch.into_detached(shared)),
             deferred_evidence_storage_second: deferred_evidence_storage_second
-                .map(|batch| batch.into_detached(&state)),
-            discard_canonical: discard_canonical.map(|batch| batch.into_detached(&state)),
-            discard_evidence: discard_evidence.map(|batch| batch.into_detached(&state)),
-        };
-        let state = match Arc::try_unwrap(state) {
-            Ok(state) => match state.into_inner() {
-                Ok(state) => state,
-                Err(poisoned) => {
-                    return Err(TypedFreezeDetachError::new(
-                        TypedFreezeDetachErrorKind::PoisonedLedger,
-                        projection,
-                        FailedDetachedLedgerState::Owned(poisoned.into_inner()),
-                        batches,
-                    ));
-                }
-            },
-            Err(state) => {
-                return Err(TypedFreezeDetachError::new(
-                    TypedFreezeDetachErrorKind::SharedLedgerOwner,
-                    projection,
-                    FailedDetachedLedgerState::Shared(state),
-                    batches,
-                ));
-            }
+                .map(|batch| batch.into_detached(shared)),
+            discard_canonical: discard_canonical.map(|batch| batch.into_detached(shared)),
+            discard_evidence: discard_evidence.map(|batch| batch.into_detached(shared)),
         };
         if unexpected_discard {
             return Err(TypedFreezeDetachError::new(
                 TypedFreezeDetachErrorKind::UnexpectedDiscardOwner,
                 projection,
-                FailedDetachedLedgerState::Owned(state),
+                invocation,
                 batches,
             ));
         }
+        if shared.is_poisoned() {
+            return Err(TypedFreezeDetachError::new(
+                TypedFreezeDetachErrorKind::PoisonedLedger,
+                projection,
+                invocation,
+                batches,
+            ));
+        }
+        let selected = std::mem::replace(&mut raw.state, DynamicStorage::Inline(None));
+        let shared = match selected {
+            DynamicStorage::Shared(shared) => shared,
+            DynamicStorage::Inline(_) => unreachable!("typed reservations require shared storage"),
+        };
+        let mut state = match Arc::try_unwrap(shared) {
+            Ok(shared) => match shared.into_inner() {
+                Ok(state) => {
+                    state.expect("detached shared state was never removed while tokens lived")
+                }
+                Err(poisoned) => {
+                    let mut state = poisoned.into_inner();
+                    release_evidence(
+                        state
+                            .as_mut()
+                            .expect("poisoned storage retains its actual state"),
+                        size_of::<Mutex<Option<LedgerState<P, D>>>>() as u64,
+                    );
+                    raw.state = DynamicStorage::Inline(state);
+                    return Err(TypedFreezeDetachError::new(
+                        TypedFreezeDetachErrorKind::PoisonedLedger,
+                        projection,
+                        invocation,
+                        batches,
+                    ));
+                }
+            },
+            Err(shared) => {
+                raw.state = DynamicStorage::Shared(shared);
+                return Err(TypedFreezeDetachError::new(
+                    TypedFreezeDetachErrorKind::SharedLedgerOwner,
+                    projection,
+                    invocation,
+                    batches,
+                ));
+            }
+        };
+        release_evidence(
+            &mut state,
+            size_of::<Mutex<Option<LedgerState<P, D>>>>() as u64,
+        );
+        invocation.retire_after_detach(&mut state);
         Ok(DetachedTypedFreezeProof {
             projection: Some(projection),
             cover: Some(DetachedLiveLedgerCover { state, batches }),
@@ -4534,11 +4810,13 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-impl<O, P, D> QualifiedEvidenceDiscardFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn dimension_count(&self) -> usize {
         self.proof
@@ -4570,12 +4848,12 @@ where
     }
 
     pub(crate) fn retain_fail_closed(self) {
-        std::mem::forget(self);
+        drop(self);
     }
 
     pub(crate) fn release_discard_after_physical_cleanup_in_place(
         &mut self,
-    ) -> FreezeReadyTypedProof<O, P, D> {
+    ) -> FreezeReadyTypedProof<'inv, O, P, PP, U, D> {
         self.acknowledgement = QualifiedDiscardAcknowledgement::InProgress;
         let proof = self
             .proof
@@ -4593,7 +4871,7 @@ where
         let deferred_evidence_storage_first = typed.deferred_evidence_storage_first.take();
         let deferred_evidence_storage_second = typed.deferred_evidence_storage_second.take();
         {
-            let mut state = lock(&typed.ledger.state);
+            let mut state = typed.ledger.state.write();
             discard_evidence.release_bound_attributions(&mut state);
         }
         discard_evidence.destroy_storage_then_release_bound_cover();
@@ -4612,7 +4890,7 @@ where
 
     pub(crate) fn release_discard_after_physical_cleanup(
         mut self,
-    ) -> FreezeReadyTypedProof<O, P, D> {
+    ) -> FreezeReadyTypedProof<'inv, O, P, PP, U, D> {
         self.release_discard_after_physical_cleanup_in_place()
     }
 }
@@ -4621,11 +4899,13 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-impl<O, P, D> QualifiedCanonicalDiscardFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> QualifiedCanonicalDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn dimension_count(&self) -> usize {
         self.proof
@@ -4657,7 +4937,7 @@ where
 
     pub(crate) fn release_discard_after_physical_cleanup_in_place(
         &mut self,
-    ) -> FreezeReadyTypedProof<O, P, D> {
+    ) -> FreezeReadyTypedProof<'inv, O, P, PP, U, D> {
         self.acknowledgement = QualifiedDiscardAcknowledgement::InProgress;
         let proof = self
             .proof
@@ -4676,12 +4956,12 @@ where
 
     pub(crate) fn release_discard_after_physical_cleanup(
         mut self,
-    ) -> FreezeReadyTypedProof<O, P, D> {
+    ) -> FreezeReadyTypedProof<'inv, O, P, PP, U, D> {
         self.release_discard_after_physical_cleanup_in_place()
     }
 
     pub(crate) fn retain_fail_closed(self) {
-        std::mem::forget(self);
+        drop(self);
     }
 }
 
@@ -4689,11 +4969,13 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-impl<O, P, D> QualifiedBothDiscardFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> QualifiedBothDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn dimension_count(&self) -> usize {
         self.proof
@@ -4725,7 +5007,7 @@ where
 
     pub(crate) fn release_canonical_after_physical_cleanup_in_place(
         &mut self,
-    ) -> QualifiedEvidenceDiscardFreezeProof<O, P, D> {
+    ) -> QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D> {
         self.acknowledgement = QualifiedDiscardAcknowledgement::InProgress;
         let proof = self
             .proof
@@ -4746,12 +5028,12 @@ where
 
     pub(crate) fn release_canonical_after_physical_cleanup(
         mut self,
-    ) -> QualifiedEvidenceDiscardFreezeProof<O, P, D> {
+    ) -> QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D> {
         self.release_canonical_after_physical_cleanup_in_place()
     }
 
     pub(crate) fn retain_fail_closed(self) {
-        std::mem::forget(self);
+        drop(self);
     }
 }
 
@@ -4759,11 +5041,13 @@ where
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"
 )]
-impl<O, P, D> FreezeReadyTypedProof<O, P, D>
+impl<'inv, O, P, PP, U, D> FreezeReadyTypedProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     pub(crate) fn dimension_count(&self) -> usize {
         self.proof
@@ -4793,9 +5077,14 @@ where
             .and_then(QualifiedTypedFreezeProof::last_completed_phase)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        clippy::type_complexity,
+        reason = "detach failure retains the actual invocation and every reservation without failure-path allocation"
+    )]
     pub(crate) fn try_into_detached(
         mut self,
-    ) -> Result<DetachedTypedFreezeProof<O, P, D>, TypedFreezeDetachError<O, P, D>> {
+    ) -> Result<DetachedTypedFreezeProof<O, P, D>, TypedFreezeDetachError<O, P, PP, U, D>> {
         let proof = self
             .proof
             .take()
@@ -4804,7 +5093,7 @@ where
     }
 
     pub(crate) fn retain_fail_closed(self) {
-        std::mem::forget(self);
+        drop(self);
     }
 }
 
@@ -4932,7 +5221,7 @@ where
         drop(std::mem::take(&mut self.state.dimensions));
         drop(std::mem::take(&mut self.state.phases));
         drop(std::mem::take(&mut self.state.phase_states));
-        self.state.current_evidence_bytes = 0;
+        self.state.current_administrative_bytes = 0;
         self.state.publication = PublicationState::Published;
     }
 }
@@ -4960,7 +5249,7 @@ where
         let terminal = (
             cover.state.current_live_bytes,
             cover.state.active_reservations,
-            cover.state.current_evidence_bytes,
+            cover.state.current_administrative_bytes,
             cover.state.publication == PublicationState::Published,
         );
         drop(cover);
@@ -4993,10 +5282,10 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn test_current_evidence_bytes(&self) -> u64 {
+    pub(crate) fn test_current_administrative_bytes(&self) -> u64 {
         self.cover
             .as_ref()
-            .map_or(0, |cover| cover.state.current_evidence_bytes)
+            .map_or(0, |cover| cover.state.current_administrative_bytes)
     }
 
     #[cfg(test)]
@@ -5041,33 +5330,37 @@ where
 
     #[cfg(test)]
     fn commit_account_bound_for_test(mut self) -> DetachedLedgerTerminalScalars {
-        let (current_live_bytes, active_reservations, current_evidence_bytes, published) =
+        let (current_live_bytes, active_reservations, current_administrative_bytes, published) =
             self.commit_inner();
         DetachedLedgerTerminalScalars {
             current_live_bytes,
             active_reservations,
-            current_evidence_bytes,
+            current_administrative_bytes,
             published,
         }
     }
 }
 
-impl<O, P, D> TypedFreezeDetachError<O, P, D>
+impl<O, P, PP, U, D> TypedFreezeDetachError<O, P, PP, U, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
 {
     fn new(
-        kind: TypedFreezeDetachErrorKind,
+        _kind: TypedFreezeDetachErrorKind,
         projection: LedgerSnapshot<P, D>,
-        state: FailedDetachedLedgerState<P, D>,
+        invocation: OperationInvocation<O, P, PP, U, D>,
         batches: DetachedTypedBatches<O, P, D>,
     ) -> Self {
         Self {
-            kind,
+            #[cfg(test)]
+            kind: _kind,
             projection: Some(projection),
-            cover: Some(Box::new(FailedDetachedLiveLedgerCover { state, batches })),
+            invocation: Some(invocation),
+            batches: Some(batches),
         }
     }
 
@@ -5077,13 +5370,9 @@ where
     }
 
     fn retain_parts_fail_closed(&mut self) {
-        let _ = self.kind;
-        if let Some(projection) = self.projection.take() {
-            std::mem::forget(projection);
-        }
-        if let Some(cover) = self.cover.take() {
-            (*cover).retain_fail_closed();
-        }
+        std::mem::forget(self.projection.take());
+        std::mem::forget(self.invocation.take());
+        std::mem::forget(self.batches.take());
     }
 
     pub(crate) fn retain_fail_closed(mut self) {
@@ -5092,24 +5381,24 @@ where
 
     #[cfg(test)]
     pub(crate) fn test_current_live_bytes(&self) -> u64 {
-        let Some(cover) = self.cover.as_ref() else {
-            return 0;
-        };
-        match &cover.state {
-            FailedDetachedLedgerState::Shared(state) => lock(state).current_live_bytes,
-            FailedDetachedLedgerState::Owned(state) => state.current_live_bytes,
-        }
+        self.invocation.as_ref().map_or(0, |invocation| {
+            invocation
+                .test_terminal_ledger()
+                .state
+                .read()
+                .current_live_bytes
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn test_active_reservations(&self) -> u64 {
-        let Some(cover) = self.cover.as_ref() else {
-            return 0;
-        };
-        match &cover.state {
-            FailedDetachedLedgerState::Shared(state) => lock(state).active_reservations,
-            FailedDetachedLedgerState::Owned(state) => state.active_reservations,
-        }
+        self.invocation.as_ref().map_or(0, |invocation| {
+            invocation
+                .test_terminal_ledger()
+                .state
+                .read()
+                .active_reservations
+        })
     }
 
     #[cfg(test)]
@@ -5121,29 +5410,31 @@ where
 
     #[cfg(test)]
     pub(crate) fn test_cover_matches_state(&self) -> bool {
-        let Some(cover) = self.cover.as_ref() else {
+        let (Some(invocation), Some(batches)) = (self.invocation.as_ref(), self.batches.as_ref())
+        else {
             return false;
         };
-        let (live, active) = match &cover.state {
-            FailedDetachedLedgerState::Shared(state) => {
-                let state = lock(state);
-                (state.current_live_bytes, state.active_reservations)
-            }
-            FailedDetachedLedgerState::Owned(state) => {
-                (state.current_live_bytes, state.active_reservations)
-            }
-        };
-        cover.batches.live_bytes() == live && cover.batches.active_count() == active
+        let state = invocation.test_terminal_ledger().state.read();
+        batches
+            .live_bytes()
+            .checked_add(state.retained_output_bytes)
+            == Some(state.current_live_bytes)
+            && batches
+                .active_count()
+                .checked_add(state.retained_output_reservations)
+                == Some(state.active_reservations)
     }
 }
 
-fn release_qualified_discard_after_physical_cleanup<O, P, D, Destination>(
-    proof: &mut QualifiedTypedFreezeProof<O, P, D>,
+fn release_qualified_discard_after_physical_cleanup<'inv, O, P, PP, U, D, Destination>(
+    proof: &mut QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>,
     discard: &mut AttributionReservationBatch<O, P, D, Destination>,
 ) where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
     Destination: PublicationDestination,
 {
     let typed = proof
@@ -5151,30 +5442,34 @@ fn release_qualified_discard_after_physical_cleanup<O, P, D, Destination>(
         .as_mut()
         .unwrap_or_else(|| unreachable!("qualified typed proof disappeared"));
     {
-        let mut state = lock(&typed.ledger.state);
+        let mut state = typed.ledger.state.write();
         discard.release_bound_attributions(&mut state);
     }
     discard.destroy_storage_then_release_bound_cover();
 }
 
-impl<O, P, D> Drop for QualifiedTypedFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> Drop for QualifiedTypedFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(proof) = self.proof.take() {
-            std::mem::forget(proof);
+            proof.retain_fail_closed();
         }
     }
 }
 
-impl<O, P, D> Drop for QualifiedEvidenceDiscardFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> Drop for QualifiedEvidenceDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(proof) = self.proof.take() {
@@ -5186,11 +5481,13 @@ where
     }
 }
 
-impl<O, P, D> Drop for QualifiedCanonicalDiscardFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> Drop for QualifiedCanonicalDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(proof) = self.proof.take() {
@@ -5202,11 +5499,13 @@ where
     }
 }
 
-impl<O, P, D> Drop for QualifiedBothDiscardFreezeProof<O, P, D>
+impl<'inv, O, P, PP, U, D> Drop for QualifiedBothDiscardFreezeProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(proof) = self.proof.take() {
@@ -5221,11 +5520,13 @@ where
     }
 }
 
-impl<O, P, D> Drop for FreezeReadyTypedProof<O, P, D>
+impl<'inv, O, P, PP, U, D> Drop for FreezeReadyTypedProof<'inv, O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         if let Some(proof) = self.proof.take() {
@@ -5249,11 +5550,13 @@ where
     }
 }
 
-impl<O, P, D> Drop for TypedFreezeDetachError<O, P, D>
+impl<O, P, PP, U, D> Drop for TypedFreezeDetachError<O, P, PP, U, D>
 where
+    PP: ProgressPhase,
+    U: ProgressUnit,
     O: OperationOwner,
     P: Copy + Ord,
-    D: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
 {
     fn drop(&mut self) {
         self.retain_parts_fail_closed();
@@ -5538,7 +5841,7 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    owner: Arc<Mutex<LedgerState<P, D>>>,
+    owner: Arc<Mutex<Option<LedgerState<P, D>>>>,
     reservations: PublicationReservationBatch<O, P, D>,
     commitments: Vec<AggregatedCommitment<D>>,
     evidence_bytes: u64,
@@ -5608,15 +5911,26 @@ where
     }
 }
 
-fn lock<P, D>(state: &Arc<Mutex<LedgerState<P, D>>>) -> MutexGuard<'_, LedgerState<P, D>> {
-    match state.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+fn lock<P, D>(state: &Arc<Mutex<Option<LedgerState<P, D>>>>) -> StorageGuard<'_, P, D> {
+    storage::lock_storage(state)
 }
 
 fn release_positioned_locked<P, D>(
     state: &mut LedgerState<P, D>,
+    phase_position: usize,
+    dimension_position: usize,
+    bytes: u64,
+) {
+    release_positioned_in(
+        &mut state.view_mut(),
+        phase_position,
+        dimension_position,
+        bytes,
+    );
+}
+
+fn release_positioned_in<P, D>(
+    state: &mut StorageViewMut<'_, P, D>,
     phase_position: usize,
     dimension_position: usize,
     bytes: u64,
@@ -5631,8 +5945,8 @@ fn release_positioned_locked<P, D>(
     }
 }
 
-fn release_positioned_bytes_locked<P, D>(
-    state: &mut LedgerState<P, D>,
+fn release_positioned_bytes_in<P, D>(
+    state: &mut StorageViewMut<'_, P, D>,
     phase_position: usize,
     dimension_position: usize,
     bytes: u64,
@@ -5721,9 +6035,9 @@ fn try_insert_phase_catalog_entry<P: Copy + Ord, D>(
     try_grow_evidence_vec(
         &mut state.phases,
         desired_phase_capacity,
-        &mut state.current_evidence_bytes,
-        &mut state.peak_evidence_bytes,
-        state.evidence_byte_limit,
+        &mut state.header.current_administrative_bytes,
+        &mut state.header.peak_administrative_bytes,
+        state.header.evidence_byte_limit,
         LedgerEvidencePurpose::Phases,
     )
     .map_err(|cause| LedgerCause::Evidence { cause })?;
@@ -5731,9 +6045,9 @@ fn try_insert_phase_catalog_entry<P: Copy + Ord, D>(
     try_grow_evidence_vec(
         &mut state.phase_states,
         desired_state_capacity,
-        &mut state.current_evidence_bytes,
-        &mut state.peak_evidence_bytes,
-        state.evidence_byte_limit,
+        &mut state.header.current_administrative_bytes,
+        &mut state.header.peak_administrative_bytes,
+        state.header.evidence_byte_limit,
         LedgerEvidencePurpose::Phases,
     )
     .map_err(|cause| LedgerCause::Evidence { cause })?;
@@ -5741,9 +6055,9 @@ fn try_insert_phase_catalog_entry<P: Copy + Ord, D>(
     try_grow_evidence_vec(
         &mut state.phase_snapshot_staging,
         desired_staging_capacity,
-        &mut state.current_evidence_bytes,
-        &mut state.peak_evidence_bytes,
-        state.evidence_byte_limit,
+        &mut state.header.current_administrative_bytes,
+        &mut state.header.peak_administrative_bytes,
+        state.header.evidence_byte_limit,
         LedgerEvidencePurpose::Phases,
     )
     .map_err(|cause| LedgerCause::Evidence { cause })?;
@@ -5762,16 +6076,16 @@ fn try_insert_phase_catalog_entry<P: Copy + Ord, D>(
 fn try_grow_evidence_vec<T>(
     values: &mut Vec<T>,
     desired_capacity: usize,
-    current_evidence_bytes: &mut u64,
-    peak_evidence_bytes: &mut u64,
+    current_administrative_bytes: &mut u64,
+    peak_administrative_bytes: &mut u64,
     evidence_byte_limit: u64,
     purpose: LedgerEvidencePurpose,
 ) -> Result<(), LedgerEvidenceError> {
     try_grow_evidence_vec_impl(
         values,
         desired_capacity,
-        current_evidence_bytes,
-        peak_evidence_bytes,
+        current_administrative_bytes,
+        peak_administrative_bytes,
         evidence_byte_limit,
         purpose,
     )
@@ -5781,14 +6095,14 @@ fn try_grow_evidence_vec<T>(
 fn try_grow_evidence_vec_impl<T>(
     values: &mut Vec<T>,
     desired_capacity: usize,
-    current_evidence_bytes: &mut u64,
-    peak_evidence_bytes: &mut u64,
+    current_administrative_bytes: &mut u64,
+    peak_administrative_bytes: &mut u64,
     evidence_byte_limit: u64,
     purpose: LedgerEvidencePurpose,
 ) -> Result<(), LedgerEvidenceError> {
     let original_len = values.len();
     let original_capacity = values.capacity();
-    let original_current = *current_evidence_bytes;
+    let original_current = *current_administrative_bytes;
     let source_plan =
         CapacityPlan::for_type::<T>(original_len, original_capacity, desired_capacity)
             .map_err(|cause| LedgerEvidenceError::Capacity { purpose, cause })?;
@@ -5853,14 +6167,14 @@ fn try_grow_evidence_vec_impl<T>(
             cause: CapacityPlanError::CapacityOverflow,
         })?;
 
-    *current_evidence_bytes = admitted;
-    *peak_evidence_bytes = (*peak_evidence_bytes).max(admitted);
+    *current_administrative_bytes = admitted;
+    *peak_administrative_bytes = (*peak_administrative_bytes).max(admitted);
 
     let mut replacement = Vec::new();
     #[cfg(test)]
     if test_take_evidence_allocation_failure() {
         drop(replacement);
-        *current_evidence_bytes = original_current;
+        *current_administrative_bytes = original_current;
         return Err(LedgerEvidenceError::AllocationFailed {
             purpose,
             requested_bytes: replacement_envelope_bytes,
@@ -5871,7 +6185,7 @@ fn try_grow_evidence_vec_impl<T>(
         .is_err()
     {
         drop(replacement);
-        *current_evidence_bytes = original_current;
+        *current_administrative_bytes = original_current;
         return Err(LedgerEvidenceError::AllocationFailed {
             purpose,
             requested_bytes: replacement_envelope_bytes,
@@ -5890,7 +6204,7 @@ fn try_grow_evidence_vec_impl<T>(
         Ok(bytes) => bytes,
         Err(cause) => {
             drop(replacement);
-            *current_evidence_bytes = original_current;
+            *current_administrative_bytes = original_current;
             return Err(LedgerEvidenceError::Capacity { purpose, cause });
         }
     };
@@ -5903,11 +6217,11 @@ fn try_grow_evidence_vec_impl<T>(
     replacement.append(values);
     std::mem::swap(values, &mut replacement);
     drop(replacement);
-    *current_evidence_bytes = final_current;
+    *current_administrative_bytes = final_current;
     Ok(())
 }
 
-fn capacity_bytes<T>(values: &Vec<T>) -> Result<u64, CapacityPlanError> {
+pub(crate) fn capacity_bytes<T>(values: &Vec<T>) -> Result<u64, CapacityPlanError> {
     let bytes = values
         .capacity()
         .checked_mul(size_of::<T>())
@@ -5916,7 +6230,7 @@ fn capacity_bytes<T>(values: &Vec<T>) -> Result<u64, CapacityPlanError> {
 }
 
 fn release_evidence<P, D>(state: &mut LedgerState<P, D>, bytes: u64) {
-    state.current_evidence_bytes = state.current_evidence_bytes.saturating_sub(bytes);
+    state.current_administrative_bytes = state.current_administrative_bytes.saturating_sub(bytes);
 }
 
 /// Retires operation attribution at joint publication; allocation-bound physical leases remain
@@ -5942,3 +6256,57 @@ mod baseline_attachment_tests;
 
 #[cfg(test)]
 mod tests;
+
+impl<'inv, O, P, PP, U, D> TerminalInvocationLoan<'inv, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    /// Consumes a primary batch graph only after [`Self::try_bind_primary`] has completed.
+    ///
+    /// Binding and source absorption already completed while the caller retained the coupled
+    /// physical owner. This step performs only field moves and can therefore consume the graph
+    /// without opening a storage-before-attribution unwind window.
+    #[allow(
+        dead_code,
+        reason = "crate-private until the U4 canonical consumers switch atomically"
+    )]
+    pub(crate) fn finish_bound_primary(
+        self,
+        baseline: FallbackBatchBaseline<O, P, D>,
+        canonical_source: Option<AttributionReservationBatch<O, P, D, CanonicalOutput>>,
+        evidence_source: Option<AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>>,
+        publish_canonical: bool,
+    ) -> TypedFreezeProof<'inv, O, P, PP, U, D> {
+        let FallbackBatchBaseline {
+            canonical_assembly,
+            evidence_assembly,
+            fallback,
+            evidence,
+        } = baseline;
+        let discard_evidence = if fallback.active_count() == Some(0) {
+            drop(fallback);
+            None
+        } else {
+            Some(fallback)
+        };
+        let (deferred_canonical_storage, discard_canonical) = if publish_canonical {
+            (canonical_source, None)
+        } else {
+            (None, canonical_source)
+        };
+        TypedFreezeProof {
+            canonical: canonical_assembly,
+            evidence: evidence_assembly,
+            deferred_canonical_storage,
+            deferred_evidence_storage_first: Some(evidence),
+            deferred_evidence_storage_second: evidence_source,
+            discard_canonical,
+            discard_evidence,
+            ledger: self,
+        }
+    }
+}

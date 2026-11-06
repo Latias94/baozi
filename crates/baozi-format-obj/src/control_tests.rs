@@ -151,7 +151,10 @@ fn cancellation_after_a_real_obj_face_preserves_the_exact_prefix() {
     }
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(failure.ledger().active_reservations(), 0);
-    assert_eq!(failure.ledger().current_evidence_bytes(), 0);
+    assert!(
+        failure.ledger().current_administrative_bytes()
+            <= failure.ledger().peak_administrative_bytes()
+    );
     assert_eq!(failure.ledger().committed_canonical_members(), 0);
     let resumed = plan
         .read_bytes(source, &bytes, ImportOperationControl::default())

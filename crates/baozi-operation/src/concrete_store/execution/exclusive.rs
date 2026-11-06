@@ -545,7 +545,14 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         self.checkpoint()?;
         self.parts
             .progress
-            .report_progress(&mut self.parts.ordinary.poll, phase, unit, completed, total)
+            .report_progress(
+                &mut self.parts.ordinary.poll,
+                &mut self.parts.ordinary.storage,
+                phase,
+                unit,
+                completed,
+                total,
+            )
             .map_err(|cause| {
                 record(
                     self.parts.ordinary.failure,
@@ -716,7 +723,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
             self.parts.ordinary.failure,
             self.parts
                 .work
-                .tighten_policy(&self.parts.ordinary.storage, dimension, policy),
+                .tighten_policy(&mut self.parts.ordinary.storage, dimension, policy),
         )
     }
 
@@ -815,7 +822,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         let boundary = self.boundary;
         let share_layout = self.share_layout;
         let result = crate::retained::reserve_exclusive_backing(
-            &self.parts.ordinary.storage,
+            &mut self.parts.ordinary.storage,
             self.parts.account,
             phase,
             dimension,

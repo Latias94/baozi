@@ -175,12 +175,19 @@ fn observer_disposal_failure_rejects_publication_without_replaying_the_final_eve
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     pending.rollback();
 
+    let expected_administrative_bytes = coordinator
+        .try_ledger_snapshot()
+        .expect("post-rollback evidence")
+        .current_administrative_bytes();
     let failure = coordinator
         .finish()
         .expect_err("disposed observer failure remains terminal");
     assert_eq!(failure.cause(), &expected);
     assert_eq!(failure.snapshot().current_live_bytes(), 0);
-    assert_eq!(failure.snapshot().current_evidence_bytes(), 0);
+    assert_eq!(
+        failure.snapshot().current_administrative_bytes(),
+        expected_administrative_bytes
+    );
     assert_eq!(
         failure
             .snapshot()
@@ -234,11 +241,18 @@ fn cancellation_disposal_failure_rejects_publication_and_retry_performs_no_more_
         0
     );
     pending.rollback();
+    let expected_administrative_bytes = coordinator
+        .try_ledger_snapshot()
+        .expect("post-rollback evidence")
+        .current_administrative_bytes();
     let failure = coordinator
         .finish()
         .expect_err("cancellation disposal failure remains terminal");
     assert_eq!(failure.cause(), &expected);
-    assert_eq!(failure.snapshot().current_evidence_bytes(), 0);
+    assert_eq!(
+        failure.snapshot().current_administrative_bytes(),
+        expected_administrative_bytes
+    );
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -258,7 +272,12 @@ fn finish_reports_typed_disposal_failure_after_attempting_both_extension_drops()
             drops: Arc::clone(&observer_drops),
         });
 
-    let failure: OperationFinishError<Phase, Dimension> = coordinator(control)
+    let mut coordinator = coordinator(control);
+    let expected_administrative_bytes = coordinator
+        .try_ledger_snapshot()
+        .expect("evidence before extension disposal")
+        .current_administrative_bytes();
+    let failure: OperationFinishError<Phase, Dimension> = coordinator
         .finish()
         .expect_err("finish must return the contained extension disposal failure");
     assert_eq!(
@@ -276,7 +295,10 @@ fn finish_reports_typed_disposal_failure_after_attempting_both_extension_drops()
     );
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.active_reservations(), 0);
-    assert_eq!(snapshot.current_evidence_bytes(), 0);
+    assert_eq!(
+        snapshot.current_administrative_bytes(),
+        expected_administrative_bytes
+    );
 }
 
 #[test]
@@ -296,13 +318,8 @@ fn callback_owned_storage_is_released_before_success_or_failure_final_evidence()
                 .reserve(Phase::Final, Dimension::Bytes, 64)
                 .expect("callback-owned retained storage"),
         );
-        assert_eq!(
-            coordinator
-                .try_ledger_snapshot()
-                .unwrap()
-                .current_live_bytes(),
-            64
-        );
+        let interim = coordinator.try_ledger_snapshot().unwrap();
+        assert_eq!(interim.current_live_bytes(), 64);
 
         let snapshot = match coordinator.finish() {
             Ok(snapshot) => {
@@ -324,7 +341,10 @@ fn callback_owned_storage_is_released_before_success_or_failure_final_evidence()
         assert_eq!(snapshot.current_live_bytes(), 0);
         assert_eq!(snapshot.peak_live_bytes(), 64);
         assert_eq!(snapshot.active_reservations(), 0);
-        assert_eq!(snapshot.current_evidence_bytes(), 0);
+        assert_eq!(
+            snapshot.current_administrative_bytes(),
+            interim.current_administrative_bytes()
+        );
         assert_eq!(
             snapshot
                 .dimension(Dimension::Bytes)
@@ -425,6 +445,10 @@ fn failed_publish_rollback_cannot_resume_ordinary_accounting_or_allocation() {
     assert_eq!(work.committed(), 0);
     assert_eq!(events.load(Ordering::SeqCst), 1);
 
+    let expected_administrative_bytes = coordinator
+        .try_ledger_snapshot()
+        .expect("evidence after rejected accounting mutations")
+        .current_administrative_bytes();
     let failure = coordinator
         .finish()
         .expect_err("final control rejection remains authoritative");
@@ -437,6 +461,9 @@ fn failed_publish_rollback_cannot_resume_ordinary_accounting_or_allocation() {
             .consumed(),
         2
     );
-    assert_eq!(failure.snapshot().current_evidence_bytes(), 0);
+    assert_eq!(
+        failure.snapshot().current_administrative_bytes(),
+        expected_administrative_bytes
+    );
     assert_eq!(events.load(Ordering::SeqCst), 1);
 }

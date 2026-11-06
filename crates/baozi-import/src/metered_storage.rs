@@ -612,7 +612,6 @@ mod tests {
         ImportStoreInvocationRoot, ImportStoreSessionOwner, try_import_store_bootstrap,
     };
     use baozi_core::__scene_integration::integration::SceneParseOutcome;
-    use baozi_operation::__retained_store_integration::authority::StoreStorageObservation;
     use baozi_operation::{
         PhysicalStorageAccount, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
         PhysicalStorageAccountLimits,
@@ -712,17 +711,23 @@ mod tests {
         assert_store_released(account.unwrap());
     }
 
-    struct DropProbe<'op> {
-        storage: StoreStorageObservation<'op>,
+    struct DropProbe<'a> {
+        account: &'a PhysicalStorageAccount,
         expected_live_bytes: u64,
+        expected_live_allocations: u64,
     }
 
     impl Drop for DropProbe<'_> {
         fn drop(&mut self) {
+            let snapshot = self.account.snapshot();
             assert_eq!(
-                self.storage.live_bytes(),
+                snapshot.live_retained_bytes(),
                 self.expected_live_bytes,
-                "element storage must drop before its capacity reservation",
+                "element storage must drop before its physical capacity is refunded"
+            );
+            assert_eq!(
+                snapshot.live_retained_allocations(),
+                self.expected_live_allocations
             );
         }
     }
@@ -761,30 +766,54 @@ mod tests {
     #[test]
     fn owner_drops_elements_before_releasing_capacity() {
         with_store_body(|store| {
+            let account = &store.account;
             store
                 .owner
                 .with_root_execution(|exec| {
                     let storage = exec.storage_observation(ImportDimension::ScratchBytes);
-                    let baseline = storage.live_bytes();
+                    let baseline = exec.observation_live_bytes(&storage);
+                    let physical_baseline = account.snapshot();
                     let mut values = AccountedVec::new();
                     values
                         .try_reserve(1, "drop-order", |bytes| {
-                            exec.reserve(
+                            exec.reserve_retained(
                                 ImportLedgerPhase::Detection,
                                 ImportDimension::ScratchBytes,
                                 bytes,
+                                1,
                             )
                             .map_err(ImportStoreHostError::into_scope_abort_cause)
                         })
                         .unwrap();
+                    let capacity_bytes =
+                        u64::try_from(values.capacity() * std::mem::size_of::<DropProbe<'_>>())
+                            .unwrap();
+                    assert_eq!(values.capacity_bytes(), capacity_bytes);
+                    assert_eq!(
+                        exec.observation_live_bytes(&storage),
+                        baseline + capacity_bytes
+                    );
                     values
                         .try_push_reserved(DropProbe {
-                            storage,
-                            expected_live_bytes: baseline + values.capacity_bytes(),
+                            account,
+                            expected_live_bytes: physical_baseline.live_retained_bytes()
+                                + capacity_bytes,
+                            expected_live_allocations: physical_baseline
+                                .live_retained_allocations()
+                                + 1,
                         })
                         .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
                     drop(values);
-                    assert_eq!(storage.live_bytes(), baseline);
+                    assert_eq!(exec.observation_live_bytes(&storage), baseline);
+                    let released = account.snapshot();
+                    assert_eq!(
+                        released.live_retained_bytes(),
+                        physical_baseline.live_retained_bytes()
+                    );
+                    assert_eq!(
+                        released.live_retained_allocations(),
+                        physical_baseline.live_retained_allocations()
+                    );
                     Ok::<_, ImportStoreHostError>(())
                 })
                 .unwrap();
@@ -794,36 +823,56 @@ mod tests {
     #[test]
     fn consuming_iteration_holds_capacity_until_remaining_elements_drop() {
         with_store_body(|store| {
+            let account = &store.account;
             store
                 .owner
                 .with_root_execution(|exec| {
                     let storage = exec.storage_observation(ImportDimension::ScratchBytes);
-                    let baseline = storage.live_bytes();
+                    let baseline = exec.observation_live_bytes(&storage);
+                    let physical_baseline = account.snapshot();
                     let mut values = AccountedVec::new();
                     values
                         .try_reserve(2, "into-iter-drop-order", |bytes| {
-                            exec.reserve(
+                            exec.reserve_retained(
                                 ImportLedgerPhase::Detection,
                                 ImportDimension::ScratchBytes,
                                 bytes,
+                                1,
                             )
                             .map_err(ImportStoreHostError::into_scope_abort_cause)
                         })
                         .unwrap();
-                    let expected_live_bytes = baseline + values.capacity_bytes();
+                    let capacity_bytes =
+                        u64::try_from(values.capacity() * std::mem::size_of::<DropProbe<'_>>())
+                            .unwrap();
+                    assert_eq!(values.capacity_bytes(), capacity_bytes);
+                    let expected_live_bytes = baseline + capacity_bytes;
+                    let expected_live_allocations =
+                        physical_baseline.live_retained_allocations() + 1;
                     for _ in 0..2 {
                         values
                             .try_push_reserved(DropProbe {
-                                storage,
-                                expected_live_bytes,
+                                account,
+                                expected_live_bytes: physical_baseline.live_retained_bytes()
+                                    + capacity_bytes,
+                                expected_live_allocations,
                             })
                             .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
                     }
                     let mut values = values.into_iter();
                     drop(values.next());
-                    assert_eq!(storage.live_bytes(), expected_live_bytes);
+                    assert_eq!(exec.observation_live_bytes(&storage), expected_live_bytes);
                     drop(values);
-                    assert_eq!(storage.live_bytes(), baseline);
+                    assert_eq!(exec.observation_live_bytes(&storage), baseline);
+                    let released = account.snapshot();
+                    assert_eq!(
+                        released.live_retained_bytes(),
+                        physical_baseline.live_retained_bytes()
+                    );
+                    assert_eq!(
+                        released.live_retained_allocations(),
+                        physical_baseline.live_retained_allocations()
+                    );
                     Ok::<_, ImportStoreHostError>(())
                 })
                 .unwrap();
@@ -834,6 +883,7 @@ mod tests {
     fn metered_vector_drops_elements_before_releasing_its_complete_token() {
         with_store_body(|store| {
             let baseline = store.live_bytes(ImportDimension::CanonicalOutputBytes);
+            let account = &store.account;
             crate::scope::testing::with_context(&mut store.owner, |context| {
                 context
                     .with_execution(|exec| -> crate::ParseResult<_> {
@@ -841,6 +891,7 @@ mod tests {
                             exec,
                             ImportDimension::CanonicalOutputBytes,
                         );
+                        let physical_baseline = account.snapshot();
                         let mut values = exec.services()?.metered_vec(
                             ImportStorageClass::SceneConstruction,
                             "metered-drop-order",
@@ -853,20 +904,213 @@ mod tests {
                             values.capacity.as_ref().map(ImportStoreReservation::bytes),
                             Some(expected)
                         );
+                        let retained = exec
+                            .services()?
+                            .reserve_retained_storage_cause(values.class, expected, 1)
+                            .unwrap();
+                        drop(values.capacity.replace(retained));
+                        assert_eq!(
+                            crate::scope::testing::observation_live_bytes(exec, &storage),
+                            baseline + expected
+                        );
+                        let expected_live_allocations =
+                            physical_baseline.live_retained_allocations() + 1;
                         values.try_push(
                             &mut exec.services()?,
                             DropProbe {
-                                storage,
-                                expected_live_bytes: baseline + expected,
+                                account,
+                                expected_live_bytes: physical_baseline.live_retained_bytes()
+                                    + expected,
+                                expected_live_allocations,
                             },
                         )?;
                         drop(values);
-                        assert_eq!(storage.live_bytes(), baseline);
+                        assert_eq!(
+                            crate::scope::testing::observation_live_bytes(exec, &storage),
+                            baseline
+                        );
+                        let released = account.snapshot();
+                        assert_eq!(
+                            released.live_retained_bytes(),
+                            physical_baseline.live_retained_bytes()
+                        );
+                        assert_eq!(
+                            released.live_retained_allocations(),
+                            physical_baseline.live_retained_allocations()
+                        );
                         Ok(())
                     })
                     .unwrap();
             });
         });
+    }
+
+    #[test]
+    fn physical_drop_probe_rejects_refund_before_payload_drop() {
+        with_store_body(|store| {
+            let account = &store.account;
+            store
+                .owner
+                .with_root_execution(|exec| {
+                    let storage = exec.storage_observation(ImportDimension::ScratchBytes);
+                    let baseline = exec.observation_live_bytes(&storage);
+                    let physical_baseline = account.snapshot();
+                    let mut values = AccountedVec::new();
+                    values
+                        .try_reserve(1, "early-refund-witness", |bytes| {
+                            exec.reserve_retained(
+                                ImportLedgerPhase::Detection,
+                                ImportDimension::ScratchBytes,
+                                bytes,
+                                1,
+                            )
+                            .map_err(ImportStoreHostError::into_scope_abort_cause)
+                        })
+                        .unwrap();
+                    let capacity_bytes =
+                        u64::try_from(values.capacity() * std::mem::size_of::<DropProbe<'_>>())
+                            .unwrap();
+                    assert_eq!(values.capacity_bytes(), capacity_bytes);
+                    values
+                        .try_push_reserved(DropProbe {
+                            account,
+                            expected_live_bytes: physical_baseline.live_retained_bytes()
+                                + capacity_bytes,
+                            expected_live_allocations: physical_baseline
+                                .live_retained_allocations()
+                                + 1,
+                        })
+                        .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
+
+                    values.capacity.take().unwrap().release_storage(());
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        drop(values);
+                    }));
+                    let payload = result.expect_err("the physical oracle must reject early refund");
+                    assert!(payload.downcast_ref::<String>().is_some_and(|message| {
+                        message.contains(
+                            "element storage must drop before its physical capacity is refunded",
+                        )
+                    }));
+                    assert_eq!(exec.observation_live_bytes(&storage), baseline);
+                    let released = account.snapshot();
+                    assert_eq!(
+                        released.live_retained_bytes(),
+                        physical_baseline.live_retained_bytes()
+                    );
+                    assert_eq!(
+                        released.live_retained_allocations(),
+                        physical_baseline.live_retained_allocations()
+                    );
+                    Ok::<_, ImportStoreHostError>(())
+                })
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn panicking_element_drop_keeps_actual_cover_and_contains_the_owner() {
+        struct ElementDropPanic;
+
+        struct PanickingElement<'a> {
+            account: &'a PhysicalStorageAccount,
+            expected_live_bytes: u64,
+            expected_live_allocations: u64,
+            observed: &'a std::cell::Cell<bool>,
+        }
+
+        impl Drop for PanickingElement<'_> {
+            fn drop(&mut self) {
+                let snapshot = self.account.snapshot();
+                assert_eq!(snapshot.live_retained_bytes(), self.expected_live_bytes);
+                assert_eq!(
+                    snapshot.live_retained_allocations(),
+                    self.expected_live_allocations
+                );
+                self.observed.set(true);
+                std::panic::panic_any(ElementDropPanic);
+            }
+        }
+
+        let mut root = ImportStoreInvocationRoot::new();
+        let mut contained_account = None;
+        let body =
+            root.run_body(|parts, disposition| {
+                let mut store = StoreHarness::new(parts);
+                let account = &store.account;
+                let observed = std::cell::Cell::new(false);
+                store
+                    .owner
+                    .with_root_execution(|exec| {
+                        let storage = exec.storage_observation(ImportDimension::ScratchBytes);
+                        let baseline = exec.observation_live_bytes(&storage);
+                        let physical_baseline = account.snapshot();
+                        let mut values = AccountedVec::new();
+                        values
+                            .try_reserve(1, "panicking-element-drop", |bytes| {
+                                exec.reserve_retained(
+                                    ImportLedgerPhase::Detection,
+                                    ImportDimension::ScratchBytes,
+                                    bytes,
+                                    1,
+                                )
+                                .map_err(ImportStoreHostError::into_scope_abort_cause)
+                            })
+                            .unwrap();
+                        let capacity_bytes = u64::try_from(
+                            values.capacity() * std::mem::size_of::<PanickingElement<'_>>(),
+                        )
+                        .unwrap();
+                        assert_eq!(values.capacity_bytes(), capacity_bytes);
+                        let expected_live_bytes =
+                            physical_baseline.live_retained_bytes() + capacity_bytes;
+                        let expected_live_allocations =
+                            physical_baseline.live_retained_allocations() + 1;
+                        values
+                            .try_push_reserved(PanickingElement {
+                                account,
+                                expected_live_bytes,
+                                expected_live_allocations,
+                                observed: &observed,
+                            })
+                            .unwrap_or_else(|_| {
+                                panic!("reserved slot must accept the panicking element")
+                            });
+
+                        drop(values);
+                        assert!(observed.get());
+                        assert_eq!(
+                            exec.observation_live_bytes(&storage),
+                            baseline + capacity_bytes
+                        );
+                        let contained = account.snapshot();
+                        assert!(contained.poisoned());
+                        assert_eq!(contained.live_retained_bytes(), expected_live_bytes);
+                        assert_eq!(
+                            contained.live_retained_allocations(),
+                            expected_live_allocations
+                        );
+                        assert_eq!(
+                        contained
+                            .first_poison_evidence()
+                            .map(|evidence| evidence.reason()),
+                        Some(baozi_operation::AccountPoisonReason::RetainedStorageReleaseUnverified)
+                    );
+                        Ok::<_, ImportStoreHostError>(())
+                    })
+                    .unwrap();
+                let StoreHarness { owner, account } = store;
+                let _request = owner
+                    .request_finish(disposition, SceneParseOutcome::Rejected)
+                    .expect("a terminal request preserves the poisoned owner for outer cleanup");
+                contained_account = Some(account);
+            });
+        let _finish = body.expect("the recorded request exits the body before root containment");
+        drop(root);
+        let contained = contained_account.unwrap().snapshot();
+        assert!(contained.poisoned());
+        assert!(contained.live_retained_bytes() > 0);
+        assert!(contained.live_retained_allocations() > 0);
     }
 
     #[test]

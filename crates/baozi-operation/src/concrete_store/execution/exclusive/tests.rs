@@ -810,7 +810,7 @@ fn a_scan_boundary_cannot_heal_a_caught_physical_prefix_panic() {
 #[test]
 fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, storage) = owner.exclusive().unwrap();
+    let (mut exclusive, mut storage) = owner.exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .admit_observed(&mut exclusive.work, [4], WorkLane::Producer)
@@ -819,7 +819,7 @@ fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
     // pending-policy violation. This probes the same completion category as the legacy live alias.
     assert!(
         exclusive
-            .tighten_policy(&storage, key, DimensionPolicy::counter(8, 2, 0))
+            .tighten_policy(&mut storage, key, DimensionPolicy::counter(8, 2, 0))
             .is_err()
     );
     let physical = Cell::new(0);
@@ -1082,7 +1082,6 @@ fn failure_materializer_observes_active_frame_before_resolution() {
     let share_work = RetainedHandleSharePlan::new(internal_key, internal_key);
     let (poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
     let (work, storage) = ledger.exclusive().unwrap();
-    let progress = progress.bind(storage.progress_evidence());
     let share_layout = work.bind(share_work.charges().map(|(key, _)| key)).unwrap();
     let mut context = StoreInvocation {
         parts: ExclusiveOperationParts {
@@ -1178,14 +1177,14 @@ fn failure_materializer_observes_active_frame_before_resolution() {
 #[test]
 fn parser_completion_failure_after_real_write_resolves_suffix_without_abandonment() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, storage) = owner.exclusive().unwrap();
+    let (mut exclusive, mut storage) = owner.exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Child)
         .unwrap();
     // Tightening uses the actual owner before borrowing its action guard. No outside alias.
     exclusive
-        .tighten_policy(&storage, key, DimensionPolicy::counter(8, 0, 0))
+        .tighten_policy(&mut storage, key, DimensionPolicy::counter(8, 0, 0))
         .unwrap();
     let failure = Cell::new(None);
     let execution_state = Cell::new(StoreExecutionState::Running);
@@ -1750,18 +1749,18 @@ fn borrowed_storage_observations_follow_atomic_transitions_and_actual_token_rele
                     .try_admit_dimension(StoreDimensionSemanticId::new(catalog, NonZeroU64::MIN))
                     .unwrap();
                 let observation = context.storage_observation(storage_key)?;
-                let baseline = observation.live_bytes();
+                let baseline = observation.live_bytes(context);
                 let mut reservation = context.ordinary_storage().reserve(phase, storage_key, 8)?;
-                assert_eq!(observation.live_bytes(), baseline + 8);
+                assert_eq!(observation.live_bytes(context), baseline + 8);
                 {
                     let services = context.services();
                     services.validate_live_owner(&reservation)?;
                     services.transition(&mut reservation, phase, storage_key, 4)?;
                 }
                 assert_eq!(reservation.raw.bytes(), 4);
-                assert_eq!(observation.live_bytes(), baseline + 4);
+                assert_eq!(observation.live_bytes(context), baseline + 4);
                 reservation.release_storage([0_u8; 4]);
-                assert_eq!(observation.live_bytes(), baseline);
+                assert_eq!(observation.live_bytes(context), baseline);
                 Ok(())
             })
             .unwrap();
@@ -1782,11 +1781,11 @@ fn borrowed_storage_transition_keeps_the_original_retained_output_rejection() {
                 .try_admit_dimension(StoreDimensionSemanticId::new(catalog, NonZeroU64::MIN))
                 .unwrap();
             let observation = context.storage_observation(storage_key)?;
-            let baseline = observation.live_bytes();
+            let baseline = observation.live_bytes(context);
             let mut retained = context
                 .services()
                 .reserve_retained(phase, storage_key, 8, 1)?;
-            let before = observation.live_bytes();
+            let before = observation.live_bytes(context);
             let result = context
                 .services()
                 .transition(&mut retained, phase, storage_key, 4);
@@ -1798,9 +1797,9 @@ fn borrowed_storage_transition_keeps_the_original_retained_output_rejection() {
             ));
             assert_eq!(retained.raw.bytes(), 8);
             assert_eq!(retained.physical.as_ref().unwrap().admitted_bytes(), 8);
-            assert_eq!(observation.live_bytes(), before);
+            assert_eq!(observation.live_bytes(context), before);
             retained.release_storage([0_u8; 8]);
-            assert_eq!(observation.live_bytes(), baseline);
+            assert_eq!(observation.live_bytes(context), baseline);
             result
         });
         assert!(matches!(

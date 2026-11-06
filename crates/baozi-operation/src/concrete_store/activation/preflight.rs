@@ -230,8 +230,8 @@ where
     }
 
     /// Marks one qualified session phase complete without exposing the raw operation.
-    pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
-        self.dormant.operation().try_complete_phase(phase)
+    pub fn try_complete_phase(&mut self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        self.dormant.operation_mut().try_complete_phase(phase)
     }
 
     /// Resolves a session that never received a canonical activation request.

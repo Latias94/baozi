@@ -327,13 +327,13 @@ fn preflight_startup(
     let dimensions_before = dimensions.map(|dimension| ledger.dimension_evidence(dimension));
     let phases_before = phases.map(|phase| ledger.phase_evidence(phase));
     let storage_before = {
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         (
             state.current_live_bytes,
             state.peak_live_bytes,
             state.active_reservations,
-            state.current_evidence_bytes,
-            state.peak_evidence_bytes,
+            state.current_administrative_bytes,
+            state.peak_administrative_bytes,
             state.publication,
         )
     };
@@ -345,7 +345,7 @@ fn preflight_startup(
             .map(|row| (row.policy, row.state))
             .collect::<Vec<_>>()
     };
-    let owners_before = Arc::strong_count(&ledger.state);
+    let owners_before = ledger.state.shared().map_or(1, Arc::strong_count);
     let allocations_before = test_startup_graph_allocation_entries();
     let batch_allocations_before = test_attribution_batch_allocation_entries();
     let releases_before = test_startup_graph_storage_releases();
@@ -362,14 +362,14 @@ fn preflight_startup(
         phases_before
     );
     {
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         assert_eq!(
             (
                 state.current_live_bytes,
                 state.peak_live_bytes,
                 state.active_reservations,
-                state.current_evidence_bytes,
-                state.peak_evidence_bytes,
+                state.current_administrative_bytes,
+                state.peak_administrative_bytes,
                 state.publication,
             ),
             storage_before
@@ -386,7 +386,10 @@ fn preflight_startup(
             work_before
         );
     }
-    assert_eq!(Arc::strong_count(&ledger.state), owners_before);
+    assert_eq!(
+        ledger.state.shared().map_or(1, Arc::strong_count),
+        owners_before
+    );
     assert_eq!(test_startup_graph_allocation_entries(), allocations_before);
     assert_eq!(
         test_attribution_batch_allocation_entries(),
@@ -430,7 +433,10 @@ where
 fn ledger_graph_observation(
     ledger: &Ledger<Owner, Phase, Dimension>,
 ) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
-    let probe = ledger.test_probe();
+    let (current_live_bytes, active_reservations) = {
+        let state = ledger.state.read();
+        (state.current_live_bytes, state.active_reservations)
+    };
     let bytes = ledger
         .dimension_evidence(Dimension::Bytes)
         .expect("byte evidence");
@@ -441,8 +447,8 @@ fn ledger_graph_observation(
         .dimension_evidence(Dimension::Scratch)
         .expect("scratch evidence");
     (
-        probe.current_live_bytes(),
-        probe.active_reservations(),
+        current_live_bytes,
+        active_reservations,
         bytes.current_live_bytes(),
         records.current_live_bytes(),
         scratch.current_live_bytes(),
@@ -937,7 +943,7 @@ fn startup_preflight_includes_current_outcome_evidence_and_policy() {
     let (limits, parts, _) = default_graph_request();
     let mut ledger = frozen_graph_ledger(limits);
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         let records = state
             .dimensions
             .iter_mut()
@@ -972,7 +978,7 @@ fn startup_preflight_includes_current_outcome_evidence_and_policy() {
     );
 
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         let records = state
             .dimensions
             .iter_mut()
@@ -1133,7 +1139,7 @@ fn startup_preflight_checks_current_publication_before_deferred_bindings() {
     ] {
         let (limits, mut parts, _) = default_graph_request();
         let mut ledger = frozen_graph_ledger(limits);
-        lock(&ledger.state).publication = publication;
+        ledger.state.write().publication = publication;
         parts.batches.canonical_assembly.phase = Phase::Unknown;
         assert_eq!(preflight_startup(&ledger, &parts), Err(cause.clone()));
         assert!(matches!(
@@ -1174,7 +1180,7 @@ fn startup_graph_defers_work_faults_until_after_storage_and_live_checks() {
             ));
             parts.batches.canonical_assembly.phase = phase;
             parts.commitments[0] = OutputCommitment::new(Dimension::Unknown, 4);
-            lock(&ledger.state).publication = publication;
+            ledger.state.write().publication = publication;
             if shape_fault {
                 ledger.work.rows.pop().expect("work row for shape fault");
             } else {
@@ -1211,7 +1217,7 @@ fn startup_graph_defers_work_faults_until_after_storage_and_live_checks() {
             assert_eq!(test_startup_graph_allocation_entries(), 0);
             assert_eq!(test_startup_graph_storage_releases(), 0);
             assert_eq!(test_startup_graph_ledger_release_locks(), 0);
-            let state = lock(&ledger.state);
+            let state = ledger.state.read();
             assert_eq!(state.current_live_bytes, 0);
             assert_eq!(state.active_reservations, 0);
         }
@@ -1731,7 +1737,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     let (limits, parts, _) = default_graph_request();
     let mut ledger = frozen_graph_ledger(limits);
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         state.active_reservations = u64::MAX;
     }
     let before = ledger_graph_observation(&ledger);
@@ -1753,7 +1759,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     ));
     assert_eq!(ledger_graph_observation(&ledger), before);
     assert_eq!(test_startup_graph_allocation_entries(), 0);
-    lock(&ledger.state).active_reservations = 0;
+    ledger.state.write().active_reservations = 0;
 
     test_reset_startup_graph_probes(None);
     let (limits, parts, _) = default_graph_request();
@@ -1762,7 +1768,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
         .bound_phase_position(Phase::Build)
         .expect("build phase");
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         state.phase_states[build_position].current_live_bytes = u64::MAX;
         state.phase_states[build_position].peak_live_bytes = u64::MAX;
     }
@@ -1795,7 +1801,7 @@ fn startup_graph_overflow_checks_leave_all_prior_ledger_state_unchanged() {
     );
     assert_eq!(test_startup_graph_allocation_entries(), 0);
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         state.phase_states[build_position].current_live_bytes = 0;
     }
 }

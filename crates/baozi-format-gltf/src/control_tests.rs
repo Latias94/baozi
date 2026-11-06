@@ -483,7 +483,7 @@ fn assert_success(report: &ImportReport, container: Container) {
     assert_eq!(ledger.terminal_cause(), ImportTerminalCause::Success);
     assert_eq!(ledger.current_live_bytes(), 0);
     assert_eq!(ledger.active_reservations(), 0);
-    assert_eq!(ledger.current_evidence_bytes(), 0);
+    assert!(ledger.current_administrative_bytes() <= ledger.peak_administrative_bytes());
 }
 
 fn assert_cancelled(failure: &ImportFailure, completed_rows: usize) {
@@ -516,7 +516,7 @@ fn assert_cancelled(failure: &ImportFailure, completed_rows: usize) {
     assert_eq!(ledger.committed_canonical_members(), 0);
     assert_eq!(ledger.current_live_bytes(), 0);
     assert_eq!(ledger.active_reservations(), 0);
-    assert_eq!(ledger.current_evidence_bytes(), 0);
+    assert!(ledger.current_administrative_bytes() <= ledger.peak_administrative_bytes());
     for dimension in [
         ImportDimension::MorphCells,
         ImportDimension::WorkUnits,

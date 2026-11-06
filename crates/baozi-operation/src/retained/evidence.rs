@@ -12,7 +12,7 @@ pub(crate) const TERMINAL_LEDGER_EVIDENCE_SCHEMA_REVISION: u32 = 1;
 pub(crate) trait TerminalEvidenceKeySeal {}
 
 pub(crate) trait TerminalEvidenceKey:
-    TerminalEvidenceKeySeal + Copy + Ord + Send + Sync + 'static
+    TerminalEvidenceKeySeal + fmt::Debug + Copy + Ord + Send + Sync + 'static
 {
 }
 
@@ -175,8 +175,8 @@ pub(crate) struct FallbackHeaderSnapshot<P: TerminalEvidenceKey> {
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
-    current_evidence_bytes: u64,
-    peak_evidence_bytes: u64,
+    current_administrative_bytes: u64,
+    peak_administrative_bytes: u64,
 }
 
 impl<P: TerminalEvidenceKey> FallbackHeaderSnapshot<P> {
@@ -212,12 +212,12 @@ impl<P: TerminalEvidenceKey> FallbackHeaderSnapshot<P> {
         self.active_reservations
     }
 
-    pub(crate) const fn current_evidence_bytes(self) -> u64 {
-        self.current_evidence_bytes
+    pub(crate) const fn current_administrative_bytes(self) -> u64 {
+        self.current_administrative_bytes
     }
 
-    pub(crate) const fn peak_evidence_bytes(self) -> u64 {
-        self.peak_evidence_bytes
+    pub(crate) const fn peak_administrative_bytes(self) -> u64 {
+        self.peak_administrative_bytes
     }
 }
 
@@ -236,8 +236,8 @@ pub(super) struct FallbackHeader<P> {
     current_live_bytes: AtomicU64,
     peak_live_bytes: AtomicU64,
     active_reservations: AtomicU64,
-    current_evidence_bytes: AtomicU64,
-    peak_evidence_bytes: AtomicU64,
+    current_administrative_bytes: AtomicU64,
+    peak_administrative_bytes: AtomicU64,
     key_type: PhantomData<P>,
 }
 
@@ -254,8 +254,8 @@ impl<P: TerminalEvidenceKey> FallbackHeader<P> {
             current_live_bytes: AtomicU64::new(0),
             peak_live_bytes: AtomicU64::new(0),
             active_reservations: AtomicU64::new(0),
-            current_evidence_bytes: AtomicU64::new(0),
-            peak_evidence_bytes: AtomicU64::new(0),
+            current_administrative_bytes: AtomicU64::new(0),
+            peak_administrative_bytes: AtomicU64::new(0),
             key_type: PhantomData,
         }
     }
@@ -283,10 +283,10 @@ impl<P: TerminalEvidenceKey> FallbackHeader<P> {
             .store(snapshot.peak_live_bytes(), Ordering::Relaxed);
         self.active_reservations
             .store(snapshot.active_reservations(), Ordering::Relaxed);
-        self.current_evidence_bytes
-            .store(snapshot.current_evidence_bytes(), Ordering::Relaxed);
-        self.peak_evidence_bytes
-            .store(snapshot.peak_evidence_bytes(), Ordering::Relaxed);
+        self.current_administrative_bytes
+            .store(snapshot.current_administrative_bytes(), Ordering::Relaxed);
+        self.peak_administrative_bytes
+            .store(snapshot.peak_administrative_bytes(), Ordering::Relaxed);
         self.terminal_cause.store(cause_tag, Ordering::Relaxed);
     }
 
@@ -321,8 +321,8 @@ impl<P: TerminalEvidenceKey> FallbackHeader<P> {
             current_live_bytes: self.current_live_bytes.load(Ordering::Relaxed),
             peak_live_bytes: self.peak_live_bytes.load(Ordering::Relaxed),
             active_reservations: self.active_reservations.load(Ordering::Relaxed),
-            current_evidence_bytes: self.current_evidence_bytes.load(Ordering::Relaxed),
-            peak_evidence_bytes: self.peak_evidence_bytes.load(Ordering::Relaxed),
+            current_administrative_bytes: self.current_administrative_bytes.load(Ordering::Relaxed),
+            peak_administrative_bytes: self.peak_administrative_bytes.load(Ordering::Relaxed),
         })
     }
 }
@@ -446,7 +446,7 @@ pub(super) enum TerminalEvidenceFreezeError {
     NonTerminalGlobalState {
         current_live_bytes: u64,
         active_reservations: u64,
-        current_evidence_bytes: u64,
+        current_administrative_bytes: u64,
     },
     NonTerminalDimensionState {
         index: usize,
@@ -494,10 +494,10 @@ impl fmt::Display for TerminalEvidenceFreezeError {
             Self::NonTerminalGlobalState {
                 current_live_bytes,
                 active_reservations,
-                current_evidence_bytes,
+                current_administrative_bytes,
             } => write!(
                 formatter,
-                "terminal ledger evidence still has {current_live_bytes} live bytes, {active_reservations} reservations, and {current_evidence_bytes} evidence bytes"
+                "terminal ledger evidence still has {current_live_bytes} live bytes, {active_reservations} reservations, and {current_administrative_bytes} evidence bytes"
             ),
             Self::NonTerminalDimensionState {
                 index,
@@ -741,12 +741,12 @@ where
         }
         if snapshot.current_live_bytes() != 0
             || snapshot.active_reservations() != 0
-            || snapshot.current_evidence_bytes() != 0
+            || !snapshot.has_exact_administrative_coverage()
         {
             return Err(TerminalEvidenceFreezeError::NonTerminalGlobalState {
                 current_live_bytes: snapshot.current_live_bytes(),
                 active_reservations: snapshot.active_reservations(),
-                current_evidence_bytes: snapshot.current_evidence_bytes(),
+                current_administrative_bytes: snapshot.current_administrative_bytes(),
             });
         }
         let qualification = self.finish_qualification(last_completed_phase_ordinal_plus_one)?;

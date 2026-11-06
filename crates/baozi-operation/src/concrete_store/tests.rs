@@ -24,7 +24,7 @@ use crate::{
 
 mod mapped_record_append;
 
-struct TestOwner;
+pub(super) struct TestOwner;
 
 impl OperationOwner for TestOwner {}
 
@@ -79,11 +79,11 @@ const fn test_dimension_semantic(local: u64) -> StoreDimensionSemanticId {
 }
 
 #[derive(Clone, Copy)]
-struct TestKeys {
-    phase: StorePhaseKey,
+pub(super) struct TestKeys {
+    pub(super) phase: StorePhaseKey,
     unregistered_phase: StorePhaseKey,
-    dimension: StoreDimensionKey,
-    work_dimension: StoreDimensionKey,
+    pub(super) dimension: StoreDimensionKey,
+    pub(super) work_dimension: StoreDimensionKey,
     failure_terminal_dimension: StoreDimensionKey,
     unregistered_dimension: StoreDimensionKey,
 }
@@ -114,7 +114,7 @@ fn test_vocabulary() -> (StoreKeyDomain, TestKeys) {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum TestProgress {
+pub(super) enum TestProgress {
     Build,
 }
 
@@ -129,7 +129,7 @@ impl ProgressPhase for TestProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum TestUnit {
+pub(super) enum TestUnit {
     Items,
 }
 
@@ -163,14 +163,14 @@ fn test_failure_terminal_plan(
     .expect("test failure-terminal work plan")
 }
 
-fn test_factory() -> PhysicalStorageAccountFactory {
+pub(super) fn test_factory() -> PhysicalStorageAccountFactory {
     PhysicalStorageAccountFactory::try_new(
         PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1).expect("test factory limits"),
     )
     .expect("test factory")
 }
 
-fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccount {
+pub(super) fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccount {
     factory
         .try_create_account(
             PhysicalStorageAccountLimits::new(u64::MAX, 256).expect("test account limits"),
@@ -459,7 +459,7 @@ fn test_body_operation<'inv>(
     )
 }
 
-fn test_operation_plan(
+pub(super) fn test_operation_plan(
     evidence_limit: u64,
     attempted_limit: u64,
     consumed_limit: u64,
@@ -2047,7 +2047,7 @@ fn phase_completion_validates_domain_and_catalog_before_monotonic_progress() {
         failure_terminal_work,
     );
     let mut invocation_root = TestInvocationRoot::new();
-    let operation = TestOperation::try_start(
+    let mut operation = TestOperation::try_start(
         &mut invocation_root,
         OperationControl::default(),
         ledger_plan,

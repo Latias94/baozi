@@ -155,10 +155,13 @@ fn terminal_evidence_freezes_exact_header_cells_and_queries() {
     assert_eq!(header.peak_live_bytes(), snapshot.peak_live_bytes());
     assert_eq!(header.active_reservations(), snapshot.active_reservations());
     assert_eq!(
-        header.current_evidence_bytes(),
-        snapshot.current_evidence_bytes()
+        header.current_administrative_bytes(),
+        snapshot.current_administrative_bytes()
     );
-    assert_eq!(header.peak_evidence_bytes(), snapshot.peak_evidence_bytes());
+    assert_eq!(
+        header.peak_administrative_bytes(),
+        snapshot.peak_administrative_bytes()
+    );
     assert_eq!(
         evidence.dimension(TestDimension::Bytes),
         snapshot.dimension(TestDimension::Bytes).copied()
@@ -177,7 +180,7 @@ fn terminal_evidence_freezes_exact_header_cells_and_queries() {
 
 #[test]
 fn terminal_evidence_does_not_infer_completion_from_the_last_accounting_phase() {
-    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
+    let mut ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
         test_limits(),
         &[TestPhase::Read, TestPhase::Decode],
     )
@@ -214,7 +217,7 @@ fn terminal_evidence_does_not_infer_completion_from_the_last_accounting_phase() 
 
 #[test]
 fn terminal_evidence_rejects_a_lifecycle_order_outside_its_canonical_key_catalog() {
-    let ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
+    let mut ledger = Ledger::<EvidenceOwner, TestPhase, TestDimension>::try_new(
         test_limits(),
         &[TestPhase::Decode, TestPhase::Read],
     )
@@ -402,7 +405,7 @@ fn assert_evidence_cells_pristine(evidence: &TerminalLedgerEvidence<TestPhase, T
 
 #[test]
 fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() {
-    let phase_ledger = test_ledger();
+    let mut phase_ledger = test_ledger();
     let phase_live = phase_ledger
         .reserve(TestPhase::Read, TestDimension::Bytes, 9)
         .expect("phase reservation fits");
@@ -452,7 +455,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
     drop(pending);
     drop(pending_ledger);
 
-    let global_ledger = test_ledger();
+    let mut global_ledger = test_ledger();
     let zero_live = global_ledger
         .reserve(TestPhase::Read, TestDimension::Bytes, 0)
         .expect("zero-byte reservation is still a live capability");
@@ -468,7 +471,7 @@ fn nonterminal_phase_dimension_and_global_states_reject_before_any_cell_write() 
         Err(TerminalEvidenceFreezeError::NonTerminalGlobalState {
             current_live_bytes: global_snapshot.current_live_bytes(),
             active_reservations: global_snapshot.active_reservations(),
-            current_evidence_bytes: global_snapshot.current_evidence_bytes(),
+            current_administrative_bytes: global_snapshot.current_administrative_bytes(),
         })
     );
     assert_evidence_cells_pristine(&global_evidence);

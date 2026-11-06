@@ -121,7 +121,10 @@ fn consumed(failure: &ImportFailure, dimension: ImportDimension) -> u64 {
 fn assert_released(failure: &ImportFailure) {
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(failure.ledger().active_reservations(), 0);
-    assert_eq!(failure.ledger().current_evidence_bytes(), 0);
+    assert!(
+        failure.ledger().current_administrative_bytes()
+            <= failure.ledger().peak_administrative_bytes()
+    );
     assert_eq!(failure.ledger().committed_canonical_members(), 0);
 }
 

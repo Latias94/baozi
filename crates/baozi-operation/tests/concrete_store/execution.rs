@@ -145,18 +145,18 @@ fn borrowed_storage_observation_reads_logical_capacity_before_operation_detach()
                     .ordinary_storage()
                     .reserve(keys.phase, keys.dimension, 17)?;
             let cloned = observation;
-            assert_eq!(observation.live_bytes(), baseline + 17);
+            assert_eq!(observation.live_bytes(context), baseline + 17);
             context.services().resize(&mut first, 9)?;
-            assert_eq!(cloned.live_bytes(), baseline + 9);
+            assert_eq!(cloned.live_bytes(context), baseline + 9);
             let second = context
                 .ordinary_storage()
                 .reserve(keys.phase, keys.dimension, 31)?;
-            assert_eq!(observation.live_bytes(), baseline + 40);
+            assert_eq!(observation.live_bytes(context), baseline + 40);
             assert_eq!(account.snapshot(), physical);
             drop(first);
-            assert_eq!(cloned.live_bytes(), baseline + 31);
+            assert_eq!(cloned.live_bytes(context), baseline + 31);
             drop(second);
-            assert_eq!(observation.live_bytes(), baseline);
+            assert_eq!(observation.live_bytes(context), baseline);
             Ok(())
         })
         .unwrap();
@@ -1313,7 +1313,7 @@ fn bound_services_reject_foreign_live_tokens_without_changing_the_source_capacit
             source
                 .with_exclusive_execution::<_, StoreInvocationError>(|source_context| {
                     let observation = source_context.storage_observation(source_keys.dimension)?;
-                    let baseline = observation.live_bytes();
+                    let baseline = observation.live_bytes(source_context);
                     let mut reservation = if retained {
                         source_context
                             .services()
@@ -1326,7 +1326,7 @@ fn bound_services_reject_foreign_live_tokens_without_changing_the_source_capacit
                             .unwrap()
                     };
                     let expected_physical = if retained { (8, 1) } else { (0, 0) };
-                    assert_eq!(observation.live_bytes(), baseline + 8);
+                    assert_eq!(observation.live_bytes(source_context), baseline + 8);
                     assert_eq!(
                         physical_delta(before, account.snapshot()),
                         expected_physical
@@ -1358,7 +1358,7 @@ fn bound_services_reject_foreign_live_tokens_without_changing_the_source_capacit
                                 )))
                             ));
                             assert_eq!(signal.polls.load(Ordering::SeqCst), polls);
-                            assert_eq!(observation.live_bytes(), baseline + 8);
+                            assert_eq!(observation.live_bytes(source_context), baseline + 8);
                             assert_eq!(
                                 physical_delta(before, account.snapshot()),
                                 expected_physical
@@ -1384,13 +1384,13 @@ fn bound_services_reject_foreign_live_tokens_without_changing_the_source_capacit
                         .services()
                         .validate_live_owner(&reservation)?;
                     source_context.services().resize(&mut reservation, 4)?;
-                    assert_eq!(observation.live_bytes(), baseline + 4);
+                    assert_eq!(observation.live_bytes(source_context), baseline + 4);
                     assert_eq!(
                         physical_delta(before, account.snapshot()),
                         if retained { (4, 1) } else { (0, 0) }
                     );
                     reservation.release_storage(());
-                    assert_eq!(observation.live_bytes(), baseline);
+                    assert_eq!(observation.live_bytes(source_context), baseline);
                     assert_eq!(physical_delta(before, account.snapshot()), (0, 0));
                     Ok(())
                 })
@@ -1433,7 +1433,7 @@ fn ordinary_loans_end_before_progress_and_keep_the_same_poll_frontiers() {
     operation
         .with_exclusive_execution::<_, StoreInvocationError>(|context| {
             let observation = context.storage_observation(keys.dimension)?;
-            let baseline = observation.live_bytes();
+            let baseline = observation.live_bytes(context);
             let polls = signal.polls.load(Ordering::SeqCst);
             let first = {
                 let mut services = context.services();
@@ -1454,7 +1454,7 @@ fn ordinary_loans_end_before_progress_and_keep_the_same_poll_frontiers() {
                 .unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 4);
             assert_eq!(callbacks.load(Ordering::SeqCst), 1);
-            assert_eq!(observation.live_bytes(), baseline + 4);
+            assert_eq!(observation.live_bytes(context), baseline + 4);
             let second = context
                 .services()
                 .ordinary_storage()
@@ -1466,9 +1466,9 @@ fn ordinary_loans_end_before_progress_and_keep_the_same_poll_frontiers() {
                 .unwrap();
             assert_eq!(signal.polls.load(Ordering::SeqCst), polls + 7);
             assert_eq!(callbacks.load(Ordering::SeqCst), 2);
-            assert_eq!(observation.live_bytes(), baseline + 20);
+            assert_eq!(observation.live_bytes(context), baseline + 20);
             drop((first, second));
-            assert_eq!(observation.live_bytes(), baseline);
+            assert_eq!(observation.live_bytes(context), baseline);
             Ok(())
         })
         .unwrap();

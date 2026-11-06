@@ -49,7 +49,7 @@ fn unchanged_operation_preserves_input_identity_and_import_evidence() {
     drop(scene);
     drop(evidence);
     assert_eq!(report.input_generation(), generation);
-    assert!(report.resources().peak_evidence_bytes() > 0);
+    assert!(report.resources().peak_administrative_bytes() > 0);
     assert_eq!(report.resources().published_outcome_evidence_bytes(), 0);
     assert_eq!(report.resources().published_terminal_evidence_records(), 0);
 }
@@ -245,8 +245,8 @@ fn assert_no_canonical_write(resources: &PostProcessResourceEvidence) {
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);
     assert_eq!(resources.committed_canonical_bytes(), 0);
-    assert!(resources.peak_evidence_bytes() > 0);
+    assert!(resources.peak_administrative_bytes() > 0);
     assert_eq!(resources.published_outcome_evidence_bytes(), 0);
     assert_eq!(resources.published_terminal_evidence_records(), 0);
-    assert!(resources.peak_evidence_bytes() >= resources.current_evidence_bytes());
+    assert!(resources.peak_administrative_bytes() >= resources.current_administrative_bytes());
 }

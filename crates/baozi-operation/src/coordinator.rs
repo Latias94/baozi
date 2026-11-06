@@ -5,8 +5,8 @@ use crate::control::{
     discard_extension, discard_untrusted_panic_payload,
 };
 use crate::ledger::{
-    Commitment, Ledger, LedgerCause, LedgerEvidenceError, LedgerLimits, LedgerSnapshot,
-    LiveReservation, PendingPublication, ProgressEvidenceStorage, PublicationReservationBatch,
+    Commitment, ExclusiveStorage, Ledger, LedgerCause, LedgerEvidenceError, LedgerLimits,
+    LedgerSnapshot, LiveReservation, PendingPublication, PublicationReservationBatch,
 };
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -171,23 +171,6 @@ impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
 ///
 /// A producer can retain a borrowed work envelope while polling or reporting progress.
 /// No callback runs while either accounting state is borrowed.
-pub(crate) struct OperationProgressCheckpoint<'a, O, LP, PP, U, D> {
-    poll: OperationPollCheckpoint<'a, PP, U>,
-    state: OperationProgressState<'a, O, LP, PP, U, D>,
-}
-
-/// Progress metadata can move independently of the invocation's unique control borrow.
-pub(crate) struct OperationProgressState<'a, O, LP, PP, U, D> {
-    storage: ProgressEvidenceStorage<'a, O, LP, D>,
-    progress: &'a mut Vec<((PP, U), ProgressState)>,
-    progress_evidence_bytes: &'a mut u64,
-    last_phase_order: &'a mut Option<u32>,
-    delivered_events: &'a mut usize,
-    delivered_bytes: &'a mut usize,
-    next_sequence: &'a mut u64,
-}
-
-/// Progress metadata before its storage-only view is bound to the invocation's real storage.
 pub(crate) struct OperationProgressFields<'a, PP, U> {
     progress: &'a mut Vec<((PP, U), ProgressState)>,
     progress_evidence_bytes: &'a mut u64,
@@ -197,75 +180,21 @@ pub(crate) struct OperationProgressFields<'a, PP, U> {
     next_sequence: &'a mut u64,
 }
 
-impl<'a, PP, U> OperationProgressFields<'a, PP, U> {
-    pub(crate) fn bind<O, LP, D>(
-        self,
-        storage: ProgressEvidenceStorage<'a, O, LP, D>,
-    ) -> OperationProgressState<'a, O, LP, PP, U, D> {
-        let Self {
-            progress,
-            progress_evidence_bytes,
-            last_phase_order,
-            delivered_events,
-            delivered_bytes,
-            next_sequence,
-        } = self;
-        OperationProgressState {
-            storage,
-            progress,
-            progress_evidence_bytes,
-            last_phase_order,
-            delivered_events,
-            delivered_bytes,
-            next_sequence,
-        }
-    }
-}
-
 type SplitExclusiveProgress<'a, O, LP, PP, U, D> = (
     OperationPollCheckpoint<'a, PP, U>,
     OperationProgressFields<'a, PP, U>,
     &'a mut Ledger<O, LP, D>,
 );
 
-impl<'a, O, LP, PP, U, D> OperationProgressCheckpoint<'a, O, LP, PP, U, D>
+impl<PP, U> OperationProgressFields<'_, PP, U>
 where
-    O: OperationOwner,
-    LP: Copy + Ord,
     PP: ProgressPhase,
     U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
 {
-    fn report_progress_with_delivery(
-        &mut self,
-        phase: PP,
-        unit: U,
-        completed: u64,
-        total: Option<u64>,
-        delivery: ProgressDelivery,
-    ) -> Result<(), ControlCause> {
-        self.state.report_progress_with_delivery(
-            &mut self.poll,
-            phase,
-            unit,
-            completed,
-            total,
-            delivery,
-        )
-    }
-}
-
-impl<O, LP, PP, U, D> OperationProgressState<'_, O, LP, PP, U, D>
-where
-    O: OperationOwner,
-    LP: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    pub(crate) fn report_progress(
+    pub(crate) fn report_progress<O: OperationOwner, LP: Copy + Ord, D: Copy + Ord + fmt::Debug>(
         &mut self,
         poll: &mut OperationPollCheckpoint<'_, PP, U>,
+        storage: &mut ExclusiveStorage<'_, O, LP, D>,
         phase: PP,
         unit: U,
         completed: u64,
@@ -273,6 +202,7 @@ where
     ) -> Result<(), ControlCause> {
         self.report_progress_with_delivery(
             poll,
+            storage,
             phase,
             unit,
             completed,
@@ -281,9 +211,18 @@ where
         )
     }
 
-    fn report_progress_with_delivery(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "progress attributes and its temporary storage authority remain explicit at this boundary"
+    )]
+    fn report_progress_with_delivery<
+        O: OperationOwner,
+        LP: Copy + Ord,
+        D: Copy + Ord + fmt::Debug,
+    >(
         &mut self,
         poll: &mut OperationPollCheckpoint<'_, PP, U>,
+        storage: &mut ExclusiveStorage<'_, O, LP, D>,
         phase: PP,
         unit: U,
         completed: u64,
@@ -365,6 +304,7 @@ where
             }
             Err(position) => {
                 if let Err(cause) = self.try_insert_progress(
+                    storage,
                     position,
                     key,
                     progress_state,
@@ -439,8 +379,9 @@ where
         Err(cause)
     }
 
-    fn try_insert_progress(
+    fn try_insert_progress<O: OperationOwner, LP: Copy + Ord, D: Copy + Ord + fmt::Debug>(
         &mut self,
+        storage: &mut ExclusiveStorage<'_, O, LP, D>,
         position: usize,
         key: (PP, U),
         state: ProgressState,
@@ -453,8 +394,8 @@ where
                 limit,
             });
         }
-        self.storage
-            .try_grow(
+        storage
+            .try_grow_progress(
                 self.progress,
                 desired_capacity,
                 self.progress_evidence_bytes,
@@ -540,9 +481,10 @@ where
         ledger_limits: LedgerLimits<D>,
         phases: &[LP],
     ) -> Result<Self, LedgerCause<D>> {
+        let ledger = Ledger::try_new(ledger_limits, phases)?;
         Ok(Self {
             control,
-            ledger: Ledger::try_new(ledger_limits, phases)?,
+            ledger,
             terminal: None,
             progress: Vec::new(),
             progress_evidence_bytes: 0,
@@ -552,6 +494,22 @@ where
             next_sequence: 0,
             terminal_control_gate: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_ledger_for_test(ledger: Ledger<O, LP, D>) -> Self {
+        Self {
+            control: OperationControl::default(),
+            ledger,
+            terminal: None,
+            progress: Vec::new(),
+            progress_evidence_bytes: 0,
+            last_phase_order: None,
+            delivered_events: 0,
+            delivered_bytes: 0,
+            next_sequence: 0,
+            terminal_control_gate: None,
+        }
     }
 
     /// Reads the original cold control cause without polling or changing control state.
@@ -598,9 +556,16 @@ where
         total: Option<u64>,
         delivery: ProgressDelivery,
     ) -> Result<(), ControlCause> {
-        self.split_progress_checkpoint_and_retained_ledger()
-            .0
-            .report_progress_with_delivery(phase, unit, completed, total, delivery)
+        let (mut poll, mut progress, ledger) = self.split_exclusive_progress_and_ledger();
+        progress.report_progress_with_delivery(
+            &mut poll,
+            &mut ledger.storage_view(),
+            phase,
+            unit,
+            completed,
+            total,
+            delivery,
+        )
     }
 
     /// Returns the latest semantic progress report, including reports not delivered to an observer.
@@ -624,7 +589,7 @@ where
     /// Snapshot storage is admitted against the independent evidence limit before allocator entry.
     /// Its construction overlap contributes to the evidence peak; ownership transfers to the
     /// returned snapshot, so its own vectors are excluded from current ledger-owned evidence.
-    pub fn try_ledger_snapshot(&self) -> Result<LedgerSnapshot<LP, D>, LedgerEvidenceError> {
+    pub fn try_ledger_snapshot(&mut self) -> Result<LedgerSnapshot<LP, D>, LedgerEvidenceError> {
         self.ledger.try_snapshot()
     }
 
@@ -745,27 +710,6 @@ where
 
     pub(crate) fn retained_ledger_mut(&mut self) -> &mut Ledger<O, LP, D> {
         &mut self.ledger
-    }
-
-    #[allow(
-        clippy::type_complexity,
-        reason = "the tuple exposes the concrete disjoint ledger and progress borrows"
-    )]
-    pub(crate) fn split_progress_checkpoint_and_retained_ledger(
-        &mut self,
-    ) -> (
-        OperationProgressCheckpoint<'_, O, LP, PP, U, D>,
-        &Ledger<O, LP, D>,
-    ) {
-        let (poll, progress, ledger) = self.split_exclusive_progress_and_ledger();
-        let ledger = &*ledger;
-        (
-            OperationProgressCheckpoint {
-                poll,
-                state: progress.bind(ledger.storage_view().progress_evidence()),
-            },
-            ledger,
-        )
     }
 
     pub(crate) fn split_poll_checkpoint_and_retained_ledger(
@@ -897,7 +841,33 @@ where
         Ok(())
     }
 
-    pub(crate) fn into_ledger_for_typed_publication(self) -> Ledger<O, LP, D> {
+    pub(crate) fn take_terminal_snapshot(
+        &mut self,
+    ) -> (LedgerSnapshot<LP, D>, Option<LedgerCause<D>>) {
+        let actual_progress_bytes = crate::ledger::capacity_bytes(&self.progress).ok();
+        let progress_covered = actual_progress_bytes == Some(self.progress_evidence_bytes);
+        let (mut snapshot, cause) = self
+            .ledger
+            .take_terminal_snapshot(actual_progress_bytes.unwrap_or(self.progress_evidence_bytes));
+        if !progress_covered {
+            snapshot.qualify_administrative_coverage(None);
+            return (
+                snapshot,
+                cause.or(Some(LedgerCause::FinalSnapshotShapeMismatch)),
+            );
+        }
+        (snapshot, cause)
+    }
+
+    pub(crate) fn known_administrative_bytes(&self) -> Option<u64> {
+        let progress_bytes = crate::ledger::capacity_bytes(&self.progress).ok()?;
+        if progress_bytes != self.progress_evidence_bytes {
+            return None;
+        }
+        self.ledger.known_administrative_bytes(progress_bytes)
+    }
+
+    pub(crate) fn retire_after_detach(self, state: &mut crate::ledger::LedgerState<LP, D>) {
         let Self {
             control,
             ledger,
@@ -906,9 +876,9 @@ where
             ..
         } = self;
         drop(progress);
-        ledger.release_progress_evidence(progress_evidence_bytes);
+        Ledger::<O, LP, D>::release_detached_administration(state, progress_evidence_bytes);
+        ledger.retire_detached_indexes(state);
         drop(control);
-        ledger
     }
 
     /// Finalizes the generic ledger after operation-owned live storage reaches zero.
@@ -922,17 +892,14 @@ where
     pub fn finish(mut self) -> Result<LedgerSnapshot<LP, D>, OperationFinishError<LP, D>> {
         let disposal = self.dispose_control_owners();
         let control_cause = self.terminal.clone().or_else(|| disposal.err());
-        self.progress = Vec::new();
-        self.ledger
-            .release_progress_evidence(self.progress_evidence_bytes);
-        self.progress_evidence_bytes = 0;
-        let snapshot = self.ledger.finish().map_err(|failure| {
-            let (cause, snapshot) = failure.into_parts();
-            OperationFinishError {
+        let (snapshot, ledger_cause) = self.take_terminal_snapshot();
+        if let Some(cause) = ledger_cause {
+            std::mem::forget(self);
+            return Err(OperationFinishError {
                 cause: PublicationCause::Ledger(cause),
                 snapshot,
-            }
-        })?;
+            });
+        }
         if let Some(cause) = control_cause {
             return Err(OperationFinishError {
                 cause: PublicationCause::Control(cause),

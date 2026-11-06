@@ -546,7 +546,7 @@ fn mixed_batch_transition_conserves_operation_dimension_and_phase_totals() {
 #[test]
 fn complete_phase_catalog_must_fit_evidence_before_operation_start() {
     let tight = limits(20);
-    let dimension_evidence_limit = tight.frozen_evidence_bytes();
+    let dimension_evidence_limit = tight.frozen_administrative_bytes();
     let tight = tight
         .try_with_evidence_byte_limit(dimension_evidence_limit)
         .expect("the frozen dimension evidence fits its exact existing allocation");

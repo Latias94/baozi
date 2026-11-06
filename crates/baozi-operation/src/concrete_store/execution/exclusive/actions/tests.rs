@@ -73,7 +73,6 @@ fn with_actual_host<R>(
     let share_work = crate::retained::RetainedHandleSharePlan::new(key, key);
     let (poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
     let (work, storage) = ledger.exclusive().unwrap();
-    let progress = progress.bind(storage.progress_evidence());
     let share_layout = work.bind(share_work.charges().map(|(key, _)| key)).unwrap();
     let layout = work.bind([key]).unwrap();
     let context = StoreInvocation {

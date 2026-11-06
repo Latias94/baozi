@@ -1,3 +1,4 @@
+use super::storage::SharedStorage;
 use super::{
     AttributionBatchCreateError, AttributionBatchPlan, AttributionReservationBatch,
     CanonicalOutput, CounterClass, FallbackBatchBaseline, InternalWork, Ledger, LedgerCause,
@@ -349,7 +350,7 @@ where
 fn into_runtime_batch<O, P, D, Destination>(
     backing: StartupAttributionBatchBackings<O, P, D, Destination>,
     capacity_core: ReservationCore<O, P, D>,
-    owner: Arc<Mutex<LedgerState<P, D>>>,
+    owner: Arc<Mutex<Option<LedgerState<P, D>>>>,
 ) -> AttributionReservationBatch<O, P, D, Destination>
 where
     O: OperationOwner,
@@ -371,7 +372,7 @@ where
         }),
         attribution_limit,
         commitment_limit,
-        owner,
+        owner: owner.into(),
     }
 }
 
@@ -449,7 +450,7 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    runtime_owners: [Arc<Mutex<LedgerState<P, D>>>; 4],
+    runtime_owners: [SharedStorage<P, D>; 4],
     canonical_assembly: StartupAttributionBatchBackings<O, P, D, CanonicalOutput>,
     evidence_assembly: StartupAttributionBatchBackings<O, P, D, OutcomeEvidenceDestination>,
     fallback: StartupAttributionBatchBackings<O, P, D, OutcomeEvidenceDestination>,
@@ -468,7 +469,7 @@ where
             ownership
                 .runtime_owners
                 .iter()
-                .all(|owner| Arc::ptr_eq(owner, &ledger.state))
+                .all(|owner| ledger.state.owns(owner))
         })
     }
 
@@ -588,10 +589,10 @@ where
             parts.commitments,
         );
         let work_state = &self.work;
-        let state = lock(&self.state);
+        let state = self.state.read();
         Self::ensure_open(&state).map_err(AttributionBatchCreateError::Ledger)?;
         Self::preflight_startup_ledger(
-            &state,
+            &state.view(),
             self.operation_live_byte_limit,
             bindings,
             |layout, amounts| {
@@ -667,10 +668,26 @@ where
         let mut graph = StartupAttributionGraph {
             ownership: Some(StartupAttributionGraphOwnership {
                 runtime_owners: [
-                    Arc::clone(&self.state),
-                    Arc::clone(&self.state),
-                    Arc::clone(&self.state),
-                    Arc::clone(&self.state),
+                    Arc::clone(
+                        self.state
+                            .shared()
+                            .expect("startup installs the issued storage identity"),
+                    ),
+                    Arc::clone(
+                        self.state
+                            .shared()
+                            .expect("startup installs the issued storage identity"),
+                    ),
+                    Arc::clone(
+                        self.state
+                            .shared()
+                            .expect("startup installs the issued storage identity"),
+                    ),
+                    Arc::clone(
+                        self.state
+                            .shared()
+                            .expect("startup installs the issued storage identity"),
+                    ),
                 ],
                 canonical_assembly,
                 evidence_assembly,
@@ -706,25 +723,38 @@ where
             state: &mut self.work,
         };
         let work_state = work.read_state();
-        let mut state = lock(&self.state);
-        Self::ensure_open(&state)?;
-        let admission = Self::preflight_startup_ledger(
-            &state,
-            self.operation_live_byte_limit,
-            bindings,
-            |layout, amounts| {
-                work.ensure_active(WorkGrant::Ordinary)?;
-                layout.preflight_repeated_observed(
-                    work.catalog,
-                    &work_state.rows,
-                    &work_state.header,
-                    amounts,
-                    std::num::NonZeroU64::MIN,
-                )
-            },
-        )?;
-        commit_startup_ledger(&mut state, &admission);
-        drop(state);
+        let preflight = |state: &LedgerState<P, D>| {
+            Self::ensure_open(state)?;
+            Self::preflight_startup_ledger(
+                &state.view(),
+                self.operation_live_byte_limit,
+                bindings,
+                |layout, amounts| {
+                    work.ensure_active(WorkGrant::Ordinary)?;
+                    layout.preflight_repeated_observed(
+                        work.catalog,
+                        &work_state.rows,
+                        &work_state.header,
+                        amounts,
+                        std::num::NonZeroU64::MIN,
+                    )
+                },
+            )
+        };
+        let admission = if matches!(self.state, super::storage::DynamicStorage::Inline(_)) {
+            let admission = preflight(&self.state.read())?;
+            let shared = self
+                .state
+                .ensure_shared()
+                .map_err(|cause| LedgerCause::Evidence { cause })?;
+            commit_startup_ledger(&mut lock(shared).view_mut(), &admission);
+            admission
+        } else {
+            let mut state = self.state.write();
+            let admission = preflight(&state)?;
+            commit_startup_ledger(&mut state.view_mut(), &admission);
+            admission
+        };
         let StartupLedgerAdmission {
             reservations,
             commitments,
@@ -733,7 +763,11 @@ where
         Ok(StartupLedgerCommit {
             cores: StartupLedgerCores::from_array(reservations.map(|projection| {
                 ReservationCore::new(
-                    Arc::clone(&self.state),
+                    Arc::clone(
+                        self.state
+                            .shared()
+                            .expect("startup installs the issued storage identity"),
+                    ),
                     projection.spec.phase,
                     projection.phase_position,
                     projection.spec.dimension,
@@ -799,7 +833,7 @@ where
     }
 
     fn preflight_startup_ledger(
-        state: &LedgerState<P, D>,
+        state: &super::StorageView<'_, P, D>,
         operation_live_byte_limit: u64,
         bindings: StartupLedgerBindings<P, D>,
         preflight_work: impl FnOnce(WorkLayout<8>, [u64; 8]) -> Result<(), LedgerCause<D>>,
@@ -982,7 +1016,7 @@ where
 }
 
 fn commit_startup_ledger<P: Copy + Ord, D: Copy + Ord>(
-    state: &mut LedgerState<P, D>,
+    state: &mut super::StorageViewMut<'_, P, D>,
     admission: &StartupLedgerAdmission<P, D>,
 ) {
     for projection in &admission.reservations {

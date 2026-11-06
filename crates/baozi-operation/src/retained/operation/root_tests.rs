@@ -141,6 +141,141 @@ fn forgotten_operation_permission_keeps_real_baseline_until_root_drop() {
 }
 
 #[test]
+fn forgotten_terminal_classification_keeps_the_actual_armed_state_and_physical_graph() {
+    let account = account();
+    let drops = Arc::new(Mutex::new(Vec::new()));
+    let mut root = Root::new();
+    let mut permission = start(&mut root, &account, &drops);
+    permission
+        .common
+        .coordinator
+        .report_progress(Phase, Unit, 1, None)
+        .unwrap();
+    let identity = permission.invocation_identity();
+    let table = RetainedBlockTablePlan::new(writer(), 1, 1);
+    let assembly = permission
+        .try_publication_assembly(RetainedPublicationPlan::success(table, table))
+        .unwrap_or_else(|_| panic!("real terminal tables must open"));
+    let ledger = assembly.test_ledger_probe();
+    let numeric_before = (ledger.current_live_bytes(), ledger.active_reservations());
+    let administrative_before = ledger.current_administrative_bytes();
+    let physical_before = account.snapshot();
+    let classification = assembly
+        .try_classify_terminal_preparation(super::super::RetainedTerminalRequest::MinimalFallback {
+            requested_cause: PreparationFailureCode::domain(41),
+        })
+        .unwrap_or_else(|_| panic!("the actual fallback must classify before freeze"));
+    std::mem::forget(classification);
+
+    assert_eq!(root.invocation_identity(), identity);
+    assert!(root.common.as_ref().unwrap().terminal_outstanding);
+    assert!(root.terminal.as_ref().unwrap().fallback.is_some());
+    assert_eq!(
+        root.common
+            .as_ref()
+            .unwrap()
+            .coordinator
+            .known_administrative_bytes(),
+        Some(administrative_before)
+    );
+    root.cleanup_owned_state();
+    assert!(root.common.is_none());
+    assert!(root.must_retain_domain());
+    assert!(ledger.is_available());
+    assert_eq!(
+        (ledger.current_live_bytes(), ledger.active_reservations()),
+        numeric_before
+    );
+    assert_eq!(ledger.current_administrative_bytes(), administrative_before);
+    let contained = account.snapshot();
+    assert!(contained.poisoned());
+    assert_eq!(
+        contained.live_retained_bytes(),
+        physical_before.live_retained_bytes()
+    );
+    assert_eq!(
+        contained.live_retained_allocations(),
+        physical_before.live_retained_allocations()
+    );
+    assert!(drops.lock().unwrap().is_empty());
+    root.cleanup_owned_state();
+    drop(root);
+    assert_eq!(account.snapshot(), contained);
+}
+
+#[test]
+fn consuming_pre_detach_containment_retains_real_common_after_physical_quarantine() {
+    let account = account();
+    let drops = Arc::new(Mutex::new(Vec::new()));
+    let mut root = Root::new();
+    let permission = start(&mut root, &account, &drops);
+    let table = RetainedBlockTablePlan::new(writer(), 1, 1);
+    let assembly = permission
+        .try_publication_assembly(RetainedPublicationPlan::success(table, table))
+        .unwrap_or_else(|_| panic!("real terminal tables must open"));
+    let ledger = assembly.test_ledger_probe();
+    let numeric_before = (ledger.current_live_bytes(), ledger.active_reservations());
+    let physical_before = account.snapshot();
+    let classification = assembly
+        .try_classify_terminal_preparation(super::super::RetainedTerminalRequest::MinimalFallback {
+            requested_cause: PreparationFailureCode::domain(41),
+        })
+        .unwrap_or_else(|_| panic!("the actual fallback must classify before freeze"));
+    let _ = account.record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+    let first = account.snapshot().first_poison_evidence();
+    let cause = classification.contain_activation_fault();
+    assert_eq!(
+        cause.reason(),
+        AccountPoisonReason::RetainedStorageReleaseUnverified
+    );
+    assert!(root.common.is_none());
+    assert!(root.must_retain_domain());
+    assert!(ledger.is_available());
+    assert_eq!(
+        (ledger.current_live_bytes(), ledger.active_reservations()),
+        numeric_before
+    );
+    let contained = account.snapshot();
+    assert_eq!(contained.first_poison_evidence(), first);
+    assert_eq!(
+        contained.live_retained_bytes(),
+        physical_before.live_retained_bytes()
+    );
+    assert_eq!(
+        contained.live_retained_allocations(),
+        physical_before.live_retained_allocations()
+    );
+    assert!(drops.lock().unwrap().is_empty());
+    drop(root);
+    assert_eq!(account.snapshot(), contained);
+}
+
+#[test]
+fn successful_detach_consumes_the_actual_terminal_slot_once() {
+    let account = account();
+    let drops = Arc::new(Mutex::new(Vec::new()));
+    let mut root = Root::new();
+    let permission = start(&mut root, &account, &drops);
+    let prepared = permission
+        .prepare_evidence_only_success(FinalProgress::new(Phase, Unit, 1))
+        .unwrap_or_else(|_| panic!("the real read-only terminal must detach"));
+    assert!(matches!(
+        prepared,
+        PreparedRetainedEvidenceOnlyOutcome::Success(_)
+    ));
+    assert!(root.common.is_none());
+    let physical = root.terminal.as_ref().unwrap();
+    assert!(physical.fallback.is_none() && physical.evidence.is_none());
+    assert!(physical.canonical_table.is_none() && physical.evidence_table.is_none());
+    assert!(physical.account.is_none());
+    assert_eq!(*drops.lock().unwrap(), ["fallback"]);
+    drop(prepared);
+    drop(root);
+    assert_eq!(*drops.lock().unwrap(), ["fallback"]);
+    assert_released(&account);
+}
+
+#[test]
 fn forgotten_assembly_permission_keeps_tables_and_cleans_values_before_attribution() {
     let account = account();
     let drops = Arc::new(Mutex::new(Vec::new()));
@@ -334,7 +469,12 @@ fn physical_startup_denial_keeps_common_control_and_the_actual_share_prefix_in_r
     assert!(drops.lock().unwrap().is_empty());
     assert_eq!(account.share_call_count(), 4);
     assert_released(&account);
-    let ledger = root.common.as_ref().unwrap().coordinator.retained_ledger();
+    let ledger = root
+        .common
+        .as_mut()
+        .unwrap()
+        .coordinator
+        .retained_ledger_mut();
     let evidence = ledger.dimension_evidence(1).unwrap();
     assert_eq!((evidence.attempted(), evidence.consumed()), (8, 8));
     assert!(evidence.peak_live_bytes() > 0);
@@ -613,6 +753,7 @@ fn unattached_terminal_uses_the_original_ticket_and_actual_prework_without_start
         .prepare_unattached_terminal(binding, FinalProgress::new(Phase, Unit, 1))
         .unwrap_or_else(|_| panic!("only the original root can finish"));
     assert_eq!(evidence.cause, None);
+    assert!(!evidence.contained);
     let work = evidence.snapshot.dimension(1).unwrap();
     assert_eq!((work.attempted(), work.consumed()), (3, 3));
     assert_eq!(work.peak_live_bytes(), 7);
@@ -655,6 +796,7 @@ fn unattached_failure_keeps_dirty_snapshot_and_records_the_actual_live_residue()
         .prepare_unattached_terminal(binding, FinalProgress::new(Phase, Unit, 1))
         .unwrap_or_else(|_| panic!("the original root still owns failure facts"));
     assert_eq!(evidence.cause, Some(PreparationFailureCode::ledger()));
+    assert!(evidence.contained);
     assert_eq!(evidence.snapshot.current_live_bytes(), 7);
     assert_eq!(evidence.snapshot.active_reservations(), 1);
     let work = evidence.snapshot.dimension(1).unwrap();
@@ -665,7 +807,10 @@ fn unattached_failure_keeps_dirty_snapshot_and_records_the_actual_live_residue()
     assert_eq!(account.share_call_count(), 0);
     drop(evidence);
     drop(root);
-    assert_released(&account);
+    let quarantined = account.snapshot();
+    assert!(quarantined.poisoned());
+    assert_eq!(quarantined.live_retained_bytes(), 0);
+    assert_eq!(quarantined.live_retained_allocations(), 0);
 }
 
 struct PoisonUnattachedAccountOnDrop(Arc<PhysicalStorageAccount>);

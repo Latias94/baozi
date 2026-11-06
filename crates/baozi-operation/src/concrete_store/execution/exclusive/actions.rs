@@ -134,7 +134,7 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreActionExecution
         runtime_ledger(
             self.context.parts.ordinary.failure,
             self.context.parts.work.tighten_policy(
-                &self.context.parts.ordinary.storage,
+                &mut self.context.parts.ordinary.storage,
                 dimension,
                 policy,
             ),

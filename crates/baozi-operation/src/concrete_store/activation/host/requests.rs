@@ -136,7 +136,9 @@ where
             });
         }
         disposition.install(PendingDisposition::Rejected(PendingRejected {
-            store: DeferredUnrootedStoreFailure { domain },
+            store: DeferredUnrootedStoreFailure {
+                domain: domain.defer(),
+            },
             failure_code,
             failure_work,
             destination: outcome_evidence_destination_dimension,

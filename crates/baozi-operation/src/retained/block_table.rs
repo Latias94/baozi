@@ -2481,7 +2481,7 @@ where
         admitted_share_work
             .work()
             .reserve_operation_attribution::<Destination, O, P>(
-                &root.storage,
+                &mut root.storage,
                 phase,
                 attribution_dimension,
                 charge.bytes,
@@ -2737,7 +2737,7 @@ where
         admitted_share_work
             .work()
             .reserve_operation_attribution::<Destination, O, P>(
-                &root.storage,
+                &mut root.storage,
                 phase,
                 attribution_dimension,
                 charge.bytes,

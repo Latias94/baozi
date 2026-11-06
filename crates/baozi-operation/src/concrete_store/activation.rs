@@ -11,6 +11,8 @@ use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use super::StoreKeyDomain;
 use super::{
     ByteBlock, BytesPlan, BytesWriter, CanonicalBytesRef, CanonicalInheritanceSource,
     CanonicalRecordRef, CanonicalRecordRowWriter, CanonicalRecordWriter, CanonicalSequenceRef,
@@ -26,10 +28,10 @@ use super::{
     RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreWorkControl,
     RetainedStoreWriterPlan, RetainedStoreWriterRole, ScalarSequence, SequencePlan, SequenceWriter,
     ShareableStoreKind, StoreBuildCallbackFailure, StoreBuildError, StoreControlledError,
-    StoreControlledSuccessValidation, StoreDimensionKey, StoreEvidenceValidationSession,
-    StoreFailureAssembly, StoreFailureValidation, StoreFallbackOnly, StoreInvocation,
-    StoreInvocationLayout, StoreKeyDomain, StorePhaseKey, StorePlanError, StorePrepareError,
-    StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
+    StoreControlledSuccessValidation, StoreDimensionKey, StoreDomainLoan,
+    StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureValidation,
+    StoreFallbackOnly, StoreInvocation, StoreInvocationLayout, StorePhaseKey, StorePlanError,
+    StorePrepareError, StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
     StoreSuccessFreezePermitIssue, StoreValidationSession, StoreWorkError, StoredBlock,
     StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
     classify_prepared_fallback, map_publication_error, map_writer_error,
@@ -2925,7 +2927,7 @@ where
     U: ProgressUnit,
 {
     owner: PayloadOwner<PayloadLoan<'inv, Cause>, RawStoreFailureAssembly<'inv, O, PP, U>>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainLoan<'inv>,
     failure_code: PreparationFailureCode,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
@@ -3258,7 +3260,7 @@ where
     }
     let prepared = raw
         .prepare_minimal_fallback(failure_code)
-        .map(|raw| classify_prepared_fallback(raw, domain));
+        .map(|raw| classify_prepared_fallback(raw, domain.into_owned()));
     match prepared {
         Ok(prepared) => Ok(VerifiedMinimalFallback::new(prepared, cause.into_owned())),
         Err(error) => {
@@ -3340,7 +3342,7 @@ where
         ));
     }
     raw.prepare_minimal_fallback(failure_code)
-        .map(|raw| classify_prepared_fallback(raw, domain))
+        .map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
         .map_err(StorePrepareError::from_raw)
 }
 
@@ -4848,7 +4850,7 @@ mod scoped_transition_tests {
                                 crate::concrete_store::classify_prepared_failure(
                                     prepared,
                                     store.evidence_root,
-                                    domain,
+                                    domain.into_owned(),
                                 ),
                                 control_cause,
                             )

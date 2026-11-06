@@ -162,7 +162,7 @@ fn account_actions(account: &PhysicalStorageAccount) -> u64 {
         .admitted_account_actions
 }
 
-fn ledger_observation(ledger: &Ledger<Owner, Phase, Dimension>) -> (u64, u64, u64, u64, u64) {
+fn ledger_observation(ledger: &mut Ledger<Owner, Phase, Dimension>) -> (u64, u64, u64, u64, u64) {
     let probe = ledger.test_probe();
     let records = ledger
         .dimension_evidence(Dimension::Records)
@@ -249,7 +249,7 @@ fn initialized_ledger_preflight_rejects_before_graph_shares_or_account_admission
     ledger
         .charge_attempted(Dimension::Records, u64::MAX)
         .unwrap_or_else(|error| panic!("existing attempted work: {error}"));
-    let ledger_before = ledger_observation(&ledger);
+    let ledger_before = ledger_observation(&mut ledger);
     let account_before = account.snapshot();
     let phase_constructions = test_phase_catalog_construction_entries();
     let allocations = test_startup_graph_allocation_entries();
@@ -264,7 +264,7 @@ fn initialized_ledger_preflight_rejects_before_graph_shares_or_account_admission
             }
         ))
     ));
-    assert_eq!(ledger_observation(&ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
     assert_eq!(
         test_phase_catalog_construction_entries(),
         phase_constructions
@@ -335,7 +335,7 @@ fn ledger_rejection_precedes_all_four_owner_shares_and_physical_admission() {
     assert_eq!(account.share_call_count(), shares);
     assert_eq!(account_actions(&account), 1);
     assert_eq!(test_startup_graph_allocation_entries(), allocations);
-    assert_eq!(ledger_observation(&ledger), (0, 0, 0, 0, 0));
+    assert_eq!(ledger_observation(&mut ledger), (0, 0, 0, 0, 0));
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(
         startup_lock_probe_snapshot(),
@@ -421,7 +421,7 @@ fn physical_no_mutation_drops_the_complete_graph_normally() {
     assert_eq!(test_startup_graph_ledger_release_locks(), release_locks + 1);
     assert_eq!(account.share_call_count(), 4);
     assert_eq!(account_actions(&account), 1);
-    assert_eq!(ledger_observation(&ledger), (0, 0, 12, 12, 0));
+    assert_eq!(ledger_observation(&mut ledger), (0, 0, 12, 12, 0));
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().poison_event_count(), 0);
@@ -440,7 +440,7 @@ fn precommit_panic_contains_the_graph_without_fabricating_a_refund() {
 
     let containment =
         expect_uncertain(admission.try_prepare_startup_cross_plane(&mut ledger, plan));
-    let ledger_before = ledger_observation(&ledger);
+    let ledger_before = ledger_observation(&mut ledger);
     assert_eq!(ledger_before.1, 6);
     assert_eq!(
         (ledger_before.2, ledger_before.3, ledger_before.4),
@@ -453,7 +453,7 @@ fn precommit_panic_contains_the_graph_without_fabricating_a_refund() {
     assert_eq!(test_startup_graph_ledger_release_locks(), release_locks);
     assert_eq!(account.share_call_count(), 4);
     assert_eq!(account_actions(&account), 1);
-    assert_eq!(ledger_observation(&ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert!(account.snapshot().poisoned());
     assert_eq!(account.snapshot().poison_event_count(), 1);
@@ -472,7 +472,7 @@ fn postcommit_panic_contains_the_graph_and_complete_physical_charge() {
 
     let containment =
         expect_uncertain(admission.try_prepare_startup_cross_plane(&mut ledger, plan));
-    let ledger_before = ledger_observation(&ledger);
+    let ledger_before = ledger_observation(&mut ledger);
     assert_eq!(ledger_before.1, 6);
     assert_eq!(
         (ledger_before.2, ledger_before.3, ledger_before.4),
@@ -485,7 +485,7 @@ fn postcommit_panic_contains_the_graph_and_complete_physical_charge() {
     assert_eq!(test_startup_graph_ledger_release_locks(), release_locks);
     assert_eq!(account.share_call_count(), 4);
     assert_eq!(account_actions(&account), 1);
-    assert_eq!(ledger_observation(&ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
     assert_eq!(account.snapshot().live_retained_bytes(), 5);
     assert_eq!(account.snapshot().live_retained_allocations(), 2);
     assert!(account.snapshot().poisoned());
@@ -504,13 +504,13 @@ fn ready_drop_poison_contains_both_accounting_planes() {
     let ready = admission
         .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("cross-plane startup must be ready"));
-    let ledger_before = ledger_observation(&ledger);
+    let ledger_before = ledger_observation(&mut ledger);
 
     drop(ready);
 
     assert_eq!(test_startup_graph_storage_releases(), releases);
     assert_eq!(test_startup_graph_ledger_release_locks(), release_locks);
-    assert_eq!(ledger_observation(&ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
     assert_eq!(account_actions(&account), 1);
     assert_eq!(account.share_call_count(), 4);
     assert_eq!(account.snapshot().live_retained_bytes(), 5);
@@ -534,7 +534,7 @@ fn ready_split_is_state_only_and_runtime_drop_remains_fail_closed() {
     let release_locks = test_startup_graph_ledger_release_locks();
     let shares = account.share_call_count();
     let account_before = account.snapshot();
-    let ledger_before = ledger_observation(&ledger);
+    let ledger_before = ledger_observation(&mut ledger);
 
     let (baseline, guard) = ready.split();
 
@@ -548,10 +548,10 @@ fn ready_split_is_state_only_and_runtime_drop_remains_fail_closed() {
     assert_eq!(account.share_call_count(), shares);
     assert_eq!(account_actions(&account), 1);
     assert_eq!(account.snapshot(), account_before);
-    assert_eq!(ledger_observation(&ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
     drop(baseline);
     drop(guard);
-    assert_eq!(ledger_observation(&ledger), (0, 0, 12, 12, 0));
+    assert_eq!(ledger_observation(&mut ledger), (0, 0, 12, 12, 0));
     drop(ledger);
     assert_eq!(test_startup_graph_storage_releases(), releases);
     assert_eq!(test_startup_graph_ledger_release_locks(), release_locks);
@@ -568,13 +568,13 @@ fn ready_runtime_baseline_keeps_its_original_ledger_owner() {
     let (mut ledger, admission) = start_ledger(&account, &[Phase::Build], limits)
         .unwrap_or_else(|_| panic!("start must be admitted"));
     let (foreign_limits, _foreign_plan) = cross_plane_plan();
-    let foreign = Ledger::<Owner, Phase, Dimension>::try_new(foreign_limits, &[Phase::Build])
+    let mut foreign = Ledger::<Owner, Phase, Dimension>::try_new(foreign_limits, &[Phase::Build])
         .unwrap_or_else(|error| panic!("foreign ledger: {error}"));
     let ready = admission
         .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("cross-plane startup must be ready"));
-    let ledger_before = ledger_observation(&ledger);
-    let foreign_before = ledger_observation(&foreign);
+    let ledger_before = ledger_observation(&mut ledger);
+    let foreign_before = ledger_observation(&mut foreign);
     let account_before = account.snapshot();
     let (mut baseline, guard) = ready.split();
 
@@ -586,13 +586,13 @@ fn ready_runtime_baseline_keeps_its_original_ledger_owner() {
         .try_bind_fallback_baseline(&mut baseline)
         .unwrap_or_else(|error| panic!("original ledger owns the runtime baseline: {error}"));
 
-    assert_eq!(ledger_observation(&ledger), ledger_before);
-    assert_eq!(ledger_observation(&foreign), foreign_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut foreign), foreign_before);
     assert_eq!(account.snapshot(), account_before);
     assert_eq!(account.share_call_count(), 4);
     assert_eq!(account_actions(&account), 1);
     drop(baseline);
-    assert_eq!(ledger_observation(&ledger), (0, 0, 12, 12, 0));
+    assert_eq!(ledger_observation(&mut ledger), (0, 0, 12, 12, 0));
     drop(guard);
     assert_eq!(account.snapshot().live_retained_bytes(), 5);
     assert_eq!(account.snapshot().live_retained_allocations(), 2);
@@ -615,13 +615,13 @@ fn existing_ledger_work_and_live_scratch_survive_startup_and_runtime_split() {
     let scratch = ledger
         .reserve(Phase::Build, Dimension::Scratch, 11)
         .unwrap_or_else(|error| panic!("existing live scratch: {error}"));
-    assert_eq!(ledger_observation(&ledger), (11, 1, 7, 3, 0));
+    assert_eq!(ledger_observation(&mut ledger), (11, 1, 7, 3, 0));
 
     let ready = admission
         .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("startup must use the existing ledger"));
 
-    let ledger_after = ledger_observation(&ledger);
+    let ledger_after = ledger_observation(&mut ledger);
     assert!(ledger_after.0 > 16);
     assert_eq!(
         (
@@ -642,11 +642,11 @@ fn existing_ledger_work_and_live_scratch_survive_startup_and_runtime_split() {
     assert_eq!(account.share_call_count(), 4);
     assert_eq!(account_actions(&account), 1);
     let (baseline, guard) = ready.split();
-    assert_eq!(ledger_observation(&ledger), ledger_after);
+    assert_eq!(ledger_observation(&mut ledger), ledger_after);
     drop(baseline);
-    assert_eq!(ledger_observation(&ledger), (11, 1, 19, 15, 0));
+    assert_eq!(ledger_observation(&mut ledger), (11, 1, 19, 15, 0));
     drop(scratch);
-    assert_eq!(ledger_observation(&ledger), (0, 0, 19, 15, 0));
+    assert_eq!(ledger_observation(&mut ledger), (0, 0, 19, 15, 0));
     drop(guard);
     assert_eq!(account.snapshot().live_retained_bytes(), 5);
     assert_eq!(account.snapshot().live_retained_allocations(), 2);
@@ -676,8 +676,8 @@ fn foreign_ledger_prehold_rejects_before_work_shares_or_physical_mutation() {
     let foreign_scratch = foreign
         .reserve(Phase::Build, Dimension::Scratch, 13)
         .unwrap_or_else(|error| panic!("existing foreign scratch: {error}"));
-    let ledger_before = ledger_observation(&ledger);
-    let foreign_before = ledger_observation(&foreign);
+    let ledger_before = ledger_observation(&mut ledger);
+    let foreign_before = ledger_observation(&mut foreign);
     let account_before = account.snapshot();
     let allocations = test_startup_graph_allocation_entries();
     let releases = test_startup_graph_storage_releases();
@@ -700,8 +700,8 @@ fn foreign_ledger_prehold_rejects_before_work_shares_or_physical_mutation() {
         ))
     ));
 
-    assert_eq!(ledger_observation(&ledger), ledger_before);
-    assert_eq!(ledger_observation(&foreign), foreign_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut foreign), foreign_before);
     assert_eq!(account.snapshot(), account_before);
     assert_eq!(account.share_call_count(), 0);
     assert_eq!(account_actions(&account), 1);
@@ -721,8 +721,8 @@ fn foreign_ledger_prehold_rejects_before_work_shares_or_physical_mutation() {
     let foreign_probe = foreign.test_probe();
     drop(scratch);
     drop(foreign_scratch);
-    assert_eq!(ledger_observation(&ledger), (0, 0, 7, 7, 0));
-    assert_eq!(ledger_observation(&foreign), (0, 0, 9, 9, 0));
+    assert_eq!(ledger_observation(&mut ledger), (0, 0, 7, 7, 0));
+    assert_eq!(ledger_observation(&mut foreign), (0, 0, 9, 9, 0));
     drop(ledger);
     drop(foreign);
     assert!(!probe.is_available());
@@ -749,20 +749,23 @@ fn forgetting_ready_keeps_the_numeric_host_separate_from_contained_storage() {
     let ready = admission
         .try_prepare_startup_cross_plane(&mut ledger, plan)
         .unwrap_or_else(|_| panic!("startup must use the existing numeric host"));
-    let ledger_before = ledger_observation(&ledger);
+    let ledger_before = ledger_observation(&mut ledger);
     let account_before = account.snapshot();
     let probe = ledger.test_probe();
 
     std::mem::forget(ready);
 
-    assert_eq!(ledger_observation(&ledger), ledger_before);
+    assert_eq!(ledger_observation(&mut ledger), ledger_before);
     ledger
         .charge_observed_batch(&[(Dimension::Records, 5)])
         .unwrap_or_else(|error| panic!("outer numeric host remains usable: {error}"));
-    assert_eq!(ledger_observation(&ledger), (ledger_before.0, 7, 24, 24, 0));
+    assert_eq!(
+        ledger_observation(&mut ledger),
+        (ledger_before.0, 7, 24, 24, 0)
+    );
     drop(scratch);
     assert_eq!(
-        ledger_observation(&ledger),
+        ledger_observation(&mut ledger),
         (ledger_before.0 - 11, 6, 24, 24, 0)
     );
     ledger

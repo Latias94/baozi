@@ -146,6 +146,14 @@ impl<'loan, 'op> ImportRootExecution<'loan, 'op> {
     }
 
     #[cfg(test)]
+    pub(crate) fn observation_live_bytes(
+        &self,
+        observation: &baozi_operation::__retained_store_integration::authority::StoreStorageObservation<'op>,
+    ) -> u64 {
+        observation.live_bytes(self.raw)
+    }
+
+    #[cfg(test)]
     pub(crate) fn storage_observation(
         &self,
         dimension: ImportDimension,

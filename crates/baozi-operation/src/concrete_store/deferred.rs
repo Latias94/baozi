@@ -9,12 +9,12 @@ pub struct TerminalStoreLineage {
 }
 
 pub(super) struct DeferredStoreOperation {
-    domain: StoreKeyDomain,
+    domain: StoreDomainStamp,
 }
 
 pub(super) struct DeferredUnattachedStore<'account> {
     binding: crate::retained::DeferredUnattachedBinding<'account>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainStamp,
 }
 
 impl<'inv, 'account, O, PP, U, L> BoundStoreOperation<'inv, 'account, O, PP, U, L>
@@ -41,7 +41,10 @@ where
         let binding = raw
             .defer_unattached(requested)
             .map_err(|_| StoreRuntimeError::OwnershipUnverified)?;
-        Ok(DeferredUnattachedStore { binding, domain })
+        Ok(DeferredUnattachedStore {
+            binding,
+            domain: domain.defer(),
+        })
     }
 }
 
@@ -62,18 +65,20 @@ where
         return Err(raw);
     }
     raw.defer_until_body_cleanup()
-        .map(|()| DeferredStoreOperation { domain })
+        .map(|()| DeferredStoreOperation {
+            domain: domain.defer(),
+        })
 }
 
 pub(super) struct DeferredUnrootedStoreFailure {
-    pub(super) domain: StoreKeyDomain,
+    pub(super) domain: StoreDomainStamp,
 }
 
 pub(super) struct DeferredStoreFailure<EvidenceKind, EvidenceTag> {
     fallback_only: bool,
     forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreKeyDomain,
+    domain: StoreDomainStamp,
 }
 
 enum DeferredStoreFallbackState {
@@ -84,7 +89,7 @@ enum DeferredStoreFallbackState {
 
 pub(super) struct DeferredStoreFallback {
     state: DeferredStoreFallbackState,
-    domain: StoreKeyDomain,
+    domain: StoreDomainStamp,
 }
 
 impl<'inv, O, PP, U, EK, ET> StoreFailureAssembly<'inv, O, PP, U, EK, ET>
@@ -106,7 +111,7 @@ where
                 fallback_only,
                 forced_cause,
                 evidence_root,
-                domain,
+                domain: domain.defer(),
             }),
             Err(raw) => Err(Self {
                 raw,
@@ -156,7 +161,10 @@ where
                 }
             },
         };
-        Ok(DeferredStoreFallback { state, domain })
+        Ok(DeferredStoreFallback {
+            state,
+            domain: domain.defer(),
+        })
     }
 }
 
@@ -172,6 +180,8 @@ where
         final_progress: FinalProgress<PP, U>,
     ) -> Result<StoreLedgerEvidence, StoreRuntimeError> {
         let DeferredUnattachedStore { binding, domain } = pending;
+        let domain = StoreDomainLoan::resume(&mut self.domain, domain)
+            .ok_or(StoreRuntimeError::OwnershipUnverified)?;
         let prepared = self
             .raw
             .prepare_unattached_terminal(binding, final_progress)
@@ -182,7 +192,8 @@ where
         Ok(StoreLedgerEvidence::from_unattached_snapshot(
             prepared.snapshot,
             cause,
-            domain,
+            domain.into_owned(),
+            prepared.contained,
         ))
     }
 
@@ -192,7 +203,7 @@ where
     ) -> Option<RetainedStoreOperation<'_, O, PP, U, TerminalStoreLineage>> {
         Some(RetainedStoreOperation {
             raw: self.raw.resume_deferred_operation()?,
-            domain: pending.domain,
+            domain: StoreDomainLoan::resume(&mut self.domain, pending.domain)?,
             lineage: TerminalStoreLineage { _private: () },
         })
     }
@@ -200,8 +211,11 @@ where
     pub(super) fn resume_deferred_unrooted_failure(
         &mut self,
         pending: DeferredUnrootedStoreFailure,
-    ) -> Option<(RawStoreFailureAssembly<'_, O, PP, U>, StoreKeyDomain)> {
-        Some((self.raw.resume_deferred_failure()?, pending.domain))
+    ) -> Option<(RawStoreFailureAssembly<'_, O, PP, U>, StoreDomainLoan<'_>)> {
+        Some((
+            self.raw.resume_deferred_failure()?,
+            StoreDomainLoan::resume(&mut self.domain, pending.domain)?,
+        ))
     }
 
     pub(super) fn resume_deferred_failure<EK, ET>(
@@ -213,7 +227,7 @@ where
             fallback_only: pending.fallback_only,
             forced_cause: pending.forced_cause,
             evidence_root: pending.evidence_root,
-            domain: pending.domain,
+            domain: StoreDomainLoan::resume(&mut self.domain, pending.domain)?,
         })
     }
 
@@ -235,7 +249,7 @@ where
         };
         Some(StoreFallbackOnly {
             state,
-            domain: pending.domain,
+            domain: StoreDomainLoan::resume(&mut self.domain, pending.domain)?,
         })
     }
 }

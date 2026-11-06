@@ -1,11 +1,12 @@
+#[cfg(test)]
+use super::lock;
+use super::storage::DynamicStorage;
 use super::work::WorkState;
 use super::{
     AttributionReservationBatch, CanonicalOutput, DimensionState, LedgerCause, LedgerEvidenceError,
-    LedgerEvidencePurpose, LedgerState, OutcomeEvidenceDestination, PhaseState, capacity_bytes,
-    lock, release_evidence,
+    LedgerEvidencePurpose, LedgerState, OutcomeEvidenceDestination, PhaseState, release_evidence,
 };
 use crate::{CapacityPlan, CapacityPlanError, OperationOwner};
-use std::sync::{Arc, Mutex};
 
 /// Immutable evidence for one accounting dimension.
 pub(crate) struct DimensionSnapshotScalars {
@@ -117,10 +118,9 @@ impl PhaseSnapshot {
 
 /// Immutable owner-neutral operation ledger evidence.
 ///
-/// Dimension and phase entries are stored in stable key order. A clean final snapshot reports zero
-/// current evidence bytes because its pre-admitted staging vectors transfer to the outcome while
-/// the consumed ledger releases its private indexes. The evidence peak still includes every
-/// staging, interim snapshot, and pending-publication envelope used by the operation.
+/// Dimension and phase entries are stored in stable key order. Administrative observations count
+/// actual vector capacities and the known shared payload at capture, including live progress and
+/// terminal staging. Opaque Arc, runtime and allocator overhead is excluded.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LedgerSnapshot<P, D> {
     dimensions: Vec<(D, DimensionSnapshot)>,
@@ -129,11 +129,22 @@ pub struct LedgerSnapshot<P, D> {
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
-    current_evidence_bytes: u64,
-    peak_evidence_bytes: u64,
+    current_administrative_bytes: u64,
+    peak_administrative_bytes: u64,
+    covered_administrative_bytes: Option<u64>,
 }
 
 impl<P: Copy + Ord, D: Copy + Ord> LedgerSnapshot<P, D> {
+    pub(crate) fn qualify_administrative_coverage(&mut self, bytes: Option<u64>) {
+        self.covered_administrative_bytes =
+            bytes.filter(|bytes| *bytes == self.current_administrative_bytes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_exact_administrative_coverage(&self) -> bool {
+        self.covered_administrative_bytes == Some(self.current_administrative_bytes)
+    }
+
     /// Returns the latest phase explicitly completed by the operation owner.
     pub const fn last_completed_phase(&self) -> Option<P> {
         self.last_completed_phase
@@ -170,14 +181,14 @@ impl<P: Copy + Ord, D: Copy + Ord> LedgerSnapshot<P, D> {
         self.active_reservations
     }
 
-    /// Returns ledger-owned evidence bytes retained at the capture boundary.
-    pub const fn current_evidence_bytes(&self) -> u64 {
-        self.current_evidence_bytes
+    /// Returns known administrative payload and capacity bytes at the capture boundary.
+    pub const fn current_administrative_bytes(&self) -> u64 {
+        self.current_administrative_bytes
     }
 
-    /// Returns the ledger evidence storage high-water mark.
-    pub const fn peak_evidence_bytes(&self) -> u64 {
-        self.peak_evidence_bytes
+    /// Returns the known administrative payload and capacity high-water mark.
+    pub const fn peak_administrative_bytes(&self) -> u64 {
+        self.peak_administrative_bytes
     }
 
     /// Iterates dimension evidence in stable key order.
@@ -196,7 +207,7 @@ impl<P: Copy + Ord, D: Copy + Ord> LedgerSnapshot<P, D> {
 }
 
 struct SnapshotEvidenceAssembly<'a, P, D> {
-    storage: &'a Arc<Mutex<LedgerState<P, D>>>,
+    storage: &'a mut DynamicStorage<P, D>,
     dimensions: Vec<(D, DimensionSnapshot)>,
     phases: Vec<(P, PhaseSnapshot)>,
     admitted_bytes: u64,
@@ -204,10 +215,10 @@ struct SnapshotEvidenceAssembly<'a, P, D> {
 
 impl<'a, P, D> SnapshotEvidenceAssembly<'a, P, D> {
     fn new(
-        storage: &'a Arc<Mutex<LedgerState<P, D>>>,
+        storage: &'a mut DynamicStorage<P, D>,
     ) -> Result<(Self, CapacityPlan, CapacityPlan), LedgerEvidenceError> {
         let (dimension_plan, phase_plan, admitted_bytes) = {
-            let mut state = lock(storage);
+            let mut state = storage.write();
             if !phase_catalog_positions_are_valid(&state) {
                 return Err(LedgerEvidenceError::PhaseCatalogShapeMismatch);
             }
@@ -229,7 +240,7 @@ impl<'a, P, D> SnapshotEvidenceAssembly<'a, P, D> {
                 )
                 .ok_or_else(|| snapshot_capacity_error(CapacityPlanError::CapacityOverflow))?;
             let admitted = state
-                .current_evidence_bytes
+                .current_administrative_bytes
                 .checked_add(admitted_bytes)
                 .ok_or_else(|| snapshot_capacity_error(CapacityPlanError::CapacityOverflow))?;
             if admitted > state.evidence_byte_limit {
@@ -239,8 +250,8 @@ impl<'a, P, D> SnapshotEvidenceAssembly<'a, P, D> {
                     limit: state.evidence_byte_limit,
                 });
             }
-            state.current_evidence_bytes = admitted;
-            state.peak_evidence_bytes = state.peak_evidence_bytes.max(admitted);
+            state.current_administrative_bytes = admitted;
+            state.peak_administrative_bytes = state.peak_administrative_bytes.max(admitted);
             (dimension_plan, phase_plan, admitted_bytes)
         };
         Ok((
@@ -266,7 +277,7 @@ impl<'a, P, D> SnapshotEvidenceAssembly<'a, P, D> {
             .checked_add(phase_bytes)
             .ok_or_else(|| snapshot_capacity_error(CapacityPlanError::CapacityOverflow))?;
         let unused_bytes = self.admitted_bytes - actual_bytes;
-        let mut state = lock(self.storage);
+        let mut state = self.storage.write();
         release_evidence(&mut state, unused_bytes);
         self.admitted_bytes = actual_bytes;
         Ok(())
@@ -279,7 +290,7 @@ impl<P, D> Drop for SnapshotEvidenceAssembly<'_, P, D> {
         drop(std::mem::take(&mut self.phases));
         drop(std::mem::take(&mut self.dimensions));
         if self.admitted_bytes != 0 {
-            release_evidence(&mut lock(self.storage), self.admitted_bytes);
+            release_evidence(&mut self.storage.write(), self.admitted_bytes);
         }
     }
 }
@@ -334,7 +345,7 @@ fn allocate_snapshot_vec<T>(
 }
 
 pub(super) fn try_snapshot<P, D>(
-    storage: &Arc<Mutex<LedgerState<P, D>>>,
+    storage: &mut DynamicStorage<P, D>,
     catalog: &[D],
     work: &WorkState<D>,
 ) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError>
@@ -348,7 +359,7 @@ where
     // Sample work only after allocation, then hold the sole joint observation interval.
     work.check_integrity(catalog.len())
         .map_err(|_| LedgerEvidenceError::SnapshotShapeMismatch)?;
-    let mut state = lock(storage);
+    let mut state = assembly.storage.write();
     if !phase_catalog_positions_are_valid(&state) {
         return Err(LedgerEvidenceError::PhaseCatalogShapeMismatch);
     }
@@ -380,8 +391,9 @@ where
         current_live_bytes: state.current_live_bytes,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
-        current_evidence_bytes: state.current_evidence_bytes,
-        peak_evidence_bytes: state.peak_evidence_bytes,
+        current_administrative_bytes: state.current_administrative_bytes,
+        peak_administrative_bytes: state.peak_administrative_bytes,
+        covered_administrative_bytes: None,
     };
     drop(state);
     Ok(snapshot)
@@ -464,7 +476,7 @@ pub(super) fn phase_catalog_shape_is_valid<P, D>(state: &LedgerState<P, D>) -> b
 pub(super) fn take_final_snapshot<P, D>(
     state: &mut LedgerState<P, D>,
     work: &WorkState<D>,
-    clean: bool,
+    _clean: bool,
 ) -> LedgerSnapshot<P, D>
 where
     P: Copy + Ord,
@@ -492,15 +504,7 @@ where
             .map(phase_snapshot)
             .unwrap_or_default();
     }
-    let outgoing_bytes = capacity_bytes(&state.dimension_snapshot_staging)
-        .unwrap_or(0)
-        .saturating_add(capacity_bytes(&state.phase_snapshot_staging).unwrap_or(0));
-    release_evidence(state, outgoing_bytes);
-    let retained_evidence = if clean {
-        0
-    } else {
-        state.current_evidence_bytes
-    };
+    let retained_evidence = state.current_administrative_bytes;
     let last_completed_phase = state.last_completed_phase.map(|completed| completed.phase);
     LedgerSnapshot {
         dimensions: std::mem::take(&mut state.dimension_snapshot_staging),
@@ -509,8 +513,9 @@ where
         current_live_bytes: state.current_live_bytes,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
-        current_evidence_bytes: retained_evidence,
-        peak_evidence_bytes: state.peak_evidence_bytes,
+        current_administrative_bytes: retained_evidence,
+        peak_administrative_bytes: state.peak_administrative_bytes,
+        covered_administrative_bytes: None,
     }
 }
 
@@ -547,8 +552,9 @@ pub(super) fn take_typed_final_snapshot<P: Copy, D: Copy>(
         current_live_bytes: state.current_live_bytes,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
-        current_evidence_bytes: 0,
-        peak_evidence_bytes: state.peak_evidence_bytes,
+        current_administrative_bytes: state.current_administrative_bytes,
+        peak_administrative_bytes: state.peak_administrative_bytes,
+        covered_administrative_bytes: None,
     }
 }
 
@@ -609,8 +615,9 @@ where
         current_live_bytes: 0,
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: 0,
-        current_evidence_bytes: 0,
-        peak_evidence_bytes: state.peak_evidence_bytes,
+        current_administrative_bytes: state.current_administrative_bytes,
+        peak_administrative_bytes: state.peak_administrative_bytes,
+        covered_administrative_bytes: None,
     }
 }
 

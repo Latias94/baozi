@@ -5358,32 +5358,39 @@ mod tests {
 
     struct OwnedIterationDropProbe<'a> {
         id: u8,
-        storage:
-            baozi_operation::__retained_store_integration::authority::StoreStorageObservation<'a>,
-        observations: &'a RefCell<Vec<(u8, bool)>>,
+        account: &'a PhysicalStorageAccount,
         expected_live_bytes: u64,
+        observations: &'a RefCell<Vec<(u8, u64)>>,
     }
 
     impl Drop for OwnedIterationDropProbe<'_> {
         fn drop(&mut self) {
-            self.observations.borrow_mut().push((
-                self.id,
-                self.storage.live_bytes() == self.expected_live_bytes,
-            ));
+            let live_bytes = self.account.snapshot().live_retained_bytes();
+            self.observations.borrow_mut().push((self.id, live_bytes));
+            assert_eq!(
+                live_bytes, self.expected_live_bytes,
+                "owned iteration must retain physical capacity during every element drop"
+            );
         }
     }
 
     fn assert_owned_iteration_drop_observations(
-        observations: &RefCell<Vec<(u8, bool)>>,
-        storage: &baozi_operation::__retained_store_integration::authority::StoreStorageObservation<
-            '_,
-        >,
+        observations: &RefCell<Vec<(u8, u64)>>,
+        expected_live_bytes: u64,
+        current_live_bytes: u64,
         baseline: u64,
     ) {
         let mut observations = observations.borrow().clone();
         observations.sort_unstable_by_key(|(id, _)| *id);
-        assert_eq!(observations, vec![(0, true), (1, true), (2, true)]);
-        assert_eq!(storage.live_bytes(), baseline);
+        assert_eq!(
+            observations,
+            vec![
+                (0, expected_live_bytes),
+                (1, expected_live_bytes),
+                (2, expected_live_bytes)
+            ]
+        );
+        assert_eq!(current_live_bytes, baseline);
     }
 
     #[test]
@@ -5392,6 +5399,7 @@ mod tests {
             ResourceLimits::default(),
             ImportOperationControl::default(),
             |store| {
+                let account = &store.account;
                 testing::with_context(&mut store.owner, |context| {
                     let observations = RefCell::new(Vec::new());
                     context
@@ -5401,25 +5409,40 @@ mod tests {
                                 .dimension_state(ImportDimension::CanonicalOutputBytes)
                                 .unwrap()
                                 .live_bytes();
+                            let physical_baseline = account.snapshot();
                             let mut values = exec.services()?.metered_vec(
                                 ImportStorageClass::SceneConstruction,
                                 "owned-iteration-error",
                             );
                             values.try_reserve(&mut exec.services()?, 3)?;
+                            let capacity_bytes = u64::try_from(
+                                values.capacity() * size_of::<OwnedIterationDropProbe<'_>>(),
+                            )
+                            .unwrap();
+                            assert_eq!(values.capacity.as_ref().unwrap().bytes(), capacity_bytes);
+                            let retained = exec
+                                .services()?
+                                .reserve_retained_storage_cause(values.class, capacity_bytes, 1)
+                                .unwrap();
+                            drop(values.capacity.replace(retained));
+                            let expected_live_bytes =
+                                physical_baseline.live_retained_bytes() + capacity_bytes;
                             let storage = testing::storage_observation(
                                 exec,
                                 ImportDimension::CanonicalOutputBytes,
                             );
-                            let expected_live_bytes =
-                                baseline + values.capacity.as_ref().unwrap().bytes();
+                            assert_eq!(
+                                testing::observation_live_bytes(exec, &storage),
+                                baseline + capacity_bytes
+                            );
                             for id in 0..3 {
                                 values.try_push(
                                     &mut exec.services()?,
                                     OwnedIterationDropProbe {
                                         id,
-                                        storage,
-                                        observations: &observations,
+                                        account,
                                         expected_live_bytes,
+                                        observations: &observations,
                                     },
                                 )?;
                             }
@@ -5430,8 +5453,18 @@ mod tests {
                             assert_eq!(result, Err("injected visitor failure"));
                             assert_owned_iteration_drop_observations(
                                 &observations,
-                                &storage,
+                                expected_live_bytes,
+                                testing::observation_live_bytes(exec, &storage),
                                 baseline,
+                            );
+                            let released = account.snapshot();
+                            assert_eq!(
+                                released.live_retained_bytes(),
+                                physical_baseline.live_retained_bytes()
+                            );
+                            assert_eq!(
+                                released.live_retained_allocations(),
+                                physical_baseline.live_retained_allocations()
                             );
                             Ok(())
                         })
@@ -5447,6 +5480,7 @@ mod tests {
             ResourceLimits::default(),
             ImportOperationControl::default(),
             |store| {
+                let account = &store.account;
                 testing::with_context(&mut store.owner, |context| {
                     let observations = RefCell::new(Vec::new());
                     context
@@ -5456,25 +5490,40 @@ mod tests {
                                 .dimension_state(ImportDimension::CanonicalOutputBytes)
                                 .unwrap()
                                 .live_bytes();
+                            let physical_baseline = account.snapshot();
                             let mut values = exec.services()?.metered_vec(
                                 ImportStorageClass::SceneConstruction,
                                 "owned-iteration-panic",
                             );
                             values.try_reserve(&mut exec.services()?, 3)?;
+                            let capacity_bytes = u64::try_from(
+                                values.capacity() * size_of::<OwnedIterationDropProbe<'_>>(),
+                            )
+                            .unwrap();
+                            assert_eq!(values.capacity.as_ref().unwrap().bytes(), capacity_bytes);
+                            let retained = exec
+                                .services()?
+                                .reserve_retained_storage_cause(values.class, capacity_bytes, 1)
+                                .unwrap();
+                            drop(values.capacity.replace(retained));
+                            let expected_live_bytes =
+                                physical_baseline.live_retained_bytes() + capacity_bytes;
                             let storage = testing::storage_observation(
                                 exec,
                                 ImportDimension::CanonicalOutputBytes,
                             );
-                            let expected_live_bytes =
-                                baseline + values.capacity.as_ref().unwrap().bytes();
+                            assert_eq!(
+                                testing::observation_live_bytes(exec, &storage),
+                                baseline + capacity_bytes
+                            );
                             for id in 0..3 {
                                 values.try_push(
                                     &mut exec.services()?,
                                     OwnedIterationDropProbe {
                                         id,
-                                        storage,
-                                        observations: &observations,
+                                        account,
                                         expected_live_bytes,
+                                        observations: &observations,
                                     },
                                 )?;
                             }
@@ -5487,8 +5536,18 @@ mod tests {
                             assert!(result.is_err());
                             assert_owned_iteration_drop_observations(
                                 &observations,
-                                &storage,
+                                expected_live_bytes,
+                                testing::observation_live_bytes(exec, &storage),
                                 baseline,
+                            );
+                            let released = account.snapshot();
+                            assert_eq!(
+                                released.live_retained_bytes(),
+                                physical_baseline.live_retained_bytes()
+                            );
+                            assert_eq!(
+                                released.live_retained_allocations(),
+                                physical_baseline.live_retained_allocations()
                             );
                             Ok(())
                         })
@@ -5679,7 +5738,7 @@ mod tests {
                     .with_execution(|exec| -> ParseResult<()> {
                         let observed =
                             testing::storage_observation(exec, ImportDimension::ScratchBytes);
-                        let baseline = observed.live_bytes();
+                        let baseline = testing::observation_live_bytes(exec, &observed);
                         let mut values = exec.storage()?.metered_vec(
                             ImportStorageClass::FormatNormalization,
                             "prepared-vector",
@@ -5697,14 +5756,14 @@ mod tests {
                                 values.capacity(),
                                 values.capacity.as_ref().map(ImportStoreReservation::bytes),
                             );
-                            let live = observed.live_bytes();
+                            let live = testing::observation_live_bytes(exec, &observed);
                             let spare = values.capacity() - values.len();
                             assert!(
                                 exec.storage()?
                                     .prepare_vec_replacement(&values, spare)?
                                     .is_none()
                             );
-                            assert_eq!(observed.live_bytes(), live);
+                            assert_eq!(testing::observation_live_bytes(exec, &observed), live);
                             let additional = values.capacity() + 1;
                             let candidate = exec
                                 .storage()?
@@ -5727,7 +5786,10 @@ mod tests {
                                 bytes,
                                 (candidate.capacity() * size_of::<DropElement<'_>>()) as u64
                             );
-                            assert_eq!(observed.live_bytes(), live + bytes);
+                            assert_eq!(
+                                testing::observation_live_bytes(exec, &observed),
+                                live + bytes
+                            );
                             assert_eq!(
                                 old,
                                 (
@@ -5738,7 +5800,7 @@ mod tests {
                                 )
                             );
                             drop(candidate);
-                            assert_eq!(observed.live_bytes(), live);
+                            assert_eq!(testing::observation_live_bytes(exec, &observed), live);
                             assert_eq!(drops.get(), 0);
                         }
                         let additional = values.capacity() + 1;
@@ -5750,7 +5812,7 @@ mod tests {
                         assert_eq!(drops.get(), 0);
                         drop(values);
                         assert_eq!(drops.get(), 1);
-                        assert_eq!(observed.live_bytes(), baseline);
+                        assert_eq!(testing::observation_live_bytes(exec, &observed), baseline);
                         Ok::<_, ParseFailure>(())
                     })
                     .unwrap();
@@ -5766,7 +5828,7 @@ mod tests {
                     .with_execution(|exec| -> ParseResult<()> {
                         let observed =
                             testing::storage_observation(exec, ImportDimension::ScratchBytes);
-                        let baseline = observed.live_bytes();
+                        let baseline = testing::observation_live_bytes(exec, &observed);
                         let mut text = exec.storage()?.metered_string(
                             ImportStorageClass::FormatNormalization,
                             "prepared-string",
@@ -5783,14 +5845,14 @@ mod tests {
                                 text.capacity(),
                                 text.capacity.as_ref().map(ImportStoreReservation::bytes),
                             );
-                            let live = observed.live_bytes();
+                            let live = testing::observation_live_bytes(exec, &observed);
                             let spare = text.capacity() - text.len();
                             assert!(
                                 exec.storage()?
                                     .prepare_string_replacement(&text, spare)?
                                     .is_none()
                             );
-                            assert_eq!(observed.live_bytes(), live);
+                            assert_eq!(testing::observation_live_bytes(exec, &observed), live);
                             let additional = text.capacity() + 1;
                             let candidate = exec
                                 .storage()?
@@ -5810,7 +5872,10 @@ mod tests {
                             ));
                             let bytes = candidate.capacity.as_ref().unwrap().bytes();
                             assert_eq!(bytes, candidate.capacity() as u64);
-                            assert_eq!(observed.live_bytes(), live + bytes);
+                            assert_eq!(
+                                testing::observation_live_bytes(exec, &observed),
+                                live + bytes
+                            );
                             assert_eq!(text.as_str(), if populated { "aé" } else { "" });
                             assert_eq!(
                                 old,
@@ -5822,10 +5887,10 @@ mod tests {
                                 )
                             );
                             drop(candidate);
-                            assert_eq!(observed.live_bytes(), live);
+                            assert_eq!(testing::observation_live_bytes(exec, &observed), live);
                         }
                         drop(text);
-                        assert_eq!(observed.live_bytes(), baseline);
+                        assert_eq!(testing::observation_live_bytes(exec, &observed), baseline);
                         Ok::<_, ParseFailure>(())
                     })
                     .unwrap();
@@ -5846,7 +5911,7 @@ mod tests {
                                     exec,
                                     ImportDimension::ScratchBytes,
                                 );
-                                let baseline = observed.live_bytes();
+                                let baseline = testing::observation_live_bytes(exec, &observed);
                                 let mut values = exec.storage()?.metered_vec(
                                     ImportStorageClass::FormatNormalization,
                                     "prepared-vector-fault",
@@ -5865,7 +5930,7 @@ mod tests {
                                     text.capacity(),
                                     text.capacity.as_ref().unwrap().bytes(),
                                 );
-                                let live = observed.live_bytes();
+                                let live = testing::observation_live_bytes(exec, &observed);
                                 if qualification {
                                     FAIL_NEXT_METERED_QUALIFICATION.with(|fault| fault.set(true));
                                 } else {
@@ -5905,9 +5970,12 @@ mod tests {
                                         text.capacity.as_ref().unwrap().bytes()
                                     )
                                 );
-                                assert_eq!(observed.live_bytes(), live);
+                                assert_eq!(testing::observation_live_bytes(exec, &observed), live);
                                 drop((values, text));
-                                assert_eq!(observed.live_bytes(), baseline);
+                                assert_eq!(
+                                    testing::observation_live_bytes(exec, &observed),
+                                    baseline
+                                );
                                 let resource = if string {
                                     "prepared-string-fault"
                                 } else {
@@ -5939,7 +6007,7 @@ mod tests {
                         let terminal = context.terminal;
                         let result = context.with_execution(|exec| -> ParseResult<()> {
                             let observed = testing::storage_observation(exec, ImportDimension::ScratchBytes);
-                            let baseline = observed.live_bytes();
+                            let baseline = testing::observation_live_bytes(exec, &observed);
                             let mut values = exec.storage()?.metered_vec::<u32>(
                                 ImportStorageClass::FormatNormalization, "prepared-overlap",
                             );
@@ -5963,7 +6031,7 @@ mod tests {
                                 metered_vec_replacement_plan::<u32>(len, capacity, len + additional)
                             }.unwrap();
                             let admitted = replacement.envelope_delta_bytes().unwrap();
-                            let live = observed.live_bytes();
+                            let live = testing::observation_live_bytes(exec, &observed);
                             assert_eq!(live, baseline + old_bytes);
                             let limit = live + admitted - shortfall;
                             exec.store.tighten_dimension_policy(
@@ -5982,10 +6050,10 @@ mod tests {
                                     .or_else(|| string.as_ref().and_then(|value| value.capacity.as_ref()))
                                     .unwrap();
                                 assert_eq!(token.bytes(), admitted);
-                                assert_eq!(observed.live_bytes(), live + token.bytes());
+                                assert_eq!(testing::observation_live_bytes(exec, &observed), live + token.bytes());
                                 drop((vector, string));
                             });
-                            assert_eq!(observed.live_bytes(), live);
+                            assert_eq!(testing::observation_live_bytes(exec, &observed), live);
                             if shortfall != 0 {
                                 assert!(matches!(terminal.borrow().as_ref(),
                                     Some(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
@@ -5994,7 +6062,7 @@ mod tests {
                                     })) if *value == live + admitted && *actual_limit == limit));
                             }
                             drop((values, text));
-                            assert_eq!(observed.live_bytes(), baseline);
+                            assert_eq!(testing::observation_live_bytes(exec, &observed), baseline);
                             result
                         });
                         assert_eq!(result.is_ok(), shortfall == 0);
@@ -6014,7 +6082,7 @@ mod tests {
                         .with_execution(|exec| -> ParseResult<()> {
                             let observed =
                                 testing::storage_observation(exec, ImportDimension::ScratchBytes);
-                            let baseline = observed.live_bytes();
+                            let baseline = testing::observation_live_bytes(exec, &observed);
                             let mut values = exec.storage()?.metered_vec::<()>(
                                 ImportStorageClass::FormatNormalization,
                                 "prepared-zst",
@@ -6040,7 +6108,7 @@ mod tests {
                             assert_eq!(values.as_slice().as_ptr(), pointer);
                             assert_eq!(values.capacity(), usize::MAX);
                             assert!(values.capacity.is_none());
-                            assert_eq!(observed.live_bytes(), baseline);
+                            assert_eq!(testing::observation_live_bytes(exec, &observed), baseline);
                             assert!(matches!(
                                 terminal.borrow().as_ref(),
                                 Some(ScopeAbortCause::Allocation {

@@ -411,7 +411,7 @@ where
         self.operation.account().snapshot()
     }
 
-    pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+    pub fn try_complete_phase(&mut self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
         self.operation.try_complete_phase(phase)
     }
 

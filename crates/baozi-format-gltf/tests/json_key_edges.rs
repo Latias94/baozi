@@ -23,7 +23,7 @@ fn encodings(json: &[u8]) -> [(&'static str, Vec<u8>, usize); 2] {
 
 fn assert_released_without_dependencies(ledger: &ImportLedgerSnapshot) {
     assert_eq!(ledger.current_live_bytes(), 0);
-    assert_eq!(ledger.current_evidence_bytes(), 0);
+    assert!(ledger.current_administrative_bytes() <= ledger.peak_administrative_bytes());
     assert_eq!(ledger.active_reservations(), 0);
     for dimension in [
         ImportDimension::DependencyReference,

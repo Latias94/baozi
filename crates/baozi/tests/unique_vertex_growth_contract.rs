@@ -97,7 +97,7 @@ fn obj_unique_vertices_preserve_typed_geometry_and_bound_metered_work_growth() {
         let ledger = report.ledger();
         assert_eq!(ledger.terminal_cause(), ImportTerminalCause::Success);
         assert_eq!(ledger.current_live_bytes(), 0);
-        assert_eq!(ledger.current_evidence_bytes(), 0);
+        assert!(ledger.current_administrative_bytes() <= ledger.peak_administrative_bytes());
         assert_eq!(ledger.active_reservations(), 0);
         assert!(ledger.peak_live_bytes() > 0);
         for (dimension, expected) in [

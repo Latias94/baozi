@@ -1934,7 +1934,7 @@ where
         let cause = ManuallyDrop::new(cause);
         match raw
             .prepare_minimal_fallback()
-            .map(|prepared| classify_prepared_fallback(prepared, domain))
+            .map(|prepared| classify_prepared_fallback(prepared, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
         {
             Ok(prepared) => Ok(VerifiedMinimalFallback::new(
@@ -2014,7 +2014,7 @@ where
                     let prepared = raw
                         .with_fallback_cause(runtime_failure_code)
                         .prepare_minimal_fallback()
-                        .map(|prepared| classify_prepared_fallback(prepared, domain));
+                        .map(|prepared| classify_prepared_fallback(prepared, domain.into_owned()));
                     return match prepared {
                         Ok(prepared) => Ok(FailureEvidenceOutcome::MinimalFallback(
                             VerifiedMinimalFallback::new(

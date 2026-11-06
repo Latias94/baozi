@@ -37,7 +37,7 @@ fn ledger() -> Ledger<Owner, Phase, Dimension> {
 }
 
 fn baseline(
-    ledger: &Ledger<Owner, Phase, Dimension>,
+    ledger: &mut Ledger<Owner, Phase, Dimension>,
 ) -> FallbackBatchBaseline<Owner, Phase, Dimension> {
     let mut canonical = ledger
         .try_attribution_batch::<CanonicalOutput>(Phase::Startup, Dimension::Bytes, 0, 1)
@@ -82,7 +82,7 @@ fn attachment_preserves_live_scratch_and_preexisting_work_but_strict_binding_rej
     let scratch = ledger
         .reserve(Phase::Body, Dimension::Bytes, 17)
         .expect("preexisting live scratch");
-    let mut baseline = baseline(&ledger);
+    let mut baseline = baseline(&mut ledger);
     let before = ledger.try_snapshot().unwrap();
 
     ledger.try_attach_fallback_baseline(&mut baseline).unwrap();
@@ -120,7 +120,7 @@ fn attachment_preserves_pending_linear_work_until_explicit_resolution() {
             .unwrap();
         (layout, frame)
     };
-    let mut baseline = baseline(&ledger);
+    let mut baseline = baseline(&mut ledger);
     let before = ledger.try_snapshot().unwrap();
 
     ledger.try_attach_fallback_baseline(&mut baseline).unwrap();
@@ -165,7 +165,7 @@ fn attachment_preserves_pending_linear_work_until_explicit_resolution() {
 #[test]
 fn attachment_preserves_forgotten_kernel_channels_and_pending_internal_work() {
     let mut ledger = ledger();
-    let mut baseline = baseline(&ledger);
+    let mut baseline = baseline(&mut ledger);
     {
         let (mut work, _storage) = ledger.exclusive().unwrap();
         let layout = work.bind([Dimension::Work]).unwrap();
@@ -212,9 +212,9 @@ fn attachment_preserves_forgotten_kernel_channels_and_pending_internal_work() {
 
 #[test]
 fn attachment_allows_an_unrelated_zero_byte_capability_but_strict_binding_still_counts_it() {
-    let ledger = ledger();
+    let mut ledger = ledger();
     let extra = ledger.reserve(Phase::Body, Dimension::Bytes, 0).unwrap();
-    let mut baseline = baseline(&ledger);
+    let mut baseline = baseline(&mut ledger);
     let before = ledger.try_snapshot().unwrap();
 
     ledger.try_attach_fallback_baseline(&mut baseline).unwrap();
@@ -232,9 +232,9 @@ fn attachment_allows_an_unrelated_zero_byte_capability_but_strict_binding_still_
 
 #[test]
 fn attachment_rejects_a_foreign_baseline_without_mutation_and_preserves_it_for_its_owner() {
-    let target = ledger();
-    let foreign = ledger();
-    let mut baseline = baseline(&foreign);
+    let mut target = ledger();
+    let mut foreign = ledger();
+    let mut baseline = baseline(&mut foreign);
     let target_before = target.try_snapshot().unwrap();
     let foreign_before = foreign.try_snapshot().unwrap();
 
@@ -255,7 +255,7 @@ fn attachment_rechecks_current_limits_for_canonical_and_aggregated_evidence_comm
         (CounterClass::PublishedOutcomeEvidence, 64, 6, 7, 6),
     ] {
         let mut ledger = ledger();
-        let mut baseline = baseline(&ledger);
+        let mut baseline = baseline(&mut ledger);
         ledger.try_attach_fallback_baseline(&mut baseline).unwrap();
         ledger
             .tighten_dimension_policy(
@@ -281,8 +281,8 @@ fn attachment_rechecks_current_limits_for_canonical_and_aggregated_evidence_comm
 
 #[test]
 fn attachment_rejects_an_assembly_that_cannot_absorb_the_actual_sources() {
-    let ledger = ledger();
-    let mut baseline = baseline(&ledger);
+    let mut ledger = ledger();
+    let mut baseline = baseline(&mut ledger);
     let undersized = ledger
         .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Startup, Dimension::Bytes, 1, 1)
         .unwrap();
@@ -301,8 +301,8 @@ fn attachment_rejects_an_assembly_that_cannot_absorb_the_actual_sources() {
 
 #[test]
 fn attachment_rejects_out_of_bounds_attribution_positions_without_releasing_the_token() {
-    let ledger = ledger();
-    let mut baseline = baseline(&ledger);
+    let mut ledger = ledger();
+    let mut baseline = baseline(&mut ledger);
     let before = ledger.try_snapshot().unwrap();
     let previous = baseline.fallback.attributions[0].core.phase_position;
     baseline.fallback.attributions[0].core.phase_position = usize::MAX;
@@ -317,8 +317,8 @@ fn attachment_rejects_out_of_bounds_attribution_positions_without_releasing_the_
 
 #[test]
 fn attachment_rejects_out_of_bounds_capacity_cover_positions_without_releasing_storage() {
-    let ledger = ledger();
-    let mut baseline = baseline(&ledger);
+    let mut ledger = ledger();
+    let mut baseline = baseline(&mut ledger);
     let before = ledger.try_snapshot().unwrap();
     let cover = baseline.canonical_assembly.capacity_cover.as_mut().unwrap();
     let previous = cover.core.dimension_position;
@@ -340,8 +340,8 @@ fn attachment_rejects_out_of_bounds_capacity_cover_positions_without_releasing_s
 
 #[test]
 fn attachment_rejects_out_of_bounds_commitment_positions_without_consuming_the_batch() {
-    let ledger = ledger();
-    let mut baseline = baseline(&ledger);
+    let mut ledger = ledger();
+    let mut baseline = baseline(&mut ledger);
     let before = ledger.try_snapshot().unwrap();
     let previous = baseline.evidence.commitments[0].dimension_position;
     baseline.evidence.commitments[0].dimension_position = usize::MAX;
@@ -357,7 +357,7 @@ fn attachment_rejects_out_of_bounds_commitment_positions_without_consuming_the_b
 #[test]
 fn attachment_requires_open_publication_while_strict_binding_accepts_closed_work() {
     let mut ledger = ledger();
-    let mut baseline = baseline(&ledger);
+    let mut baseline = baseline(&mut ledger);
     ledger.seal_ordinary_work().unwrap();
     let before = ledger.try_snapshot().unwrap();
 

@@ -375,8 +375,8 @@ pub(crate) struct ImportStoreTerminalEvidence {
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
-    current_evidence_bytes: u64,
-    peak_evidence_bytes: u64,
+    current_administrative_bytes: u64,
+    peak_administrative_bytes: u64,
     ledger: StoreLedgerEvidence,
 }
 
@@ -400,8 +400,8 @@ impl ImportStoreTerminalEvidence {
             current_live_bytes: header.current_live_bytes(),
             peak_live_bytes: header.peak_live_bytes(),
             active_reservations: header.active_reservations(),
-            current_evidence_bytes: header.current_evidence_bytes(),
-            peak_evidence_bytes: header.peak_evidence_bytes(),
+            current_administrative_bytes: header.current_administrative_bytes(),
+            peak_administrative_bytes: header.peak_administrative_bytes(),
             ledger: evidence,
         }
     }
@@ -426,12 +426,12 @@ impl ImportStoreTerminalEvidence {
         self.active_reservations
     }
 
-    pub(crate) const fn current_evidence_bytes(&self) -> u64 {
-        self.current_evidence_bytes
+    pub(crate) const fn current_administrative_bytes(&self) -> u64 {
+        self.current_administrative_bytes
     }
 
-    pub(crate) const fn peak_evidence_bytes(&self) -> u64 {
-        self.peak_evidence_bytes
+    pub(crate) const fn peak_administrative_bytes(&self) -> u64 {
+        self.peak_administrative_bytes
     }
 
     #[cfg(test)]
@@ -1504,6 +1504,7 @@ fn project_store_ledger_cause(
         },
         LedgerCause::UnknownPhase => LedgerCause::UnknownPhase,
         LedgerCause::DuplicatePhase => LedgerCause::DuplicatePhase,
+        LedgerCause::OwnerIdentityExhausted => LedgerCause::OwnerIdentityExhausted,
         LedgerCause::DimensionPolicyShapeMismatch { dimension: key } => {
             LedgerCause::DimensionPolicyShapeMismatch {
                 dimension: dimension(key)?,

@@ -12,7 +12,7 @@ type ObservedStartupOwner =
     StartupFallbackOwner<TestOwner, TestPhase, TestDimension, LiveDropObservation>;
 
 fn attribute_observed_allocation(
-    ledger: &Ledger<TestOwner, TestPhase, TestDimension>,
+    ledger: &mut Ledger<TestOwner, TestPhase, TestDimension>,
     account: &PhysicalStorageAccount,
     allocation: RetainedAllocation<LiveDropObservation>,
 ) -> ObservedRetainedPart {
@@ -42,7 +42,7 @@ fn attribute_observed_allocation(
 }
 
 fn startup_owner_with_observed_fallback(
-    ledger: &Ledger<TestOwner, TestPhase, TestDimension>,
+    ledger: &mut Ledger<TestOwner, TestPhase, TestDimension>,
     account: &PhysicalStorageAccount,
     fallback: ObservedRetainedPart,
 ) -> ObservedStartupOwner {
@@ -102,7 +102,7 @@ fn healthy_detached_part_releases_during_unrelated_host_unwind() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 8);
     let (limits, _) = startup_limits_and_plan();
-    let ledger =
+    let mut ledger =
         Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
             .unwrap();
     let probe = ledger.test_probe();
@@ -118,8 +118,8 @@ fn healthy_detached_part_releases_during_unrelated_host_unwind() {
             })
         })
         .unwrap();
-    let part = attribute_observed_allocation(&ledger, &account, allocation);
-    let owner = startup_owner_with_observed_fallback(&ledger, &account, part);
+    let part = attribute_observed_allocation(&mut ledger, &account, allocation);
+    let owner = startup_owner_with_observed_fallback(&mut ledger, &account, part);
     let mut baseline = owner
         .try_into_baseline()
         .unwrap_or_else(|_| panic!("complete startup owner must detach"));
@@ -189,7 +189,7 @@ fn healthy_attributed_retained_part_releases_during_unrelated_host_unwind() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 8);
     let (limits, _) = startup_limits_and_plan();
-    let ledger =
+    let mut ledger =
         Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
             .unwrap();
     let probe = ledger.test_probe();
@@ -205,7 +205,7 @@ fn healthy_attributed_retained_part_releases_during_unrelated_host_unwind() {
             })
         })
         .unwrap();
-    let part = attribute_observed_allocation(&ledger, &account, allocation);
+    let part = attribute_observed_allocation(&mut ledger, &account, allocation);
     let charged = account.snapshot();
     let active = probe.active_reservations();
     let live = probe.current_live_bytes();
@@ -256,7 +256,7 @@ fn healthy_startup_fallback_owner_releases_during_unrelated_host_unwind() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 8);
     let (limits, _) = startup_limits_and_plan();
-    let ledger =
+    let mut ledger =
         Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
             .unwrap();
     let probe = ledger.test_probe();
@@ -272,8 +272,8 @@ fn healthy_startup_fallback_owner_releases_during_unrelated_host_unwind() {
             })
         })
         .unwrap();
-    let fallback = attribute_observed_allocation(&ledger, &account, allocation);
-    let owner = startup_owner_with_observed_fallback(&ledger, &account, fallback);
+    let fallback = attribute_observed_allocation(&mut ledger, &account, allocation);
+    let owner = startup_owner_with_observed_fallback(&mut ledger, &account, fallback);
     let charged = account.snapshot();
     let active = probe.active_reservations();
     let live = probe.current_live_bytes();

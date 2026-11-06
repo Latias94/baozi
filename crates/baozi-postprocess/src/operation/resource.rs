@@ -49,8 +49,8 @@ impl PostProcessResourceEvidence {
             consumed: ordinary.consumed() + terminal.consumed(),
             staging: dimension(RuntimeDimension::ScratchBytes).peak_live_bytes(),
             canonical: dimension(RuntimeDimension::CanonicalBytes).committed_canonical_output(),
-            evidence: header.current_evidence_bytes(),
-            peak_evidence: header.peak_evidence_bytes(),
+            evidence: header.current_administrative_bytes(),
+            peak_evidence: header.peak_administrative_bytes(),
             published_evidence: dimension(RuntimeDimension::OutcomeEvidenceBytes)
                 .published_outcome_evidence(),
             terminal_records: dimension(RuntimeDimension::TerminalEvidenceRecords)
@@ -100,12 +100,12 @@ impl PostProcessResourceEvidence {
     }
 
     /// Returns retained ledger evidence capacity at the terminal boundary.
-    pub const fn current_evidence_bytes(&self) -> u64 {
+    pub const fn current_administrative_bytes(&self) -> u64 {
         self.counters.evidence
     }
 
     /// Returns the ledger evidence capacity high-water mark.
-    pub const fn peak_evidence_bytes(&self) -> u64 {
+    pub const fn peak_administrative_bytes(&self) -> u64 {
         self.counters.peak_evidence
     }
 

@@ -20,10 +20,10 @@ use super::{
     StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan, StartupPhysicalManifest,
     StartupPhysicalNoMutation, StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
     TerminalEvidenceBackingPlan, TerminalEvidenceKey, TerminalFallbackAttribution,
-    TerminalFallbackGuard, TerminalLedgerEvidence, TerminalPhysicalOwnershipManifest,
-    TerminalPrimaryGuard, drop_retained_table_with_account_anchor, map_batch_error,
-    try_create_retained_block_table, try_open_publication_account,
-    try_qualify_retained_block_table_plan, unreachable_final_owner_state,
+    TerminalFallbackGuard, TerminalLedgerEvidence, TerminalPrimaryGuard,
+    drop_retained_table_with_account_anchor, map_batch_error, try_create_retained_block_table,
+    try_open_publication_account, try_qualify_retained_block_table_plan,
+    unreachable_final_owner_state,
 };
 use super::{AccountPoisoned, FinalizationContainmentError};
 #[cfg(test)]
@@ -101,7 +101,7 @@ impl StoreExecutionState {
 pub(crate) struct ExclusiveOperationParts<'op, O, P, PP, U, D> {
     pub(crate) work: crate::ledger::ExclusiveWork<'op, D>,
     pub(crate) ordinary: ExecutionOrdinaryStorage<'op, O, P, PP, U, D>,
-    pub(crate) progress: crate::coordinator::OperationProgressState<'op, O, P, PP, U, D>,
+    pub(crate) progress: crate::coordinator::OperationProgressFields<'op, PP, U>,
     pub(crate) account: &'op PhysicalStorageAccount,
     pub(crate) share_work: RetainedHandleSharePlan<D>,
 }
@@ -142,7 +142,7 @@ fn inject_publication_account_open_panic() {
 }
 
 /// Invocation authority shared by every retained lifecycle stage, independently of its payloads.
-pub(super) struct OperationInvocation<O, P, PP, U, D>
+pub(crate) struct OperationInvocation<O, P, PP, U, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -155,6 +155,52 @@ where
     control_action_debt: Cell<u16>,
     execution_state: Cell<StoreExecutionState>,
     canonical_lineage: CanonicalLineageAuthority,
+    terminal_outstanding: bool,
+}
+
+impl<O, P, PP, U, D> OperationInvocation<O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn record_terminal_gate(
+        &self,
+        result: Result<(), PublicationCause<D>>,
+    ) -> Option<ControlCause> {
+        match result {
+            Ok(()) => None,
+            Err(PublicationCause::Control(cause)) => {
+                record_terminal_cause_with_precedence(
+                    &self.sticky_terminal_cause,
+                    PreparationFailureCode::from_control(&cause),
+                );
+                Some(cause)
+            }
+            Err(PublicationCause::Ledger(_)) => {
+                record_terminal_cause_with_precedence(
+                    &self.sticky_terminal_cause,
+                    PreparationFailureCode::ledger(),
+                );
+                None
+            }
+        }
+    }
+
+    pub(crate) fn terminal_ledger_mut(&mut self) -> &mut crate::ledger::Ledger<O, P, D> {
+        self.coordinator.retained_ledger_mut()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_terminal_ledger(&self) -> &crate::ledger::Ledger<O, P, D> {
+        self.coordinator.retained_ledger()
+    }
+
+    pub(crate) fn retire_after_detach(self, state: &mut crate::ledger::LedgerState<P, D>) {
+        self.coordinator.retire_after_detach(state);
+    }
 }
 
 /// The entry frame retains its original account admission while common stays in the root.
@@ -203,6 +249,7 @@ pub(crate) struct DeferredUnattachedBinding<'account> {
 pub(crate) struct UnattachedTerminalEvidence<P, D> {
     pub(crate) snapshot: crate::LedgerSnapshot<P, D>,
     pub(crate) cause: Option<PreparationFailureCode>,
+    pub(crate) contained: bool,
 }
 
 struct AttachmentGuard<'loan, O, P, PP, U, D>
@@ -272,29 +319,6 @@ where
     U: ProgressUnit,
     D: TerminalEvidenceKey + fmt::Debug,
 {
-    fn record_terminal_gate(
-        &self,
-        result: Result<(), PublicationCause<D>>,
-    ) -> Option<ControlCause> {
-        match result {
-            Ok(()) => None,
-            Err(PublicationCause::Control(cause)) => {
-                record_terminal_cause_with_precedence(
-                    &self.sticky_terminal_cause,
-                    PreparationFailureCode::from_control(&cause),
-                );
-                Some(cause)
-            }
-            Err(PublicationCause::Ledger(_)) => {
-                record_terminal_cause_with_precedence(
-                    &self.sticky_terminal_cause,
-                    PreparationFailureCode::ledger(),
-                );
-                None
-            }
-        }
-    }
-
     fn preflight_exclusive(&self) -> Result<(), ExecutionError<D>> {
         check_execution_state(&self.sticky_terminal_cause, &self.execution_state, || {
             self.coordinator.recorded_control_cause()
@@ -331,7 +355,6 @@ where
             );
             ExecutionError::Ledger(cause)
         })?;
-        let progress = progress.bind(storage.progress_evidence());
         Ok(ExclusiveOperationParts {
             work,
             progress,
@@ -482,8 +505,10 @@ where
                 .as_mut()
                 .expect("attachment installs fully qualified retained fields"),
             assembly: Some(&mut root.assembly),
+            terminal: &mut root.terminal,
             common: InvocationLoan {
                 common: &mut root.common,
+                contained: &mut root.contained,
                 not_send_or_sync: PhantomData,
             },
         })
@@ -502,11 +527,13 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    terminal: Option<super::TerminalPhysicalState<P, D, F, CanonicalBlock, EvidenceBlock>>,
     // Physical owners precede common so their cleanup retains the invocation's ledger.
     assembly: super::PublicationAssemblySlot<O, P, D, CanonicalBlock, EvidenceBlock>,
     retained: Option<RetainedOperationFields<O, P, D, F, CanonicalBlock, EvidenceBlock>>,
     common: Option<OperationInvocation<O, P, PP, U, D>>,
     started: bool,
+    contained: bool,
 }
 
 impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
@@ -525,9 +552,93 @@ where
         Self {
             retained: None,
             assembly: None,
+            terminal: None,
             common: None,
             started: false,
+            contained: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_ledger_for_test(&mut self, ledger: crate::ledger::Ledger<O, P, D>) {
+        assert!(!self.started);
+        self.started = true;
+        self.common = Some(OperationInvocation {
+            coordinator: OperationCoordinator::from_ledger_for_test(ledger),
+            sticky_terminal_cause: Cell::new(None),
+            control_action_debt: Cell::new(0),
+            execution_state: Cell::new(StoreExecutionState::Running),
+            canonical_lineage: CanonicalLineageAuthority::fresh(),
+            terminal_outstanding: false,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_loan_for_test(&mut self) -> TerminalInvocationLoan<'_, O, P, PP, U, D> {
+        InvocationLoan {
+            common: &mut self.common,
+            contained: &mut self.contained,
+            not_send_or_sync: PhantomData,
+        }
+        .into_terminal()
+    }
+
+    pub(crate) fn cleanup_owned_state(&mut self) {
+        if let Some(physical) = self.terminal.take() {
+            self.contained |= physical.fallback.is_some()
+                || physical.evidence.is_some()
+                || physical.canonical_table.is_some()
+                || physical.evidence_table.is_some()
+                || physical.account.is_some();
+            drop(physical);
+        }
+        if let (Some(fields), Some(retained)) = (self.assembly.as_mut(), self.retained.as_mut())
+            && !fields.is_empty()
+            && self.common.is_some()
+        {
+            drop(RetainedPublicationAssembly {
+                fields,
+                operation: Some(RetainedOperation {
+                    retained,
+                    assembly: None,
+                    terminal: &mut self.terminal,
+                    common: InvocationLoan {
+                        common: &mut self.common,
+                        contained: &mut self.contained,
+                        not_send_or_sync: PhantomData,
+                    },
+                }),
+            });
+        }
+        drop(self.retained.take());
+        if let Some(common) = self.common.as_mut()
+            && !common.terminal_outstanding
+        {
+            // Ordinary abandonment ends extension ownership before retaining unresolved
+            // accounting. An outstanding terminal loan still owns its full quarantine.
+            let close = common.coordinator.close_for_terminal_extraction();
+            common.record_terminal_gate(close);
+        }
+        let unresolved = self.common.as_ref().is_some_and(|common| {
+            common.terminal_outstanding
+                || common
+                    .coordinator
+                    .retained_ledger()
+                    .terminal_residue_cause()
+                    .is_some()
+        });
+        self.contained |= unresolved;
+        if unresolved && let Some(common) = self.common.take() {
+            std::mem::forget(common);
+        }
+    }
+
+    pub(crate) fn must_retain_domain(&self) -> bool {
+        self.contained
+    }
+
+    pub(crate) fn has_started(&self) -> bool {
+        self.started
     }
 
     pub(crate) fn invocation_identity(&self) -> *const () {
@@ -562,8 +673,10 @@ where
         let operation = RetainedOperation {
             retained,
             assembly: None,
+            terminal: &mut self.terminal,
             common: InvocationLoan {
                 common: &mut self.common,
+                contained: &mut self.contained,
                 not_send_or_sync: PhantomData,
             },
         };
@@ -628,28 +741,34 @@ where
                 PreparationFailureCode::product_graph(0x5541_4343),
             ),
         }
-        let OperationInvocation {
-            coordinator,
-            sticky_terminal_cause,
-            ..
-        } = self
+        let common = self
+            .common
+            .as_mut()
+            .expect("unattached terminal state remains in its root");
+        let (snapshot, ledger_cause) = common.coordinator.take_terminal_snapshot();
+        if ledger_cause.is_some() {
+            record_terminal_cause_with_precedence(
+                &common.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+        }
+        let cause = common.sticky_terminal_cause.get();
+        let common = self
             .common
             .take()
-            .expect("the outer root retains its original common");
-        let ledger = coordinator.into_ledger_for_typed_publication();
-        let snapshot = match ledger.finish() {
-            Ok(snapshot) => snapshot,
-            Err(failure) => {
-                record_terminal_cause_with_precedence(
-                    &sticky_terminal_cause,
-                    PreparationFailureCode::ledger(),
-                );
-                failure.into_parts().1
-            }
-        };
+            .expect("unattached close consumes the original state once");
+        let contained = ledger_cause.is_some();
+        if contained {
+            self.contained = true;
+            let _ = account.record_poison(super::AccountPoisonReason::OwnershipGraphUnverified);
+            std::mem::forget(common);
+        } else {
+            drop(common);
+        }
         Ok(UnattachedTerminalEvidence {
             snapshot,
-            cause: sticky_terminal_cause.get(),
+            cause,
+            contained,
         })
     }
 
@@ -713,8 +832,10 @@ where
         Some(RetainedOperation {
             retained,
             assembly: Some(&mut self.assembly),
+            terminal: &mut self.terminal,
             common: InvocationLoan {
                 common: &mut self.common,
+                contained: &mut self.contained,
                 not_send_or_sync: PhantomData,
             },
         })
@@ -745,8 +866,10 @@ where
             operation: Some(RetainedOperation {
                 retained,
                 assembly: None,
+                terminal: &mut self.terminal,
                 common: InvocationLoan {
                     common: &mut self.common,
+                    contained: &mut self.contained,
                     not_send_or_sync: PhantomData,
                 },
             }),
@@ -778,8 +901,10 @@ where
                 operation: Some(RetainedOperation {
                     retained,
                     assembly: None,
+                    terminal: &mut self.terminal,
                     common: InvocationLoan {
                         common: &mut self.common,
+                        contained: &mut self.contained,
                         not_send_or_sync: PhantomData,
                     },
                 }),
@@ -817,8 +942,10 @@ where
                 operation: Some(RetainedOperation {
                     retained,
                     assembly: None,
+                    terminal: &mut self.terminal,
                     common: InvocationLoan {
                         common: &mut self.common,
+                        contained: &mut self.contained,
                         not_send_or_sync: PhantomData,
                     },
                 }),
@@ -856,8 +983,10 @@ where
                 operation: Some(RetainedOperation {
                     retained,
                     assembly: None,
+                    terminal: &mut self.terminal,
                     common: InvocationLoan {
                         common: &mut self.common,
+                        contained: &mut self.contained,
                         not_send_or_sync: PhantomData,
                     },
                 }),
@@ -880,25 +1009,7 @@ where
     EvidenceBlock: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        let (Some(fields), Some(retained)) = (self.assembly.as_mut(), self.retained.as_mut())
-        else {
-            return;
-        };
-        if fields.is_empty() || self.common.is_none() {
-            return;
-        }
-        // Reuse the checked table-before-attribution cleanup even if its permission was forgotten.
-        drop(RetainedPublicationAssembly {
-            fields,
-            operation: Some(RetainedOperation {
-                retained,
-                assembly: None,
-                common: InvocationLoan {
-                    common: &mut self.common,
-                    not_send_or_sync: PhantomData,
-                },
-            }),
-        });
+        self.cleanup_owned_state();
     }
 }
 
@@ -912,6 +1023,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     common: &'inv mut Option<OperationInvocation<O, P, PP, U, D>>,
+    contained: &'inv mut bool,
     not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -947,7 +1059,7 @@ where
     }
 }
 
-impl<O, P, PP, U, D> InvocationLoan<'_, O, P, PP, U, D>
+impl<'inv, O, P, PP, U, D> InvocationLoan<'inv, O, P, PP, U, D>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -955,14 +1067,104 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    pub(super) fn into_terminal(self) -> OperationInvocation<O, P, PP, U, D> {
+    pub(super) fn into_terminal(self) -> TerminalInvocationLoan<'inv, O, P, PP, U, D> {
         self.common
-            .take()
-            .expect("terminal consumes the outer invocation once")
+            .as_mut()
+            .expect("terminal borrows the original invocation")
+            .terminal_outstanding = true;
+        TerminalInvocationLoan {
+            common: self.common,
+            contained: self.contained,
+            not_send_or_sync: PhantomData,
+        }
     }
 
     pub(crate) fn invocation_identity(&self) -> *const () {
         std::ptr::from_ref(&*self.common).cast()
+    }
+}
+
+pub(crate) struct TerminalInvocationLoan<'inv, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    common: &'inv mut Option<OperationInvocation<O, P, PP, U, D>>,
+    contained: &'inv mut bool,
+    not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<O, P, PP, U, D> std::ops::Deref for TerminalInvocationLoan<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    type Target = crate::ledger::Ledger<O, P, D>;
+
+    fn deref(&self) -> &Self::Target {
+        self.common
+            .as_ref()
+            .expect("terminal state remains owned by its root")
+            .coordinator
+            .retained_ledger()
+    }
+}
+
+impl<O, P, PP, U, D> std::ops::DerefMut for TerminalInvocationLoan<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.common
+            .as_mut()
+            .expect("terminal state remains owned by its root")
+            .coordinator
+            .retained_ledger_mut()
+    }
+}
+
+impl<'inv, O, P, PP, U, D> TerminalInvocationLoan<'inv, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn known_administrative_bytes(&self) -> Option<u64> {
+        self.common
+            .as_ref()
+            .expect("terminal state remains in its armed slot")
+            .coordinator
+            .known_administrative_bytes()
+    }
+
+    pub(crate) fn into_owned(self) -> OperationInvocation<O, P, PP, U, D> {
+        // The concrete root keeps its actual domain until owned output consumes it. A later
+        // detach or publication failure must retain that domain beside the actual residue.
+        *self.contained = true;
+        self.common
+            .take()
+            .expect("detach consumes the armed state slot once")
+    }
+
+    pub(crate) fn retain_fail_closed(self) {
+        *self.contained = true;
+        let common = self
+            .common
+            .take()
+            .expect("containment consumes the armed state slot once");
+        std::mem::forget(common);
     }
 }
 
@@ -1014,6 +1216,8 @@ where
     D: Copy + Ord + fmt::Debug,
     F: Send + Sync + 'static,
 {
+    pub(super) terminal:
+        &'inv mut Option<super::TerminalPhysicalState<P, D, F, CanonicalBlock, EvidenceBlock>>,
     pub(super) retained:
         &'inv mut RetainedOperationFields<O, P, D, F, CanonicalBlock, EvidenceBlock>,
     assembly:
@@ -1826,10 +2030,10 @@ where
     }
 
     /// Records semantic completion against the operation's frozen phase catalog.
-    pub(crate) fn try_complete_phase(&self, phase: P) -> Result<(), PhaseCompletionError<P>> {
+    pub(crate) fn try_complete_phase(&mut self, phase: P) -> Result<(), PhaseCompletionError<P>> {
         self.common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .try_complete_phase(phase)
     }
 
@@ -1998,6 +2202,7 @@ where
             control_action_debt: Cell::new(0),
             execution_state: Cell::new(StoreExecutionState::Running),
             canonical_lineage,
+            terminal_outstanding: false,
         });
         let common = root
             .common
@@ -2258,15 +2463,18 @@ where
                 .map_err(StartupTerminalEvidenceBuildError::from)
         });
         #[cfg(test)]
-        if startup_owner_result.is_err() {
-            let probe = ledger.test_probe();
-            STARTUP_FAILURE_LEDGER_SNAPSHOT.with(|snapshot| {
-                snapshot.set(Some((
-                    probe.active_reservations(),
-                    probe.current_live_bytes(),
-                )));
-            });
-        }
+        let ledger = {
+            if startup_owner_result.is_err() {
+                let probe = common.coordinator.retained_ledger_mut().test_probe();
+                STARTUP_FAILURE_LEDGER_SNAPSHOT.with(|snapshot| {
+                    snapshot.set(Some((
+                        probe.active_reservations(),
+                        probe.current_live_bytes(),
+                    )));
+                });
+            }
+            common.coordinator.retained_ledger()
+        };
         let startup_owner = startup_owner_result.map_err(RetainedOperationStartError::Writer)?;
         let baseline = startup_owner
             .try_into_baseline()
@@ -2318,11 +2526,11 @@ where
         ledger
             .ensure_work_open()
             .map_err(RetainedWriterError::Ledger)?;
-        let (mut work, storage) = ledger.split_internal();
+        let (mut work, mut storage) = ledger.split_internal();
         let share_plan = *terminal_account_share_work;
         let share_work = &mut work;
         let result = super::reserve_exclusive_backing(
-            &storage,
+            &mut storage,
             baseline.account(),
             phase,
             dimension,
@@ -2522,7 +2730,7 @@ where
         let replacement = self
             .common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .try_attribution_batch_from_plan(replacement_plan)
             .map_err(map_batch_error)?;
         self.retained
@@ -2668,13 +2876,15 @@ where
         self.close_terminal_owners();
         let terminal_cause = self.sticky_terminal_cause();
         let RetainedOperation {
-            retained, common, ..
+            retained,
+            common,
+            terminal,
+            ..
         } = self;
-        let OperationInvocation { coordinator, .. } = common.into_terminal();
-        let ledger = coordinator.into_ledger_for_typed_publication();
+        let ledger = common.into_terminal();
         let (fallback, evidence, batches) = retained.baseline.take_parts();
-        let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), ()>::new(
-            fallback, evidence, None, None, None,
+        let physical = super::BorrowedTerminalPhysicalOwnershipManifest::from_owned(
+            terminal, fallback, evidence, None, None, None,
         );
         if let Some(cause) = terminal_cause {
             let prepared = TerminalFallbackGuard::new(
@@ -2740,12 +2950,16 @@ where
         self.close_terminal_owners();
         let cause = self.sticky_terminal_cause().unwrap_or(cause);
         let RetainedOperation {
-            retained, common, ..
+            retained,
+            common,
+            terminal,
+            ..
         } = self;
-        let OperationInvocation { coordinator, .. } = common.into_terminal();
-        let ledger = coordinator.into_ledger_for_typed_publication();
+        let ledger = common.into_terminal();
         let (fallback, evidence, batches) = retained.baseline.take_parts();
-        let physical = TerminalPhysicalOwnershipManifest::new(fallback, evidence, None, None, None);
+        let physical = super::BorrowedTerminalPhysicalOwnershipManifest::from_owned(
+            terminal, fallback, evidence, None, None, None,
+        );
         TerminalFallbackGuard::new(
             TerminalFallbackAttribution::new(
                 ledger,
@@ -2910,7 +3124,7 @@ where
                 let batch = match self
                     .common
                     .coordinator
-                    .retained_ledger()
+                    .retained_ledger_mut()
                     .try_attribution_batch_from_plan(batch_plan)
                 {
                     Ok(batch) => batch,
@@ -2931,7 +3145,7 @@ where
         let mut evidence_batch = match self
             .common
             .coordinator
-            .retained_ledger()
+            .retained_ledger_mut()
             .try_attribution_batch_from_plan(evidence_batch_plan)
         {
             Ok(batch) => batch,

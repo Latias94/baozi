@@ -18,7 +18,7 @@ fn validated_scalar_success_on_account<'inv>(
     root: &'inv mut TestInvocationRoot<u64, u64>,
     account: &PhysicalStorageAccount,
 ) -> ValidatedScalarSuccess<'inv> {
-    let operation = test_operation_on_account_with_control(
+    let mut operation = test_operation_on_account_with_control(
         root,
         account,
         64,
@@ -64,7 +64,7 @@ fn validated_freeze_success_with_limits<'inv>(
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation = RetainedOperation::try_start(
+    let mut operation = RetainedOperation::try_start(
         root,
         OperationControl::default(),
         limits,
@@ -1826,7 +1826,11 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
             )
         }
     };
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
 
     macro_rules! run_prepare {
         ($prepare:expr) => {{
@@ -2073,7 +2077,7 @@ fn failure_rails_contain_both_sides_of_the_ledger_sealed_evidence_write_window()
 fn block_table_success_freezes_dual_batches_and_splits_owners() {
     let factory = account_factory(1);
     let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
-    let operation = test_operation_with_writer_limits(
+    let mut operation = test_operation_with_writer_limits(
         &mut invocation_root,
         &factory,
         64,
@@ -2235,7 +2239,7 @@ fn frozen_success_classification_defers_qualification_and_freeze_until_finish() 
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let permit = match validated
         .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
         .unwrap_or_else(|_| panic!("the exact destinations must issue a permit"))
@@ -2552,7 +2556,11 @@ fn control_failure_classification_defers_rich_and_minimal_freeze_until_cleanup()
                 RetainedBatchLimits::new(2, 2),
                 control,
             );
-            let ledger = operation.common.coordinator.retained_ledger().test_probe();
+            let ledger = operation
+                .common
+                .coordinator
+                .retained_ledger()
+                .test_shared_probe();
             let mut assembly: TestPublication<'_, u64, u64> = operation
                 .try_publication_assembly(publication_plan(1, 1))
                 .unwrap_or_else(|_| panic!("control failure publication must open"));
@@ -2775,7 +2783,7 @@ fn containing_pre_freeze_classification_retains_unqualified_original_graph() {
             .common
             .coordinator
             .retained_ledger()
-            .test_probe();
+            .test_shared_probe();
         let classification = validated
             .try_classify_pre_freeze(final_progress())
             .unwrap_or_else(|_| panic!("the healthy candidate must classify before containment"));
@@ -2892,7 +2900,11 @@ fn terminal_evidence_qualification_error_contains_the_complete_success_graph() {
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("freeze-error publication must open"));
@@ -2960,7 +2972,11 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
             RetainedBatchLimits::new(2, 2),
             OperationControl::default(),
         );
-        let ledger = operation.common.coordinator.retained_ledger().test_probe();
+        let ledger = operation
+            .common
+            .coordinator
+            .retained_ledger()
+            .test_shared_probe();
         let mut assembly: TestPublication<'_, u64, u64> = operation
             .try_publication_assembly(publication_plan(1, 1))
             .unwrap_or_else(|_| panic!("direct-drop publication must open"));
@@ -3065,7 +3081,11 @@ fn success_acknowledgement_panic_does_not_retry_or_release_unacknowledged_ledger
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("acknowledgement-panic publication must open"));
@@ -3123,7 +3143,11 @@ fn success_ledger_detach_panic_before_evidence_freeze_uses_scopeguard_containmen
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("ledger-detached publication must open"));
@@ -3175,7 +3199,11 @@ fn terminal_evidence_qualification_panic_contains_the_complete_fallback_graph() 
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let physical_before = account.snapshot();
     let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
 
@@ -4483,11 +4511,11 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let ledger = assembly
         .operation
-        .as_ref()
+        .as_mut()
         .expect("assembly retains operation")
         .common
         .coordinator
-        .retained_ledger();
+        .retained_ledger_mut();
     let observation = LiveDropObservation {
         ledger: ledger.test_probe(),
         account: assembly
@@ -4869,7 +4897,11 @@ fn evidence_only_retry_panic_retains_storage_and_attribution_fail_closed() {
         || Ok(7_u32),
     )
     .unwrap_or_else(|_| panic!("retry-panic operation must start"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let mut assembly: TestPublication<'_, DropCounter, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("retry-panic publication must open"));
@@ -5055,7 +5087,11 @@ fn terminal_prepare_never_calls_dimension_ordering() {
         || Ok(7_u32),
     )
     .unwrap_or_else(|_| panic!("terminal-order operation must start"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let deferred_ledger = StdArc::new(StdMutex::new(Some(ledger)));
     let table_writer = RetainedWriterPlan::new(
         TestPhase::Build,
@@ -5279,7 +5315,7 @@ fn evidence_only_binding_panic_stops_before_later_storage_cleanup() {
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let canonical = assembly
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(11_u64, CanonicalRootTag))
@@ -5376,7 +5412,7 @@ fn second_table_drop_panic_keeps_success_rejection_accounting_fail_closed() {
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
 
@@ -5443,7 +5479,7 @@ fn first_table_drop_panic_stops_before_evidence_cleanup_or_attribution_ack() {
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
     let before_physical = account.snapshot();
@@ -5511,7 +5547,11 @@ fn table_payload_drop_panic_fails_closed_before_attribution_release() {
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("rich-both account share must be admitted"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let mut assembly: TestPublication<'_, PanickingDropProbe, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
@@ -5611,7 +5651,11 @@ fn baseline_drop_payload_before_releasing_live_ownership() {
         || Ok(fallback),
     )
     .unwrap_or_else(|_| panic!("baseline observation operation must start"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     EXPECTED_ACTIVE.store(ledger.active_reservations(), Ordering::SeqCst);
     EXPECTED_OPERATION_LIVE.store(ledger.current_live_bytes(), Ordering::SeqCst);
     let physical = operation.account().snapshot();
@@ -6056,7 +6100,11 @@ fn rich_failure_fallback_drop_panic_preserves_every_unacknowledged_attribution()
             .account()
             .share_after_test_admission()
             .unwrap_or_else(|_| panic!("rich fallback account share must be admitted"));
-        let ledger = operation.common.coordinator.retained_ledger().test_probe();
+        let ledger = operation
+            .common
+            .coordinator
+            .retained_ledger()
+            .test_shared_probe();
         let validated = if includes_canonical_discard {
             let mut assembly = operation
                 .try_publication_assembly(publication_plan(1, 1))
@@ -6227,7 +6275,7 @@ fn success_preparation_contains_fallback_drop_panic() {
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
     let validated =
@@ -6282,7 +6330,11 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("minimal-evidence account share must be admitted"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation
+        .common
+        .coordinator
+        .retained_ledger()
+        .test_shared_probe();
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
     let mut assembly: TestPublication<'_, u64, PanickingEvidence> = operation
@@ -6382,7 +6434,7 @@ fn recoverable_block_allocation_failure_preserves_assembly_for_retry() {
         .common
         .coordinator
         .retained_ledger()
-        .test_probe();
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
     let before_physical = assembly
