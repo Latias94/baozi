@@ -151,3 +151,27 @@ Shared accessor payload reuse remains a separate, wider ownership proposal. Do n
 add it, a JSON-parser rewrite, a comparison execution redesign or the Buffer marker
 table to this candidate. Refresh actual attribution after this representation has
 been qualified and measured before selecting the next owner.
+
+## Source implementation checkpoint
+
+The managed source-only worktree implements the four-file replacement on `7c1a7d9`.
+All nineteen owner boundaries are explicit; the two metered reusable scratch vectors,
+retained ordinal runs and sorted owner directory replace the full-row relation.
+The authoring consumers translate retained ordinals and recover SyntheticRoot identity
+directly. Core and the general ledger are unchanged. No worker build or target exists.
+
+Frozen source 1 is recorded in
+`.git/baozi-review/performance-convergence/gltf-owner-source-runs-source-1.json`.
+Independent production review verifies all four worktree/frozen hashes and finds no
+actionable defect; its GO permits serial compiler/runtime qualification only. The
+test review accepts the independent shared relation/provenance, suspended-owner and
+failure-prefix oracles, and identifies two bounded gaps: sparse Buffer declaration
+identity and rejection between ordinal/output and directory reservations. A test-only
+follow-up adds source assertions for both cases using existing probes, including the
+actual published sparse-source translation and a real charged-capacity calibration
+for directory denial. Its independent oracle review is pending. A Skin relation case
+still needs qualification through the existing integration fixture; its helper is not
+wired into the private unit module. Production source remains frozen during this
+follow-up. These are uncompiled sources and source-review conclusions, not executed test or
+performance results. Main retains the fixed ordinary workers until both platform
+measurement attempts are terminal; all subsequent builds use its existing F: target.

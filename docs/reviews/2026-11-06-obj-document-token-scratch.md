@@ -150,3 +150,39 @@ failures, startup limits and load records. No favorable diagnostic subset closes
 original release gates. The next independently reviewed source candidate is
 [glTF owner-local source runs](../plans/2026-11-06-1030-gltf-owner-source-runs-plan.md);
 its source work stays separate from these fixed workers and all measurement clocks.
+
+## Ordinary preflight and Windows startup attempt
+
+Four fresh uninstrumented opt3/debug0 Baozi workers are built serially in the current
+repository target. Per-platform control/candidate compiler descriptions, arguments
+and recorded overrides agree; candidate 972-input maps match final QA. Controls use
+fixed main capacity source `3cd9997`; cumulative candidates use `7c1a7d9`. The independent
+diagnostics above compare the narrower OBJ delta against `9744b35`, so do not substitute
+one comparison's source effect for the other. Windows Assimp F32/F64 are rebuilt from
+the exact pinned local Git archive and pass 10/7 semantic ctests. GNU ordinary Assimp
+uses the recovered exact optimized debug0 workers and original build manifests.
+
+Windows and GNU each complete two original 110-lane functional preflights, with zero
+comparison-task failures. Each records 222 commands: 220 comparison children plus two
+Git context probes. The frozen source archive is located inside the repository's
+`.git` evidence tree: `source-head` succeeds but `source-status` exits 128. Those context
+failures remain in raw reports; worker identity is established by exact build/source
+archives and binaries, not the collector's enclosing Git HEAD/status. A successful
+functional preflight does not provide ordinary sampling evidence.
+
+Windows C0/N0/N1/C1 all remain **not started**: none obtains the required 20-second
+named-tool quiet interval within its prospective 180-second deadline. Actual recorded
+waits are 181.016/181.112/181.048/181.149 seconds, preserving polling overrun and every
+sampled Cargo/nextest/rustc/link observation. There are no Windows ordinary samples
+for this attempt. GNU ordinary startup/collection is still active at this checkpoint;
+its completed functional preflights are not promoted to campaign results.
+
+Local association and receipts are
+`obj-token-scratch-ordinary-build-association-1.json`,
+`obj-token-scratch-ordinary-windows-campaigns-1/`,
+`obj-token-scratch-ordinary-linux-campaigns-1/`, and
+`obj-token-scratch-ordinary-linux-monitor-1/` in the same evidence directory.
+GNU workers/corpus are copied to its native filesystem outside worker clocks; no
+build takes place there. The unchanged protocol remains 14 cases/110 lanes, three
+warmup and twenty retained AB/BA pairs, 60-second child timeout, and the original
+release targets. No startup limit is widened and no unavailable sample is imputed.
