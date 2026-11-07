@@ -1,18 +1,25 @@
 # Owned Finite Invocation: Numerical and Control Foundation
 
-Latest checkpoint: **final20/source126 passes all seven integrated gates**:
-**3,916 workspace tests** (two slow, six existing manual skips), **196 doctests**,
+Latest checkpoint: **final21/source129 passes all seven integrated gates**:
+**3,920 workspace tests** (two slow, six existing manual skips), **196 doctests**,
 **138 asset-consumer tests** (one existing manual scale skip), workspace and consumer
 strict all-target/all-feature Clippy, and both format checks. All **1,046** before/after/
-current input hashes, **155** frozen files and five recorded user-note identities match.
-The exact source/log association is `owned-finite-source126-integrated-association-1.json`.
-Independent source reviews close the shared central cause-latch and finite Host
-post-cleanup-containment findings. The independent
-`owned-finite-source126-integrated-evidence-review-1.md` authenticates all seven final
-execution records, source/log hashes and counts; its interim record remains historical.
-This is a structural checkpoint. Typed body-error return transport, complete finite
-final authoring/freeze/Core/Postprocess, layout/allocation/native/heap qualification,
-local-main merge and release remain open.
+current input hashes, **155** frozen files and five current recorded user-note identities
+match; the absent older note baseline is not reconstructed. The exact source/log
+association is `owned-finite-source129-integrated-association-1.json`. The independent
+`owned-finite-source129-integrated-evidence-review-1.md` authenticates all seven terminal
+commands, raw logs, source identities and counts; source127 and source129 source reviews
+close bounded GO within their own scopes. The earlier interim record stays historical.
+This is an owned body-error transport structural checkpoint. Complete finite final
+authoring/freeze/Core/Postprocess, layout/allocation/native/heap qualification, local-main
+merge and release remain open.
+
+Historical final20/source126 independently passes all seven gates: 3,916 workspace
+tests (two slow, six existing manual skips), 196 doctests, 138 consumer tests (one manual
+scale skip), both strict and both formats. Its 1,046 stable inputs and 155 frozen files
+are authenticated by `owned-finite-source126-integrated-evidence-review-1.md`; the shared
+central cause-latch and finite Host post-cleanup containment findings are closed within
+that distinct source checkpoint. Its interim record remains historical.
 
 Historical final19/source107 separately passes 3,901 workspace tests (three slow, six
 existing manual skips), 191 doctests, 138 consumer tests (one manual scale skip), both
@@ -26,6 +33,27 @@ in 47.973s, with 1,041 stable inputs and 150 frozen files. Source114's equivalen
 aliases leave strict42's five unfinished central/restoration consumers. Source115 adds
 the actual body-only wrapper; source116 passes 1,353 tests and 135 Operation doctests.
 Those historical scoped results remain separate from full20's current qualification.
+
+The later six-file body-error transport changes callbacks to the concrete owned Result
+and keeps the original returned error in a private stack guard before the local entry
+is disposed. Every actual capture, payload and owner retirement has its separate catch;
+actual faults retain the first panic and trigger containment only after payload cleanup.
+A plain Err skips synthetic disposition failure and adds no new poison. Source127's
+adversarial review closes bounded source GO. Operation127 passes 1,362 tests; source128
+removes only a needless non-Drop admission catch and names an equivalent Host Option
+alias, then strict49 and the two actual Core finite-adapter tests pass. Their 711 filtered
+Core tests are not counted as manual skips or execution coverage.
+
+Source129 adds real owned-error custody during local-entry lineage panic and returned
+Err with throwing staged capture/proof/output. Signal-owner Drop counts establish that
+the returned error stays alive through every cleanup; exact panic messages and disposal
+order are asserted. All 1,364 Operation tests, zero skips, pass in 54.670s, and strict50
+passes every Operation target/feature. Full21/source129 then passes all seven gates,
+including 3,920 workspace tests in 231.612s and 138 consumer tests in 9.404s; these are
+correctness-run durations. Its final delta/focused-execution review authenticates the
+actual tests, input hashes, independent lifetime probes and the non-Drop simplification.
+Historical full20/source126 remains separate. No finite final-authoring/freeze/Core/
+Postprocess/native acceptance is inferred from this structural checkpoint.
 
 Source108 fails before tests on one private containment-field access; source109 uses
 its original getter/typed private constructor, compiles production and then fails

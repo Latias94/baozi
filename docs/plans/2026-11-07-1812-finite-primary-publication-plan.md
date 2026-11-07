@@ -4,7 +4,7 @@ Status: implementation in progress; the bounded contract is reviewed GO, includi
 
 ## Problem and result
 
-Finite ownership now covers start/body/unattached/EvidenceOnly/MinimalFallback, ordinary success/failure/fallback envelopes, scoped activation, shared central validation, and typed disposition/restoration after capture cleanup. Complete final-only finite authoring, frozen joint output and the actual Core changed consumer remain absent. Typed body-error return transport is the next reviewed interface cut. Postprocess still owns dynamic numerical evidence and eleven copied resource counters; its actual finite consumer must use the same borrowed kernels and its own concrete owners.
+Finite ownership now covers start/body/unattached/EvidenceOnly/MinimalFallback, ordinary success/failure/fallback envelopes, scoped activation, shared central validation, and typed disposition/restoration after capture cleanup. Complete final-only finite authoring, frozen joint output and the actual Core changed consumer remain absent. Typed body-error Result transport is implemented with scoped source129 qualification; all seven full21 integrated gates pass. Postprocess still owns dynamic numerical evidence and eleven copied resource counters; its actual finite consumer must use the same borrowed kernels and its own concrete owners.
 
 The complete cut produces actual finite Store/Host primary and failure continuations, using fixed facts and original root/domain/error residue. It connects Core's existing finite Scene entry to the real central validation, generation, freeze, invariant joint binding and handoff. Only then migrate both Postprocess entries and remove its duplicated resource state. Partial classifiers, test-only calls or warning suppression do not satisfy this result.
 
@@ -24,6 +24,19 @@ source98/source107 checkpoints below remain historical, not substitutes for this
 Source96 Operation: 1,336 PASS, zero skips, with independently closed poison-aware containment repair. Source98 removes redundant pending metadata and private style issues; bounded independent review finds the five-file cleanup equivalent. Strict34 still fails on the two unfinished finite classifiers; it is not all-target GO.
 
 Full16/source98 fails during Core libtest compilation because F: is full; runner receipt write also fails and leaves the raw report empty. A separate environment-failure record preserves that outcome. External free space permits a new same-source full17 in the existing F: target. It executes 3,891 workspace tests (two slow, six existing manual skips) and 191 doctests successfully, then fails strict workspace Clippy with the two unfinished finite classifiers. The four later gates do not start; the overall integrated attempt is failed. Its 1,034 stable input hashes and 141 frozen files have independent evidence authentication. No result in this plan relabels an earlier attempt.
+
+The six-file owned body-error transport passes full21/source129's seven gates: 3,920
+workspace tests (two slow, six existing manual skips), 196 doctests and 138 consumer
+tests (one manual scale skip), both strict and both format checks. All 1,046 inputs,
+155 frozen files and five current note identities match. Its scoped 1,364 Operation
+tests and strict50 also pass; the actual Core finite adapter's normal and owned-error
+paths pass separately on source128. Original errors are stored before local
+entry destruction and survive independent capture/payload/root cleanup. A returned Err
+alone neither overwrites its original cause/domain nor introduces extra poisoning.
+The next final-only finite failure-authoring design closes GO after adopting original
+error/unmatched-decision custody, actual prepared-owner quarantine, control-preserving
+preparation and the concrete interface/compatibility appendix. Its implementation is
+pending. Frozen joint output and actual Core/Postprocess migration remain later work.
 
 ## Two concrete owners and one borrowed algorithm
 
@@ -82,7 +95,7 @@ The outer finite guard owns every unresolved exit. Selected Host payload permiss
 1. Extract proof binding and freeze orchestration; keep dynamic actual consumers on the unique kernels and remove retired bodies.
 2. Extract the Store normalizer with the branch table above; run existing dynamic invalid-dimension, forced/recoverable/unverified, cancellation, poison, capture and freeze consumers.
 3. Finite validated/failure/fallback envelopes now bind original fields and closure decisions; add the remaining freeze permit/contribution envelopes and preserve owned failure residue on every normal error.
-4. Shared scoped activation and central validation now use concrete finite outer guards, original Host payload slots and actual typed disposition/resume. Complete the reviewed owned body-error transport and remaining final-only authoring authority for every branch.
+4. Shared scoped activation and central validation now use concrete finite outer guards, original Host payload slots and actual typed disposition/resume. The owned body-error transport now passes full21; complete remaining final-only authoring authority for every branch.
 5. Connect Core's actual finite changed-success/rich/frozen/joint consumer and original physical handoff helper. Keep general dynamic Import concrete and unchanged in storage selection.
 6. Migrate both Postprocess entry paths and all success/failure/unchanged exits. Project public resources from one finite facts owner; delete the eleven cached counters and old dynamic evidence retained for getters.
 7. Simplify/remove obsolete adapters, then qualify affected and all seven integrated gates. Measure concrete layouts, allocation behavior and separate attribution before unchanged ordinary Windows/GNU and heap campaigns. Keep every failure and unfavorable sign; no structural performance inference.

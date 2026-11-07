@@ -39,6 +39,9 @@ type FiniteBodySessionResult<'inv, O, PP, U, L> =
     Result<FiniteSessionOutcomeOwner<'inv, O, PP, U, L>, FiniteStoreExitError<O, PP, U>>;
 type FiniteHostLoan<'host, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> =
     &'host mut FiniteCanonicalInvocationHost<O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>;
+type FiniteHostLoanSlot<'host, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> =
+    Option<FiniteHostLoan<'host, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>>;
+
 type BoundFinishResult<'host, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> = Result<
     FiniteCanonicalBoundInvocationFinish<
         'host,
@@ -426,6 +429,11 @@ where
         }
     }
 
+    /// Runs one body, preserving any returned owned error through capture and payload cleanup.
+    ///
+    /// Existing owned session errors can be propagated with `?`. A returned error prevents
+    /// every finish, including a request already recorded by the same body. Returning an error
+    /// alone does not record another failure or poison an otherwise healthy owning root.
     pub fn run_bound_body<'account>(
         &mut self,
         control: OperationControl<PP, U>,
@@ -435,7 +443,7 @@ where
         body: impl for<'call, 'entry> FnMut(
             FiniteCanonicalBoundBodyParts<'call, 'entry, 'account, O, PP, U, T, Proof, EA, EV>,
             FiniteCanonicalDispositionSlot<'call, CK, CT, EK, ET>,
-        ),
+        ) -> Result<(), FiniteStoreExitError<O, PP, U>>,
     ) -> BoundFinishResult<'_, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> {
         self.run_bound_body_with(
             control,
@@ -467,7 +475,7 @@ where
                 CanonicalInheritanceSource,
             >,
             FiniteCanonicalDispositionSlot<'call, CK, CT, EK, ET>,
-        ),
+        ) -> Result<(), FiniteStoreExitError<O, PP, U>>,
     ) -> BoundFinishResult<'_, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> {
         let source = source.share_source();
         self.run_bound_body_with(
@@ -492,20 +500,39 @@ where
         body: impl for<'call, 'entry> FnMut(
             FiniteCanonicalBoundBodyParts<'call, 'entry, 'account, O, PP, U, T, Proof, EA, EV, L>,
             FiniteCanonicalDispositionSlot<'call, CK, CT, EK, ET>,
-        ),
+        ) -> Result<(), FiniteStoreExitError<O, PP, U>>,
     ) -> BoundFinishResult<'_, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> {
         let (account, source, lineage) = source;
-        let mut body = Some(body);
-        let mut control = Some(control);
-        let mut inputs = Some((ledger, plan, lineage));
-        let mut admission = FiniteEntryAdmission::new(account);
-        let mut start_error = None;
-        let execution = if self.body_entered || self.store.is_none() {
-            None
-        } else {
+        let admitted = !self.body_entered && self.store.is_some();
+        if admitted {
             self.body_entered = true;
-            Some(catch_unwind(AssertUnwindSafe(|| {
-                let store = self
+        }
+        let mut exit = FiniteBodyExitGuard {
+            host: Some(self),
+            body: Some(body),
+            control: Some(control),
+            inputs: Some((ledger, plan, lineage)),
+            admission: Some(FiniteEntryAdmission::new(account)),
+            returned_error: None,
+            cleanup_fault: false,
+            first_panic: None,
+        };
+        let mut start_error = None;
+        let execution = admitted.then(|| {
+            catch_unwind(AssertUnwindSafe(|| {
+                let FiniteBodyExitGuard {
+                    host,
+                    body,
+                    control,
+                    inputs,
+                    admission,
+                    returned_error,
+                    ..
+                } = &mut exit;
+                let host = host
+                    .as_deref_mut()
+                    .expect("the original finite Host loan remains armed");
+                let store = host
                     .store
                     .as_mut()
                     .expect("the original finite root is installed");
@@ -513,8 +540,10 @@ where
                 let (ledger, plan, lineage) = inputs.take().expect("the finite entry binds once");
                 let bound = bind_finite_store(
                     store,
-                    &mut admission,
-                    &mut control,
+                    admission
+                        .as_mut()
+                        .expect("the original finite admission remains armed"),
+                    control,
                     ledger,
                     source,
                     plan,
@@ -528,121 +557,123 @@ where
                     }
                 };
                 let mut entry = Some(entry);
-                body.as_mut().expect("the finite callback is invoked once")(
+                let result = body.as_mut().expect("the finite callback is invoked once")(
                     CanonicalInvocationParts {
                         startup: FiniteCanonicalBoundBodyStart { entry: &mut entry },
                         output: CanonicalOutputSlot {
-                            value: &mut self.output,
-                            order: &self.order,
+                            value: &mut host.output,
+                            order: &host.order,
                             identity,
                         },
                         proof: CanonicalProofSlot {
-                            value: &mut self.proof,
-                            order: &self.order,
+                            value: &mut host.proof,
+                            order: &host.order,
                             identity,
                             fallback: Some(CanonicalCauseSlot {
-                                value: &mut self.central_fallback,
-                                order: &self.order,
+                                value: &mut host.central_fallback,
+                                order: &host.order,
                                 identity,
                             }),
                         },
                         activation: CanonicalActivationSlots {
                             never: CanonicalCauseSlot {
-                                value: &mut self.never,
-                                order: &self.order,
+                                value: &mut host.never,
+                                order: &host.order,
                                 identity,
                             },
                             rejection: CanonicalCauseSlot {
-                                value: &mut self.activation_rejected,
-                                order: &self.order,
+                                value: &mut host.activation_rejected,
+                                order: &host.order,
                                 identity,
                             },
                         },
                         validation: CanonicalValidationSlots {
                             rejection: CanonicalCauseSlot {
-                                value: &mut self.validation_rejected,
-                                order: &self.order,
+                                value: &mut host.validation_rejected,
+                                order: &host.order,
                                 identity,
                             },
                             interruption: CanonicalCauseSlot {
-                                value: &mut self.interrupted,
-                                order: &self.order,
+                                value: &mut host.interrupted,
+                                order: &host.order,
                                 identity,
                             },
                         },
                     },
                     FiniteCanonicalDispositionSlot {
-                        value: &mut self.pending,
+                        value: &mut host.pending,
                         identity,
                         _root_types: PhantomData,
                     },
                 );
-            })))
-        };
-        let admitted = execution.is_some();
-        let body_panic = execution.and_then(Result::err);
-        if body_panic.is_some() || !admitted || !self.has_valid_disposition() {
-            self.record_payload_failure();
-        }
-        let mut capture_panic = catch_unwind(AssertUnwindSafe(|| drop(body.take()))).err();
-        drop_captured_value(&mut control, &mut capture_panic, || {
-            self.record_payload_failure()
+                // Own the error before the original local entry is disposed.
+                if let Err(error) = result {
+                    *returned_error = Some(error);
+                }
+            }))
         });
-        let mut rejected_domain = None;
-        if let Some((ledger, plan, lineage)) = inputs.take() {
-            rejected_domain = Some(ledger.into_parts().0);
-            let mut plan = Some(plan);
-            let mut lineage = Some(lineage);
-            drop_captured_value(&mut plan, &mut capture_panic, || {
-                self.record_payload_failure()
-            });
-            drop_captured_value(&mut lineage, &mut capture_panic, || {
-                self.record_payload_failure()
-            });
+        if let Some(payload) = execution.and_then(Result::err) {
+            exit.record_fault();
+            exit.merge_panic(Some(payload));
         }
-        if capture_panic.is_some() {
-            self.record_payload_failure();
+        // A returned owned error is already the selected failure, regardless of its disposition.
+        if exit.returned_error.is_none()
+            && (!admitted
+                || !exit
+                    .host
+                    .as_ref()
+                    .expect("the Host loan remains armed")
+                    .has_valid_disposition())
+        {
+            exit.host
+                .as_deref_mut()
+                .expect("the Host loan remains armed")
+                .record_payload_failure();
         }
-        if body_panic.is_some() || capture_panic.is_some() {
-            let cleanup_panic = self.clear_owned_values();
-            self.contain_payload_failure();
-            // Retire every actual root only after all callback and payload disposal catches.
-            drop(self.store.take());
-            resume_first([body_panic, capture_panic, cleanup_panic]);
+        let rejected_domain = exit.dispose_captures();
+        if exit.first_panic.is_some() {
+            exit.cleanup_failed_body();
+            exit.resume_panic();
+        }
+        if exit.returned_error.is_some() {
+            return Err(exit.take_returned_error());
         }
         let start_error = start_error.or_else(|| {
-            self.store
+            exit.host
                 .as_ref()
+                .and_then(|host| host.store.as_ref())
                 .and_then(FiniteStoreInvocationRoot::startup_error)
         });
         if let Some(cause) = start_error {
-            let panic = self.clear_owned_values();
-            let error = self
-                .take_error(FiniteStoreExitCause::Start(cause))
-                .with_rejected_domain(rejected_domain);
-            if let Some(payload) = panic {
-                drop(error);
-                std::panic::resume_unwind(payload);
-            }
-            return Err(error);
-        }
-        if !admitted || !self.has_valid_disposition() {
-            let panic = self.clear_owned_values();
-            self.contain_payload_failure();
-            let cause = FiniteStoreExitCause::Body(
-                driver::CanonicalInvocationBodyError::invalid_disposition(),
+            exit.returned_error = Some(
+                exit.host
+                    .as_deref_mut()
+                    .expect("the Host loan remains armed")
+                    .take_error(FiniteStoreExitCause::Start(cause))
+                    .with_rejected_domain(rejected_domain),
             );
-            let error = self.take_error(cause).with_rejected_domain(rejected_domain);
-            if let Some(payload) = panic {
-                drop(error);
-                std::panic::resume_unwind(payload);
-            }
-            return Err(error);
+            return Err(exit.take_returned_error());
         }
-        Ok(FiniteCanonicalBoundInvocationFinish {
-            host: self,
-            admission,
-        })
+        if !admitted
+            || !exit
+                .host
+                .as_ref()
+                .expect("the Host loan remains armed")
+                .has_valid_disposition()
+        {
+            exit.cleanup_fault = true;
+            exit.returned_error = Some(
+                exit.host
+                    .as_deref_mut()
+                    .expect("the Host loan remains armed")
+                    .take_error(FiniteStoreExitCause::Body(
+                        driver::CanonicalInvocationBodyError::invalid_disposition(),
+                    ))
+                    .with_rejected_domain(rejected_domain),
+            );
+            return Err(exit.take_returned_error());
+        }
+        exit.take_finish()
     }
 
     fn has_valid_disposition(&self) -> bool {
@@ -718,6 +749,256 @@ where
     }
 }
 
+/// The original error outlives entry teardown, captures, payloads and both owning roots.
+struct FiniteBodyExitGuard<
+    'host,
+    'account,
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    T,
+    Proof,
+    EA,
+    EV,
+    EG,
+    CK,
+    CT,
+    EK,
+    ET,
+    L,
+    B,
+> {
+    host: FiniteHostLoanSlot<'host, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>,
+    body: Option<B>,
+    control: Option<OperationControl<PP, U>>,
+    inputs: Option<(FiniteStoreLedgerPlan, FiniteRetainedStoreStartPlan, L)>,
+    admission: Option<FiniteEntryAdmission<'account>>,
+    returned_error: Option<FiniteStoreExitError<O, PP, U>>,
+    cleanup_fault: bool,
+    first_panic: Option<Box<dyn std::any::Any + Send>>,
+}
+
+impl<'host, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET, L, B>
+    FiniteBodyExitGuard<'host, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET, L, B>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn record_owners(
+        root: Option<&mut FiniteStoreInvocationRoot<O, PP, U>>,
+        error: Option<&mut FiniteStoreExitError<O, PP, U>>,
+        fault: &mut bool,
+    ) {
+        *fault = true;
+        if let Some(root) = root {
+            root.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+        }
+        if let Some(error) = error {
+            error.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+        }
+    }
+
+    fn record_fault(&mut self) {
+        Self::record_owners(
+            self.host
+                .as_deref_mut()
+                .and_then(|host| host.store.as_mut()),
+            self.returned_error.as_mut(),
+            &mut self.cleanup_fault,
+        );
+    }
+
+    fn merge_panic(&mut self, panic: Option<Box<dyn std::any::Any + Send>>) {
+        if let Some(payload) = panic {
+            if self.first_panic.is_some() {
+                discard_untrusted_panic_payload(payload);
+            } else {
+                self.first_panic = Some(payload);
+            }
+        }
+    }
+
+    fn dispose_captures(&mut self) -> Option<crate::concrete_store::StoreKeyDomain> {
+        let Self {
+            host,
+            body,
+            control,
+            inputs,
+            returned_error,
+            cleanup_fault,
+            first_panic,
+            ..
+        } = self;
+        let mut record = || {
+            Self::record_owners(
+                host.as_deref_mut().and_then(|host| host.store.as_mut()),
+                returned_error.as_mut(),
+                cleanup_fault,
+            )
+        };
+        drop_captured_value(body, first_panic, &mut record);
+        drop_captured_value(control, first_panic, &mut record);
+        let mut rejected_domain = None;
+        if let Some((ledger, plan, lineage)) = inputs.take() {
+            rejected_domain = Some(ledger.into_parts().0);
+            let mut plan = Some(plan);
+            let mut lineage = Some(lineage);
+            drop_captured_value(&mut plan, first_panic, &mut record);
+            drop_captured_value(&mut lineage, first_panic, &mut record);
+        }
+        rejected_domain
+    }
+
+    fn clear_payloads(&mut self) {
+        let Self {
+            host,
+            returned_error,
+            cleanup_fault,
+            ..
+        } = self;
+        let Some(host) = host.as_deref_mut() else {
+            return;
+        };
+        host.pending = None;
+        let store = &mut host.store;
+        let panic = FinitePayloadFields {
+            never: &mut host.never,
+            activation_rejected: &mut host.activation_rejected,
+            validation_rejected: &mut host.validation_rejected,
+            interrupted: &mut host.interrupted,
+            freeze_interrupted: &mut host.freeze_interrupted,
+            generation_rejected: &mut host.generation_rejected,
+            failure_fallback: &mut host.failure_fallback,
+            central_fallback: &mut host.central_fallback,
+            output: &mut host.output,
+            proof: &mut host.proof,
+            order: &host.order,
+        }
+        .clear(|| Self::record_owners(store.as_mut(), returned_error.as_mut(), cleanup_fault));
+        self.merge_panic(panic);
+    }
+
+    fn contain_error(&mut self) {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+            if let Some(error) = self.returned_error.as_mut() {
+                error.contain_payload_failure();
+            }
+        })) {
+            self.record_fault();
+            self.merge_panic(Some(payload));
+        }
+    }
+
+    fn contain_faults(&mut self) {
+        if !self.cleanup_fault {
+            return;
+        }
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+            if let Some(host) = self.host.as_deref_mut() {
+                host.contain_payload_failure();
+            }
+        })) {
+            self.record_fault();
+            self.merge_panic(Some(payload));
+        }
+        self.contain_error();
+    }
+
+    fn cleanup_failed_body(&mut self) {
+        self.dispose_captures();
+        self.clear_payloads();
+        // Admission owns only fixed metadata and references; clearing it invokes no destructor.
+        self.admission = None;
+        let error_containment_attempted = self.cleanup_fault;
+        self.contain_faults();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+            if let Some(host) = self.host.as_deref_mut() {
+                drop(host.store.take());
+            }
+        })) {
+            self.record_fault();
+            self.merge_panic(Some(payload));
+            if !error_containment_attempted {
+                self.contain_error();
+            }
+        }
+    }
+
+    fn retire_error(&mut self) {
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(self.returned_error.take()))) {
+            self.record_fault();
+            self.merge_panic(Some(payload));
+        }
+    }
+
+    fn resume_panic(&mut self) -> ! {
+        self.retire_error();
+        let payload = self
+            .first_panic
+            .take()
+            .expect("the original finite body panic is retained");
+        self.host.take();
+        std::panic::resume_unwind(payload);
+    }
+
+    fn take_returned_error(&mut self) -> FiniteStoreExitError<O, PP, U> {
+        self.cleanup_failed_body();
+        if self.first_panic.is_some() {
+            self.resume_panic();
+        }
+        let error = self
+            .returned_error
+            .take()
+            .expect("the exact finite body error is retained");
+        self.host.take();
+        error
+    }
+
+    fn take_finish(
+        &mut self,
+    ) -> BoundFinishResult<'host, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> {
+        Ok(FiniteCanonicalBoundInvocationFinish {
+            host: self
+                .host
+                .take()
+                .expect("the original Host loan transfers once"),
+            admission: self
+                .admission
+                .take()
+                .expect("the original admission transfers once"),
+        })
+    }
+}
+
+impl<O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET, L, B> Drop
+    for FiniteBodyExitGuard<'_, '_, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET, L, B>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if self.host.is_none() {
+            return;
+        }
+        let already_unwinding = std::thread::panicking();
+        if already_unwinding {
+            self.record_fault();
+        }
+        self.cleanup_failed_body();
+        self.retire_error();
+        self.host.take();
+        if let Some(payload) = self.first_panic.take() {
+            if already_unwinding {
+                discard_untrusted_panic_payload(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
 /// Short views keep cleanup on the actual Host Options while a restored store loan is live.
 struct FinitePayloadFields<'host, T, Proof, EA, EV, EG> {
     never: &'host mut Option<StoreNeverActivatedCause<EA>>,
@@ -756,18 +1037,6 @@ impl<T, Proof, EA, EV, EG> FinitePayloadFields<'_, T, Proof, EA, EV, EG> {
         }
         first
     }
-}
-
-fn resume_first(panics: [Option<Box<dyn std::any::Any + Send>>; 3]) -> ! {
-    let mut first = None;
-    for payload in panics.into_iter().flatten() {
-        if first.is_none() {
-            first = Some(payload);
-        } else {
-            discard_untrusted_panic_payload(payload);
-        }
-    }
-    std::panic::resume_unwind(first.expect("an original finite transition panic exists"));
 }
 
 impl<O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> Default

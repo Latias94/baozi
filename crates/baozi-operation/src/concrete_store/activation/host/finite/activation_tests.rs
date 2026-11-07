@@ -616,6 +616,8 @@ enum CentralFault {
     Capture,
     Restoration,
     Lineage,
+    ReturnedCapture,
+    ReturnedPayload,
 }
 
 fn finite_central_candidate_round_trip(fault: CentralFault) {
@@ -627,9 +629,21 @@ fn finite_central_candidate_round_trip(fault: CentralFault) {
     use crate::concrete_store::tests::TestActivationDescription;
     use std::{cell::RefCell, num::NonZeroU64, rc::Rc};
 
-    struct Tracked(&'static str, Rc<RefCell<Vec<&'static str>>>, bool);
+    struct Tracked(
+        &'static str,
+        Rc<RefCell<Vec<&'static str>>>,
+        bool,
+        Option<Arc<AtomicUsize>>,
+    );
     impl Drop for Tracked {
         fn drop(&mut self) {
+            if let Some(error_control_drops) = self.3.as_ref() {
+                assert_eq!(
+                    error_control_drops.load(Ordering::SeqCst),
+                    0,
+                    "the original returned error must outlive every capture and payload"
+                );
+            }
             self.1.borrow_mut().push(self.0);
             if self.2 {
                 panic!("{}", self.0);
@@ -653,13 +667,75 @@ fn finite_central_candidate_round_trip(fault: CentralFault) {
     let factory = test_factory();
     let account = test_account(&factory);
     let events = Rc::new(RefCell::new(Vec::new()));
+    let returned_fault = matches!(
+        fault,
+        CentralFault::ReturnedCapture | CentralFault::ReturnedPayload
+    );
+    let error_control_drops = Arc::new(AtomicUsize::new(0));
+    struct ErrorSignal(Arc<AtomicUsize>);
+    impl crate::CancellationSignal for ErrorSignal {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    impl Drop for ErrorSignal {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let mut transported_error = if returned_fault {
+        let original_factory = test_factory();
+        let original_account = test_account(&original_factory);
+        let (ledger, start, dimensions, _) = plans();
+        let mut original_host =
+            FiniteCanonicalInvocationHost::<TestOwner, TestProgress, TestUnit, (), ()>::new();
+        let error = original_host
+            .run_bound_body(
+                OperationControl::default()
+                    .with_cancellation(ErrorSignal(Arc::clone(&error_control_drops))),
+                ledger,
+                &original_account,
+                start,
+                |mut parts, _| {
+                    parts
+                        .startup
+                        .with_action_execution(dimensions[2], |actions| {
+                            actions.begin_action(1)?;
+                            actions.complete_action()?;
+                            Ok::<_, StoreRuntimeError>(())
+                        })
+                        .unwrap();
+                    Ok(())
+                },
+            )
+            .err()
+            .expect("actual original work without a request owns its Body error");
+        assert!(error.has_residue());
+        assert!(error.domain().unwrap().owns_dimension(dimensions[2]));
+        assert_eq!(error_control_drops.load(Ordering::SeqCst), 0);
+        Some(error)
+    } else {
+        None
+    };
+    let probe = || returned_fault.then(|| Arc::clone(&error_control_drops));
     let throwing_payloads = fault != CentralFault::None;
-    let mut output_value = Some(Tracked("output", Rc::clone(&events), throwing_payloads));
-    let mut proof_value = Some(Tracked("proof", Rc::clone(&events), throwing_payloads));
+    let mut output_value = Some(Tracked(
+        "output",
+        Rc::clone(&events),
+        throwing_payloads,
+        probe(),
+    ));
+    let mut proof_value = Some(Tracked(
+        "proof",
+        Rc::clone(&events),
+        throwing_payloads,
+        probe(),
+    ));
     let capture = Tracked(
         "capture",
         Rc::clone(&events),
-        fault == CentralFault::Capture,
+        matches!(fault, CentralFault::Capture | CentralFault::ReturnedCapture),
+        probe(),
     );
     struct Lineage {
         panic: bool,
@@ -680,7 +756,6 @@ fn finite_central_candidate_round_trip(fault: CentralFault) {
     let mut original_error = None;
     let (ledger, start, dimensions, phases) = plans_with_failure_work(1, 1, 1);
     let mut host = CentralHost::new();
-    let original_error_slot = &mut original_error;
     let result = catch_unwind(AssertUnwindSafe(|| {
         let finish = host.run_bound_body_with(
             OperationControl::default(),
@@ -771,24 +846,22 @@ fn finite_central_candidate_round_trip(fault: CentralFault) {
                         )
                     },
                 );
-                let outcome = match outcome {
-                    Ok(outcome) => outcome,
-                    Err(error) if fault == CentralFault::Lineage => {
-                        *original_error_slot = Some(error);
-                        return;
-                    }
-                    Err(error) => panic!("unexpected central validation error: {error}"),
-                };
-                outcome.request_finish(disposition).unwrap();
+                let outcome = outcome?;
+                outcome.request_finish(disposition)?;
+                if let Some(error) = transported_error.take() {
+                    return Err(error);
+                }
                 if fault == CentralFault::Body {
                     panic!("body");
                 }
+                Ok(())
             },
         );
         if fault == CentralFault::Lineage {
-            assert!(
-                finish.is_err(),
-                "the spent source shell cannot grant a body disposition"
+            original_error = Some(
+                finish
+                    .err()
+                    .expect("the actual owned central error must cross the finite body boundary"),
             );
             return;
         }
@@ -838,12 +911,15 @@ fn finite_central_candidate_round_trip(fault: CentralFault) {
             .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
         let expected = match fault {
             CentralFault::Body => "body",
-            CentralFault::Capture => "capture",
-            CentralFault::Restoration => "proof",
+            CentralFault::Capture | CentralFault::ReturnedCapture => "capture",
+            CentralFault::Restoration | CentralFault::ReturnedPayload => "proof",
             _ => unreachable!(),
         };
         assert_eq!(message, Some(expected));
         assert_eq!(*events.borrow(), ["capture", "proof", "output"]);
+    }
+    if returned_fault {
+        assert_eq!(error_control_drops.load(Ordering::SeqCst), 1);
     }
     assert!(host.output.is_none() && host.proof.is_none() && host.never.is_none());
     assert!(account.snapshot().poisoned());
@@ -876,6 +952,13 @@ fn finite_candidate_restoration_fault_clears_throwing_payloads_against_owned_err
 #[test]
 fn finite_central_lineage_drop_fault_invalidates_candidate_and_returns_original_owned_error() {
     finite_central_candidate_round_trip(CentralFault::Lineage);
+}
+
+#[test]
+fn finite_returned_error_outlives_throwing_staged_payloads_and_body_capture() {
+    for fault in [CentralFault::ReturnedCapture, CentralFault::ReturnedPayload] {
+        finite_central_candidate_round_trip(fault);
+    }
 }
 
 #[test]
@@ -929,7 +1012,7 @@ fn finite_never_activated_restoration_rejects_foreign_stamp_with_original_owned_
                 let FiniteCanonicalActivationOutcome::NeverActivated(never) = outcome else {
                     panic!("never activated");
                 };
-                never.request_finish(disposition).unwrap();
+                never.request_finish(disposition)
             },
         )
         .unwrap();
@@ -964,7 +1047,7 @@ fn finite_never_activated_restoration_rejects_foreign_stamp_with_original_owned_
                 let FiniteCanonicalActivationOutcome::NeverActivated(never) = outcome else {
                     panic!("never activated");
                 };
-                never.request_finish(disposition).unwrap();
+                never.request_finish(disposition)
             },
         )
         .unwrap();
@@ -1095,12 +1178,10 @@ fn finite_host_restores_each_original_semantic_failure_role_after_body_cleanup()
                         .unwrap();
                     let activated = match outcome {
                         FiniteCanonicalActivationOutcome::NeverActivated(never) if branch == 0 => {
-                            never.request_finish(disposition).unwrap();
-                            return;
+                            return never.request_finish(disposition);
                         }
                         FiniteCanonicalActivationOutcome::Rejected(rejected) if branch == 1 => {
-                            rejected.request_finish(disposition).unwrap();
-                            return;
+                            return rejected.request_finish(disposition);
                         }
                         FiniteCanonicalActivationOutcome::Activated(activated) => activated,
                         _ => panic!("the actual activation branch must remain unchanged"),
@@ -1167,7 +1248,7 @@ fn finite_host_restores_each_original_semantic_failure_role_after_body_cleanup()
                             },
                         )
                         .unwrap();
-                    outcome.request_finish(disposition).unwrap();
+                    outcome.request_finish(disposition)
                 },
             )
             .unwrap();
@@ -1305,7 +1386,7 @@ fn finite_never_request_lineage_panic_disposes_throwing_cause_without_replacing_
                 let FiniteCanonicalActivationOutcome::NeverActivated(never) = outcome else {
                     panic!("the real unopened finite operation must remain never-activated");
                 };
-                never.request_finish(disposition).unwrap();
+                never.request_finish(disposition)
             },
         );
         assert!(
@@ -1325,4 +1406,99 @@ fn finite_never_request_lineage_panic_disposes_throwing_cause_without_replacing_
     let first = account.snapshot().first_poison_evidence();
     drop(host);
     assert_eq!(account.snapshot().first_poison_evidence(), first);
+}
+
+#[test]
+fn finite_returned_error_is_guarded_before_unconsumed_entry_lineage_panics() {
+    struct ErrorSignal(Arc<AtomicUsize>);
+    impl crate::CancellationSignal for ErrorSignal {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    impl Drop for ErrorSignal {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct EntryLineage(Arc<AtomicUsize>);
+    impl Drop for EntryLineage {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.0.load(Ordering::SeqCst),
+                0,
+                "the owned error must be installed before the local entry destructor"
+            );
+            panic!("original entry lineage panic");
+        }
+    }
+    struct Capture(Arc<AtomicUsize>, Arc<AtomicUsize>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            assert_eq!(
+                self.0.load(Ordering::SeqCst),
+                0,
+                "the owned error must survive the entry panic and capture teardown"
+            );
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let error_drops = Arc::new(AtomicUsize::new(0));
+    let capture_drops = Arc::new(AtomicUsize::new(0));
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (ledger, start, dimensions, _) = plans();
+    let mut original_host =
+        FiniteCanonicalInvocationHost::<TestOwner, TestProgress, TestUnit, (), ()>::new();
+    let original = original_host
+        .run_bound_body(
+            OperationControl::default().with_cancellation(ErrorSignal(Arc::clone(&error_drops))),
+            ledger,
+            &account,
+            start,
+            |mut parts, _| {
+                parts
+                    .startup
+                    .with_action_execution(dimensions[2], |actions| {
+                        actions.begin_action(1)?;
+                        actions.complete_action()?;
+                        Ok::<_, StoreRuntimeError>(())
+                    })
+                    .unwrap();
+                Ok(())
+            },
+        )
+        .err()
+        .expect("the first actual root remains owned by its original Body error");
+    assert!(original.has_residue());
+    let mut original = Some(original);
+    let capture = Capture(Arc::clone(&error_drops), Arc::clone(&capture_drops));
+    let (ledger, start, _, _) = plans();
+    let mut host =
+        FiniteCanonicalInvocationHost::<TestOwner, TestProgress, TestUnit, (), ()>::new();
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _finish = host.run_bound_body_with(
+            OperationControl::default(),
+            ledger,
+            (&account, None, EntryLineage(Arc::clone(&error_drops))),
+            start,
+            move |_parts, _disposition| {
+                let _capture = &capture;
+                Err(original
+                    .take()
+                    .expect("the actual original error is returned once"))
+            },
+        );
+    }))
+    .expect_err("the original local-entry destructor panic must resume after full cleanup");
+    assert_eq!(
+        panic.downcast_ref::<&'static str>(),
+        Some(&"original entry lineage panic")
+    );
+    assert_eq!(capture_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(error_drops.load(Ordering::SeqCst), 1);
+    assert!(host.store.is_none() && host.pending.is_none());
+    drop((host, original_host));
+    assert_eq!(error_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(capture_drops.load(Ordering::SeqCst), 1);
 }

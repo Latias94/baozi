@@ -439,7 +439,7 @@ pub fn run_finite_scene_edit_body<'host, 'source, O, PP, U, T, Proof, EA, EV, EG
             CanonicalInheritanceSource,
         >,
         FiniteCanonicalDispositionSlot<'call, CK, CT, EK, ET>,
-    ),
+    ) -> Result<(), FiniteStoreExitError<O, PP, U>>,
 ) -> Result<
     FiniteCanonicalBoundInvocationFinish<
         'host,

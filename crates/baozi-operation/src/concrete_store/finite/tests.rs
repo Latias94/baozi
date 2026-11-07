@@ -177,6 +177,7 @@ fn finite_store_root_start_body_terminal_ownership() {
                         })
                         .unwrap();
                     parts.startup.request_unchanged(disposition).unwrap();
+                    Ok(())
                 },
             )
             .unwrap();
@@ -222,6 +223,7 @@ fn finite_body_error_moves_original_domain_and_nonzero_work_after_host_end() {
                     })
                     .unwrap();
                 let _forgotten = std::mem::ManuallyDrop::new(parts.startup);
+                Ok(())
             },
         ) {
             Err(error) => error,
@@ -250,6 +252,182 @@ fn finite_body_error_moves_original_domain_and_nonzero_work_after_host_end() {
         actual.dimension_evidence(dimensions[2]).unwrap().consumed(),
         1
     );
+}
+
+#[test]
+fn finite_returned_body_error_keeps_healthy_original_owner_and_cleans_foreign_host() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Signal(Arc<AtomicUsize>);
+    impl crate::CancellationSignal for Signal {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    impl Drop for Signal {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    for attached_host in [false, true] {
+        let original_factory = test_factory();
+        let original_account = test_account(&original_factory);
+        let original_account_before = original_account.snapshot();
+        let original_control_drops = Arc::new(AtomicUsize::new(0));
+        let (original_error, dimensions, phases) = {
+            let (ledger, start, dimensions, phases) = plans();
+            let mut host = Host::new();
+            let error = host
+                .run_bound_body(
+                    OperationControl::default()
+                        .with_cancellation(Signal(Arc::clone(&original_control_drops))),
+                    ledger,
+                    &original_account,
+                    start,
+                    |mut parts, _| {
+                        parts
+                            .startup
+                            .with_action_execution(dimensions[2], |actions| {
+                                actions.begin_action(1)?;
+                                actions.complete_action()?;
+                                Ok::<_, StoreRuntimeError>(())
+                            })
+                            .unwrap();
+                        Ok(())
+                    },
+                )
+                .err()
+                .expect("unattached work without a request returns the actual owned Body error");
+            assert!(host.body_entered);
+            assert!(host.store.is_none());
+            (error, dimensions, phases)
+        };
+        let FiniteStoreExitCause::Body(cause) = original_error.cause() else {
+            panic!("the original real Host must return a Body error");
+        };
+        assert!(cause.containment().is_none());
+        assert!(original_error.has_residue());
+        let original_cause = format!("{:?}", original_error.cause());
+        let (original_identity, original_work, original_phases) = {
+            let root = original_error.residue.as_ref().unwrap();
+            assert!(root.raw.has_started());
+            assert!(!root.raw.must_retain_domain());
+            assert!(root.startup.is_none());
+            let actual = root.raw.terminal_catalog().unwrap();
+            let work = dimensions.map(|dimension| actual.dimension_evidence(dimension).unwrap());
+            assert_eq!((work[2].attempted(), work[2].consumed()), (1, 1));
+            (
+                actual.identity(),
+                work,
+                phases.map(|phase| actual.phase_evidence(phase).unwrap()),
+            )
+        };
+        assert_eq!(original_account.snapshot(), original_account_before);
+        assert_eq!(original_control_drops.load(Ordering::Relaxed), 0);
+
+        let host_factory = test_factory();
+        let host_account = test_account(&host_factory);
+        let host_control_drops = Arc::new(AtomicUsize::new(0));
+        let (ledger, start, host_dimensions, host_phases) = plans();
+        let mut returned_error = Some(original_error);
+        let error = {
+            let mut host = Host::new();
+            let error = host
+                .run_bound_body(
+                    OperationControl::default()
+                        .with_cancellation(Signal(Arc::clone(&host_control_drops))),
+                    ledger,
+                    &host_account,
+                    start,
+                    move |mut parts, disposition| {
+                        if attached_host {
+                            let mut operation = parts.startup.attach().unwrap();
+                            operation
+                                .with_action_execution(host_dimensions[4], |actions| {
+                                    actions.begin_action(1)?;
+                                    actions.complete_action()?;
+                                    Ok::<_, StoreRuntimeError>(())
+                                })
+                                .unwrap();
+                            let live = operation.physical_storage_snapshot();
+                            assert!(live.live_retained_bytes() > 0);
+                            assert!(live.live_retained_allocations() > 0);
+                            assert!(!live.poisoned());
+                            operation.request_unchanged(disposition).unwrap();
+                        } else {
+                            parts
+                                .startup
+                                .with_action_execution(host_dimensions[4], |actions| {
+                                    actions.begin_action(1)?;
+                                    actions.complete_action()?;
+                                    Ok::<_, StoreRuntimeError>(())
+                                })
+                                .unwrap();
+                        }
+                        Err(returned_error
+                            .take()
+                            .expect("the original error returns once"))
+                    },
+                )
+                .err()
+                .expect("the original error wins over either a missing or installed disposition");
+            assert!(host.body_entered);
+            assert!(host.store.is_none());
+            assert_eq!(host_control_drops.load(Ordering::Relaxed), 1);
+            error
+        };
+
+        assert_eq!(format!("{:?}", error.cause()), original_cause);
+        assert!(error.has_residue());
+        assert!(error.unattached.is_none());
+        assert!(error.terminal.is_none());
+        assert!(error.rejected_domain.is_none());
+        let domain = error.domain().unwrap();
+        for dimension in dimensions {
+            assert!(domain.owns_dimension(dimension));
+        }
+        for phase in phases {
+            assert!(domain.owns_phase(phase));
+        }
+        for dimension in host_dimensions {
+            assert!(!domain.owns_dimension(dimension));
+        }
+        for phase in host_phases {
+            assert!(!domain.owns_phase(phase));
+        }
+        let root = error.residue.as_ref().unwrap();
+        assert!(root.raw.has_started());
+        assert!(!root.raw.must_retain_domain());
+        assert!(root.startup.is_none());
+        let actual = root.raw.terminal_catalog().unwrap();
+        assert_eq!(actual.identity(), original_identity);
+        assert_eq!(
+            dimensions.map(|dimension| actual.dimension_evidence(dimension).unwrap()),
+            original_work
+        );
+        assert_eq!(
+            phases.map(|phase| actual.phase_evidence(phase).unwrap()),
+            original_phases
+        );
+        assert_eq!(original_account.snapshot(), original_account_before);
+        let host_account_after = host_account.snapshot();
+        assert_eq!(host_account_after.live_retained_bytes(), 0);
+        assert_eq!(host_account_after.live_retained_allocations(), 0);
+        assert!(!host_account_after.poisoned());
+        assert_eq!(host_account_after.poison_event_count(), 0);
+        assert!(host_account_after.first_poison_evidence().is_none());
+        assert_eq!(original_control_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(host_control_drops.load(Ordering::Relaxed), 1);
+        drop(error);
+        assert_eq!(original_control_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(host_control_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(original_account.snapshot(), original_account_before);
+        assert_eq!(host_account.snapshot(), host_account_after);
+    }
 }
 
 #[test]
@@ -314,6 +492,7 @@ fn finite_attached_tableless_rails_use_the_production_host() {
                     } else {
                         operation.request_unchanged(disposition).unwrap();
                     }
+                    Ok(())
                 },
             )
             .unwrap();
@@ -971,6 +1150,7 @@ fn finite_body_capture_cancellation_precedes_unchanged_terminal_authority() {
                         })
                         .unwrap();
                     operation.request_unchanged(disposition).unwrap();
+                    Ok(())
                 },
             )
             .unwrap();

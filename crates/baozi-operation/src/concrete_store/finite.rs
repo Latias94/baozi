@@ -284,6 +284,12 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError
         }
     }
 
+    pub(in crate::concrete_store) fn contain_payload_failure(&mut self) {
+        if let Some(root) = self.residue.as_mut() {
+            root.contain_payload_failure();
+        }
+    }
+
     pub(super) fn with_unattached(mut self, failure: StoreUnattachedFailure<O, PP, U>) -> Self {
         self.unattached = Some(failure);
         self

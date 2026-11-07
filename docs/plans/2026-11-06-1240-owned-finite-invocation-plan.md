@@ -18,17 +18,22 @@ and four consuming graph chains are deleted; the bounded runtime/test qualificat
 below records their actual execution and remaining integrated limits.
 Test observation keeps a borrowed classification seam without owner extraction.
 
-The latest integrated attempt is **final20/source126: all seven gates PASS**. It runs
-**3,916 workspace tests** (two slow, six existing manual skips), **196 doctests** and
+The latest integrated attempt is **final21/source129: all seven gates PASS**. It runs
+**3,920 workspace tests** (two slow, six existing manual skips), **196 doctests** and
 **138 asset-consumer tests** (one existing manual scale skip), and passes both strict
 all-target/all-feature Clippy checks and both format checks. All **1,046** before/after/
-current inputs, **155** frozen files and the five recorded user-note identities match.
-This qualifies the central/restoration structural checkpoint. Typed body-error return
-transport, complete finite final authoring/freeze/Core/Postprocess and measured layout,
-allocation and performance acceptance remain open. Release and local-main merge stay
-HOLD. Historical final19/source107 retains its distinct seven-gate result: 3,901 workspace
-tests (three slow, six skips), 191 doctests and 138 consumer tests (one skip), with 1,039
-stable inputs and 148 frozen files; it is not relabeled as source126 evidence.
+current inputs, **155** frozen files and five current recorded user-note identities
+match; no equality to an absent older note baseline is inferred. This qualifies the
+owned body-error transport structural checkpoint. Complete finite final authoring,
+freeze/Core/Postprocess and measured layout/allocation/performance acceptance remain
+open. Release and local-main merge stay HOLD.
+
+Historical final20/source126 independently passes 3,916 workspace tests (two slow,
+six skips), 196 doctests, 138 consumer tests (one manual scale skip), both strict and
+both format checks, with 1,046 stable inputs and 155 frozen files. Historical
+final19/source107 retains its distinct seven-gate result: 3,901 workspace tests
+(three slow, six skips), 191 doctests and 138 consumer tests (one skip), with 1,039
+stable inputs and 148 frozen files. Neither is relabeled as source129 evidence.
 
 The later shared activation-owner slice passes 1,352 Operation tests on source113.
 The body-only finite permission closes the prepared-output escape on source115;
@@ -37,6 +42,24 @@ attach positive example and three E0599 cases. Its independent bounded review cl
 the body authority and callback-invocation assertion findings. Source117 changes one
 private equivalent return alias; strict44 still fails on five unfinished central and
 restoration groups. Those results do not replace frozen107's full qualification.
+
+The owned body-error transport cut passes all seven integrated gates on source129.
+Source127 passes 1,362 Operation tests; strict48 reports only a private type annotation
+and a needless catch/drop around non-Drop admission metadata. Source128 simplifies
+those and strict49 passes; two actual Core finite-adapter tests pass, with 711 other
+Core tests filtered by that targeted command. Source129 adds returned-error/entry-lineage
+and capture/proof/output destructor-fault combinations; all 1,364 Operation tests and
+strict50 pass. Body errors cross the Result callback in their original owned form
+before entry teardown, survive capture/payload disposal, and return without inventing
+a new failure or poisoning an otherwise healthy root. Adversarial source127 and bounded
+source129 delta/focused-execution reviews close GO within their scopes. Full21 is the
+latest complete integrated checkpoint; it grants no native or release credit.
+
+The next final-only failure-authoring proposal adopts both independent P1 amendments:
+original preparation-error/unmatched-decision custody and production quarantine through
+the original prepared-owner account. Its explicit control-preserving result and concrete
+compatibility appendix close design GO. Implementation remains pending; freeze/joint and
+actual Core/Postprocess migration follow that bounded cut.
 
 The central/restoration cut passes all 1,361 Operation tests on source126 and strict47
 passes every Operation target/feature. All 1,046 inputs and 155 frozen source files
