@@ -11,10 +11,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fields: FiniteStoreFinalFields<'inv, O, PP, U>,
-    pub(super) proof: RetainedSuccessClosureProof<StoredBlock, StoredBlock>,
-    pub(super) canonical_root: CanonicalStoreRef<CK, CT>,
-    pub(super) evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
+    pub(in crate::concrete_store::finite) fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+    pub(in crate::concrete_store::finite) proof:
+        RetainedSuccessClosureProof<StoredBlock, StoredBlock>,
+    pub(in crate::concrete_store::finite) canonical_root: CanonicalStoreRef<CK, CT>,
+    pub(in crate::concrete_store::finite) evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
 }
 
 /// Rejected success retains evidence and finite final authority without canonical write access.
@@ -25,12 +26,12 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fields: FiniteStoreFinalFields<'inv, O, PP, U>,
-    pub(super) state: StorePublicationState,
-    pub(super) failure_cause: PreparationFailureCode,
-    pub(super) forced_cause: Option<PreparationFailureCode>,
-    pub(super) evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
-    pub(super) error: Option<StorePrepareError>,
+    pub(in crate::concrete_store::finite) fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+    pub(in crate::concrete_store::finite) state: StorePublicationState,
+    pub(in crate::concrete_store::finite) failure_cause: PreparationFailureCode,
+    pub(in crate::concrete_store::finite) forced_cause: Option<PreparationFailureCode>,
+    pub(in crate::concrete_store::finite) evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
+    pub(in crate::concrete_store::finite) error: Option<StorePrepareError>,
 }
 
 /// An exact evidence proof alongside the original finite terminal fields.
@@ -55,10 +56,10 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fields: FiniteStoreFinalFields<'inv, O, PP, U>,
-    pub(super) cause: PreparationFailureCode,
-    pub(super) provenance: ordinary::StoreSuccessFallbackProvenance,
-    pub(super) error: Option<StorePrepareError>,
+    pub(in crate::concrete_store::finite) fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+    pub(in crate::concrete_store::finite) cause: PreparationFailureCode,
+    pub(in crate::concrete_store::finite) provenance: ordinary::StoreSuccessFallbackProvenance,
+    pub(in crate::concrete_store::finite) error: Option<StorePrepareError>,
 }
 
 impl<'inv, O, PP, U, CK, CT, EK, ET> ValidatedFiniteStoreSuccess<'inv, O, PP, U, CK, CT, EK, ET>
@@ -67,6 +68,24 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn from_bound_fields(
+        fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+        proof: RetainedSuccessClosureProof<StoredBlock, StoredBlock>,
+        canonical_root: CanonicalStoreRef<CK, CT>,
+        evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
+    ) -> Self {
+        Self {
+            fields,
+            proof,
+            canonical_root,
+            evidence_root,
+        }
+    }
+
+    pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
+        self.fields.into_request_error(None)
+    }
+
     /// Runs original terminal classification, control, detach and commit exactly once.
     pub fn try_prepare(
         self,
@@ -136,6 +155,28 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn from_bound_fields(
+        fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+        state: StorePublicationState,
+        failure_cause: PreparationFailureCode,
+        forced_cause: Option<PreparationFailureCode>,
+        evidence_root: OutcomeEvidenceStoreRef<PreservedKind, PreservedTag>,
+        error: Option<StorePrepareError>,
+    ) -> Self {
+        Self {
+            fields,
+            state,
+            failure_cause,
+            forced_cause,
+            evidence_root,
+            error,
+        }
+    }
+
+    pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
+        self.fields.into_request_error(self.error)
+    }
+
     pub(in crate::concrete_store) fn evidence_loan(
         &mut self,
     ) -> Result<ordinary::StoreFailureEvidenceLoan<'_, O, PP, U>, StoreRuntimeError> {
@@ -414,12 +455,30 @@ where
     }
 }
 
-impl<O, PP, U> FiniteStoreFallbackOnly<'_, O, PP, U>
+impl<'inv, O, PP, U> FiniteStoreFallbackOnly<'inv, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn from_bound_fields(
+        fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+        cause: PreparationFailureCode,
+        provenance: ordinary::StoreSuccessFallbackProvenance,
+        error: Option<StorePrepareError>,
+    ) -> Self {
+        Self {
+            fields,
+            cause,
+            provenance,
+            error,
+        }
+    }
+
+    pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
+        self.fields.into_request_error(self.error)
+    }
+
     /// Returns the original retained validation's activation-containment requirement.
     pub fn activation_containment_required(&self) -> bool {
         matches!(
@@ -440,7 +499,7 @@ where
 }
 
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFields<'_, O, PP, U> {
-    pub(super) fn prepare_publication_fallback(
+    pub(in crate::concrete_store) fn prepare_publication_fallback(
         mut self,
         cause: PreparationFailureCode,
         error: Option<StorePrepareError>,

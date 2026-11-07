@@ -150,7 +150,7 @@ where
         Ok(())
     }
 
-    fn validate_writer_keys(
+    pub(in crate::concrete_store) fn validate_writer_keys(
         &self,
         phase: StorePhaseKey,
         dimensions: [StoreDimensionKey; 2],
@@ -169,6 +169,34 @@ where
                 .any(|dimension| !self.raw.contains_dimension(dimension))
         {
             return Err(StoreRuntimeError::InvalidPublicationPlan);
+        }
+        Ok(())
+    }
+
+    pub(in crate::concrete_store) fn validate_activation_phase(
+        &self,
+        phase: StorePhaseKey,
+    ) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_phase(phase) {
+            return Err(StoreRuntimeError::ForeignPhaseDomain { phase });
+        }
+        if !self.raw.contains_phase(phase) {
+            return Err(StoreRuntimeError::InvalidPublicationPlan);
+        }
+        Ok(())
+    }
+
+    pub(in crate::concrete_store) fn validate_activation_dimensions<const N: usize>(
+        &self,
+        dimensions: [StoreDimensionKey; N],
+    ) -> Result<(), StoreRuntimeError> {
+        for dimension in dimensions {
+            if !self.domain.owns_dimension(dimension) {
+                return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+            }
+            if !self.raw.contains_dimension(dimension) {
+                return Err(StoreRuntimeError::InvalidPublicationPlan);
+            }
         }
         Ok(())
     }

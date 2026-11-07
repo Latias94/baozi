@@ -8,8 +8,14 @@ pub struct TerminalStoreLineage {
     _private: (),
 }
 
+impl TerminalStoreLineage {
+    pub(super) const fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
 pub(super) struct DeferredStoreOperation {
-    domain: StoreDomainStamp,
+    pub(super) domain: StoreDomainStamp,
 }
 
 pub(super) struct DeferredUnattachedStore<'account> {
@@ -76,21 +82,21 @@ pub(super) struct DeferredUnrootedStoreFailure {
 }
 
 pub(super) struct DeferredStoreFailure<EvidenceKind, EvidenceTag> {
-    state: StorePublicationState,
-    forced_cause: Option<PreparationFailureCode>,
-    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreDomainStamp,
+    pub(super) state: StorePublicationState,
+    pub(super) forced_cause: Option<PreparationFailureCode>,
+    pub(super) evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    pub(super) domain: StoreDomainStamp,
 }
 
-enum DeferredStoreFallbackState {
+pub(super) enum DeferredStoreFallbackState {
     Assembly { cause: PreparationFailureCode },
     FailureAssembly,
     Validated,
 }
 
 pub(super) struct DeferredStoreFallback {
-    state: DeferredStoreFallbackState,
-    domain: StoreDomainStamp,
+    pub(super) state: DeferredStoreFallbackState,
+    pub(super) domain: StoreDomainStamp,
 }
 
 impl<'inv, O, PP, U, EK, ET> StoreFailureAssembly<'inv, O, PP, U, EK, ET>
@@ -268,7 +274,7 @@ where
         Some(RetainedStoreOperation {
             raw: self.raw.resume_deferred_operation()?,
             domain: StoreDomainLoan::resume(&mut self.domain, pending.domain)?,
-            lineage: TerminalStoreLineage { _private: () },
+            lineage: TerminalStoreLineage::new(),
         })
     }
 

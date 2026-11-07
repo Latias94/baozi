@@ -116,6 +116,16 @@ pub(crate) struct RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
     pub(super) marker: PhantomData<fn() -> (CanonicalBlock, EvidenceBlock)>,
 }
 
+impl<CanonicalBlock, EvidenceBlock> RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
+    pub(crate) const fn canonical_member_count(&self) -> usize {
+        self.canonical_count
+    }
+
+    pub(crate) const fn outcome_evidence_member_count(&self) -> usize {
+        self.evidence_count
+    }
+}
+
 /// Opaque evidence-closure witness whose original fields stay private to retained storage.
 #[must_use = "the closure proof must be consumed by terminal preparation"]
 pub(crate) struct RetainedEvidenceClosureProof<EvidenceBlock> {

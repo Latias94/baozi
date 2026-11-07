@@ -47,6 +47,12 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn try_discard_canonical_after_resolution(
+        &mut self,
+    ) -> Result<(), crate::retained::FinalizationContainmentError> {
+        self.raw.loan_mut().try_discard_canonical_ownership()
+    }
+
     pub(in crate::concrete_store) fn validate_success_decision<CK, CT, EK, ET>(
         &mut self,
         canonical: CanonicalStoreRef<CK, CT>,

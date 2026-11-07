@@ -616,13 +616,20 @@ where
         mut self,
         stage: RetainedDeferredStage<CanonicalBlock, EvidenceBlock>,
     ) {
+        self.stage_prepared_body_deferral(stage);
+        self.operation = None;
+        std::mem::forget(self);
+    }
+
+    fn stage_prepared_body_deferral(
+        &mut self,
+        stage: RetainedDeferredStage<CanonicalBlock, EvidenceBlock>,
+    ) {
         let operation = self
             .operation
             .as_mut()
             .expect("a prepared body deferral retains its operation loan");
         operation.retained.metadata.deferred_stage = Some(stage);
-        self.operation = None;
-        std::mem::forget(self);
     }
 
     pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
@@ -1323,7 +1330,7 @@ where
 
     /// Converts an already-open evidence-only publication into its rooted-failure construction
     /// state without ever creating canonical ownership.
-    fn verify_failure_only(
+    pub(crate) fn verify_failure_only(
         &mut self,
         fallback_cause: PreparationFailureCode,
     ) -> Result<(), FinalizationContainmentError> {
@@ -1339,7 +1346,9 @@ where
         Ok(())
     }
 
-    fn try_discard_canonical_ownership(&mut self) -> Result<(), FinalizationContainmentError> {
+    pub(crate) fn try_discard_canonical_ownership(
+        &mut self,
+    ) -> Result<(), FinalizationContainmentError> {
         if self.fields.mode == RetainedOutcomeMode::FailureOnly
             && self.canonical_ownership_is_absent()
         {
@@ -4097,14 +4106,6 @@ where
         }
     }
 
-    pub(crate) const fn canonical_member_count(&self) -> usize {
-        self.proof.canonical_count
-    }
-
-    pub(crate) const fn outcome_evidence_member_count(&self) -> usize {
-        self.proof.evidence_count
-    }
-
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
     }
@@ -4354,20 +4355,8 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    pub(crate) fn try_discard_canonical_for_rejection(
-        mut self,
-    ) -> Result<Self, FinalizationContainmentError> {
-        self.assembly.loan.try_discard_canonical_ownership()?;
-        Ok(self)
-    }
-
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
-    }
-
-    pub(crate) fn canonical_ownership_is_absent(&self) -> bool {
-        self.assembly.loan.fields.mode == RetainedOutcomeMode::FailureOnly
-            && self.assembly.loan.canonical_ownership_is_absent()
     }
 
     pub fn outcome_evidence_len(&self) -> usize {
@@ -4437,10 +4426,6 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    pub(crate) const fn outcome_evidence_member_count(&self) -> usize {
-        self.proof.evidence_count
-    }
-
     pub(crate) fn outcome_evidence_commitment_len(&self) -> usize {
         self.assembly.loan.outcome_evidence_commitment_len()
     }

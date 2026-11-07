@@ -11,9 +11,11 @@ use crate::concrete_store::{StoreInvocationRoot, StoreRuntimeError};
 mod body;
 pub(in crate::concrete_store) mod finite;
 pub use finite::{
-    FiniteCanonicalBoundBodyParts, FiniteCanonicalBoundBodyStart,
+    FiniteCanonicalBodyOperation, FiniteCanonicalBoundBodyParts, FiniteCanonicalBoundBodyStart,
     FiniteCanonicalBoundInvocationFinish, FiniteCanonicalDispositionSlot,
-    FiniteCanonicalInvocationHost, FiniteCanonicalOperationPublication,
+    FiniteCanonicalInvocationCompletion, FiniteCanonicalInvocationHost,
+    FiniteCanonicalInvocationOutcome, FiniteCanonicalOperationCompletion,
+    FiniteCanonicalOperationPublication,
 };
 pub(super) mod driver;
 mod requests;

@@ -32,6 +32,31 @@ pub(super) struct PayloadLoan<'inv, T> {
     identity: *const (),
 }
 
+/// Keeps an in-flight permission under caught cleanup before its concrete owner is rebound.
+pub(super) struct PayloadValue<T> {
+    pub(super) value: Option<T>,
+}
+
+impl<T> PayloadValue<T> {
+    pub(super) fn new(value: T) -> Self {
+        Self { value: Some(value) }
+    }
+
+    pub(super) fn take(&mut self) -> Option<T> {
+        self.value.take()
+    }
+
+    pub(super) fn dispose(&mut self) -> Result<(), ()> {
+        drop_scoped_value(self.value.take())
+    }
+}
+
+impl<T> Drop for PayloadValue<T> {
+    fn drop(&mut self) {
+        let _ = self.dispose();
+    }
+}
+
 impl<'inv, T> PayloadLoan<'inv, T> {
     pub(super) const fn new(
         value: &'inv mut Option<T>,
@@ -212,6 +237,42 @@ where
     }
 }
 
+impl<O, PP, U, L> PayloadStorage
+    for crate::concrete_store::finite::FiniteRetainedStoreOperation<'_, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.contain_activation_fault();
+    }
+}
+
+impl<O, PP, U, L> PayloadStorage
+    for crate::concrete_store::finite::FiniteRetainedStorePublicationAssembly<'_, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.contain_activation_fault();
+    }
+}
+
+impl<O, PP, U> PayloadStorage
+    for crate::concrete_store::finite::FiniteUnrootedStoreFailure<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.contain_activation_fault();
+    }
+}
+
 impl<'inv, O, PP, U> PayloadStorage for RawStoreFailureAssembly<'inv, O, PP, U>
 where
     O: OperationOwner,
@@ -289,5 +350,41 @@ where
 {
     fn contain_payload_failure(self) {
         let _ = self.contain_activation_fault();
+    }
+}
+
+impl<O, PP, U, CK, CT, EK, ET> PayloadStorage
+    for crate::concrete_store::finite::ValidatedFiniteStoreSuccess<'_, O, PP, U, CK, CT, EK, ET>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
+    }
+}
+
+impl<O, PP, U, EK, ET> PayloadStorage
+    for crate::concrete_store::finite::FiniteStoreFailureAssembly<'_, O, PP, U, EK, ET>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
+    }
+}
+
+impl<O, PP, U> PayloadStorage
+    for crate::concrete_store::finite::FiniteStoreFallbackOnly<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
     }
 }

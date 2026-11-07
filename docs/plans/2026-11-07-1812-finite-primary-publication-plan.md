@@ -1,14 +1,25 @@
 # Finite primary publication through the shared activation and freeze kernels
 
-Status: bounded implementation contract reviewed GO, including the private normalizer signature below. This is not runtime acceptance. The active convergence goal and release HOLD remain unchanged. Builds stay in the existing repository `target`, Rust 1.95, jobs1 and nextest threads1. No publication, push, native promotion or benchmark-boundary change.
+Status: implementation in progress; the bounded contract is reviewed GO, including the private normalizer signature below. The complete finite primary consumer remains unaccepted. The active convergence goal and release HOLD remain unchanged. Builds stay in the existing repository `target`, Rust 1.95, jobs1 and nextest threads1. No publication, push, native promotion or benchmark-boundary change.
 
 ## Problem and result
 
-Finite ownership now exists for start/body/unattached/EvidenceOnly/MinimalFallback, but finite primary success, rich failure, frozen joint output and the actual Core changed consumer remain absent. Postprocess consequently still owns dynamic numerical evidence and eleven copied resource counters. The dynamic driver now uses actual-field short permissions and external original final fields; the missing finite path should bind its own concrete owners to that same algorithm.
+Finite ownership now covers start/body/unattached/EvidenceOnly/MinimalFallback, ordinary success/failure/fallback envelopes, scoped activation, shared central validation, and typed disposition/restoration after capture cleanup. Complete final-only finite authoring, frozen joint output and the actual Core changed consumer remain absent. Typed body-error return transport is the next reviewed interface cut. Postprocess still owns dynamic numerical evidence and eleven copied resource counters; its actual finite consumer must use the same borrowed kernels and its own concrete owners.
 
 The complete cut produces actual finite Store/Host primary and failure continuations, using fixed facts and original root/domain/error residue. It connects Core's existing finite Scene entry to the real central validation, generation, freeze, invariant joint binding and handoff. Only then migrate both Postprocess entries and remove its duplicated resource state. Partial classifiers, test-only calls or warning suppression do not satisfy this result.
 
 ## Baseline and execution boundary
+
+Source126 passes all 1,361 Operation tests and all-target/all-feature strict47 with
+1,046 stable inputs and 155 matching frozen files. Full20 has passed 3,916 workspace
+tests (two slow, six existing manual skips), 196 doctests, workspace strict Clippy and
+138 asset-consumer tests (one existing manual scale skip), consumer strict Clippy and
+both format gates. All seven gates pass with 1,046 stable inputs, 155 matching frozen
+files and five unchanged user notes. This is a structural checkpoint; the complete
+finite primary consumer and native convergence are not yet accepted.
+Independent reviews close the shared central cause-latch fix, exact finite deferred
+stage/error ownership, body authority, and post-payload Host containment fix. Existing
+source98/source107 checkpoints below remain historical, not substitutes for this run.
 
 Source96 Operation: 1,336 PASS, zero skips, with independently closed poison-aware containment repair. Source98 removes redundant pending metadata and private style issues; bounded independent review finds the five-file cleanup equivalent. Strict34 still fails on the two unfinished finite classifiers; it is not all-target GO.
 
@@ -70,8 +81,8 @@ The outer finite guard owns every unresolved exit. Selected Host payload permiss
 
 1. Extract proof binding and freeze orchestration; keep dynamic actual consumers on the unique kernels and remove retired bodies.
 2. Extract the Store normalizer with the branch table above; run existing dynamic invalid-dimension, forced/recoverable/unverified, cancellation, poison, capture and freeze consumers.
-3. Add finite validated/failure/fallback and freeze permit/contribution envelopes over original final fields. Bind original opened fields and closure decisions before effects; transfer owned failure residue on every normal error.
-4. Reuse the shared short runner with a concrete finite outer guard and original finite Host payload slots; add actual finite disposition/resume and final-only authority for every branch.
+3. Finite validated/failure/fallback envelopes now bind original fields and closure decisions; add the remaining freeze permit/contribution envelopes and preserve owned failure residue on every normal error.
+4. Shared scoped activation and central validation now use concrete finite outer guards, original Host payload slots and actual typed disposition/resume. Complete the reviewed owned body-error transport and remaining final-only authoring authority for every branch.
 5. Connect Core's actual finite changed-success/rich/frozen/joint consumer and original physical handoff helper. Keep general dynamic Import concrete and unchanged in storage selection.
 6. Migrate both Postprocess entry paths and all success/failure/unchanged exits. Project public resources from one finite facts owner; delete the eleven cached counters and old dynamic evidence retained for getters.
 7. Simplify/remove obsolete adapters, then qualify affected and all seven integrated gates. Measure concrete layouts, allocation behavior and separate attribution before unchanged ordinary Windows/GNU and heap campaigns. Keep every failure and unfavorable sign; no structural performance inference.

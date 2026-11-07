@@ -235,6 +235,10 @@ where
 }
 
 impl StoreActivationContainment {
+    pub(in crate::concrete_store) const fn from_cause(cause: FinalizationContainmentError) -> Self {
+        Self { cause }
+    }
+
     pub const fn cause(self) -> FinalizationContainmentError {
         self.cause
     }

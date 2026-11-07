@@ -347,6 +347,257 @@ where
     }
 }
 
+impl<O, P, PP, U, D, F, CB, EB> FiniteInvocationRootFields<'_, O, P, PP, U, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+    CB: Send + Sync + 'static,
+    EB: Send + Sync + 'static,
+{
+    fn deferred_fields_are_available(&mut self) -> bool {
+        if *self.contained || self.terminal.is_some() {
+            return false;
+        }
+        let Some(operation) = self.loan() else {
+            return false;
+        };
+        operation.retained.has_deferred_storage()
+            && !operation.retained.metadata.failure_work_permit_outstanding
+            && !operation.retained.metadata.ordinary_work_permit_outstanding
+            && !operation.common.terminal_is_outstanding()
+            && operation
+                .retained
+                .baseline
+                .first_account()
+                .is_some_and(|account| !account.snapshot().poisoned())
+    }
+
+    fn defer_assembly_stage(
+        &mut self,
+        stage: RetainedDeferredStage<CB, EB>,
+    ) -> Result<(), RetainedDeferredStage<CB, EB>> {
+        if !self.deferred_fields_are_available() {
+            return Err(stage);
+        }
+        let Some(raw) = self.assembly_loan() else {
+            return Err(stage);
+        };
+        let mut assembly = super::super::RetainedPublicationAssemblyBorrow::from_loan(raw);
+        if !assembly.loan().has_exact_storage_graph() {
+            return Err(stage);
+        }
+        if let RetainedDeferredStage::Success { proof } = &stage
+            && !assembly.loan().success_proof_is_current(proof)
+        {
+            return Err(stage);
+        }
+        match assembly.loan_mut().prepare_body_deferral() {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                if matches!(&stage, RetainedDeferredStage::Success { .. })
+                    && let Some(operation) = assembly.loan_mut().operation.as_mut()
+                {
+                    operation.record_ledger_failure();
+                }
+                return Err(stage);
+            }
+            None => return Err(stage),
+        }
+        assembly.loan_mut().stage_prepared_body_deferral(stage);
+        Ok(())
+    }
+
+    pub(crate) fn defer_operation_until_body_cleanup(&mut self) -> bool {
+        if self.assembly.is_some() || !self.deferred_fields_are_available() {
+            return false;
+        }
+        self.loan()
+            .is_some_and(|operation| operation.defer_until_body_cleanup().is_ok())
+    }
+
+    pub(crate) fn defer_assembly_until_body_cleanup(&mut self) -> bool {
+        self.defer_assembly_stage(RetainedDeferredStage::Assembly)
+            .is_ok()
+    }
+
+    pub(crate) fn defer_failure_until_body_cleanup(
+        &mut self,
+        fallback_cause: PreparationFailureCode,
+    ) -> bool {
+        self.defer_assembly_stage(RetainedDeferredStage::Failure { fallback_cause })
+            .is_ok()
+    }
+
+    pub(crate) fn defer_success_until_body_cleanup(
+        &mut self,
+        proof: super::super::RetainedSuccessClosureProof<CB, EB>,
+    ) -> Result<(), super::super::RetainedSuccessClosureProof<CB, EB>> {
+        match self.defer_assembly_stage(RetainedDeferredStage::Success { proof }) {
+            Ok(()) => Ok(()),
+            Err(RetainedDeferredStage::Success { proof }) => Err(proof),
+            Err(_) => unreachable!("success staging returns its original uninstalled proof"),
+        }
+    }
+
+    pub(crate) fn defer_fallback_until_body_cleanup(
+        &mut self,
+        cause: PreparationFailureCode,
+        activation_containment_required: bool,
+    ) -> bool {
+        self.defer_assembly_stage(RetainedDeferredStage::Fallback {
+            cause,
+            activation_containment_required,
+        })
+        .is_ok()
+    }
+
+    fn deferred_assembly_is_available(&mut self) -> bool {
+        if !self.deferred_fields_are_available() {
+            return false;
+        }
+        let Some(raw) = self.assembly_loan() else {
+            return false;
+        };
+        let assembly = super::super::RetainedPublicationAssemblyBorrow::from_loan(raw);
+        let loan = assembly.loan();
+        let Some(operation) = loan.operation.as_ref() else {
+            return false;
+        };
+        loan.fields.has_deferred_storage()
+            && loan.has_exact_storage_graph()
+            && operation.common.as_read().ordinary_work_is_sealed()
+            && loan
+                .fields
+                .account
+                .as_ref()
+                .zip(operation.retained.baseline.first_account())
+                .is_some_and(|(account, baseline)| account.is_same_account(baseline))
+            && match operation.retained.metadata.deferred_stage.as_ref() {
+                Some(RetainedDeferredStage::Success { proof }) => {
+                    loan.success_proof_is_current(proof)
+                }
+                Some(_) => true,
+                None => false,
+            }
+    }
+
+    pub(crate) fn resume_deferred_operation(&mut self) -> bool {
+        if self.assembly.is_some() || !self.deferred_fields_are_available() {
+            return false;
+        }
+        let Some(operation) = self.loan() else {
+            return false;
+        };
+        if !operation.common.as_read().ordinary_work_is_sealed()
+            || !matches!(
+                operation.retained.metadata.deferred_stage,
+                Some(RetainedDeferredStage::Operation)
+            )
+        {
+            return false;
+        }
+        operation.retained.metadata.deferred_stage = Some(RetainedDeferredStage::TerminalOperation);
+        true
+    }
+
+    pub(crate) fn resume_deferred_assembly(&mut self) -> bool {
+        if !self.deferred_assembly_is_available() {
+            return false;
+        }
+        let Some(retained) = self.retained.as_mut() else {
+            return false;
+        };
+        if !matches!(
+            retained.metadata.deferred_stage,
+            Some(RetainedDeferredStage::Assembly)
+        ) {
+            return false;
+        }
+        retained.metadata.deferred_stage = None;
+        true
+    }
+
+    pub(crate) fn resume_deferred_failure(&mut self) -> Option<PreparationFailureCode> {
+        if !self.deferred_assembly_is_available() {
+            return None;
+        }
+        let retained = self.retained.as_mut()?;
+        let Some(RetainedDeferredStage::Failure { fallback_cause }) =
+            retained.metadata.deferred_stage.as_ref()
+        else {
+            return None;
+        };
+        let fallback_cause = *fallback_cause;
+        retained.metadata.deferred_stage = None;
+        Some(fallback_cause)
+    }
+
+    pub(crate) fn resume_deferred_success(
+        &mut self,
+    ) -> Option<super::super::RetainedSuccessClosureProof<CB, EB>> {
+        if !self.deferred_assembly_is_available() {
+            return None;
+        }
+        let retained = self.retained.as_mut()?;
+        if !matches!(
+            retained.metadata.deferred_stage,
+            Some(RetainedDeferredStage::Success { .. })
+        ) {
+            return None;
+        }
+        match retained.metadata.deferred_stage.take()? {
+            RetainedDeferredStage::Success { proof } => Some(proof),
+            _ => unreachable!("the checked success stage remains installed until restoration"),
+        }
+    }
+
+    pub(crate) fn resume_deferred_fallback(&mut self) -> Option<(PreparationFailureCode, bool)> {
+        if !self.deferred_assembly_is_available() {
+            return None;
+        }
+        let retained = self.retained.as_mut()?;
+        let Some(RetainedDeferredStage::Fallback {
+            cause,
+            activation_containment_required,
+        }) = retained.metadata.deferred_stage.as_ref()
+        else {
+            return None;
+        };
+        let fallback = (*cause, *activation_containment_required);
+        retained.metadata.deferred_stage = None;
+        Some(fallback)
+    }
+
+    pub(crate) fn contain_deferred_fault(&mut self) -> Option<FinalizationContainmentError> {
+        if let Some(raw) = self.assembly_loan() {
+            let mut assembly = super::super::RetainedPublicationAssemblyBorrow::from_loan(raw);
+            if assembly.loan().first_containment_account().is_some() {
+                return Some(assembly.loan_mut().contain_activation_fault());
+            }
+        }
+        if let Some(operation) = self
+            .loan()
+            .filter(|operation| operation.retained.baseline.first_account().is_some())
+        {
+            return Some(operation.contain_activation_fault());
+        }
+        let account = self.terminal.as_ref()?.graph.account.as_ref()?;
+        let reason = account
+            .snapshot()
+            .first_poison_evidence()
+            .map_or(AccountPoisonReason::OwnershipGraphUnverified, |evidence| {
+                evidence.reason()
+            });
+        let poisoned = account.record_poison(reason);
+        *self.contained = true;
+        Some(FinalizationContainmentError::new(poisoned, reason))
+    }
+}
+
 pub(crate) struct FinitePendingRetainedAttachment<'inv, 'account, O, P, PP, U, D, F, CB, EB>
 where
     O: OperationOwner,

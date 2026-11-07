@@ -18,13 +18,44 @@ and four consuming graph chains are deleted; the bounded runtime/test qualificat
 below records their actual execution and remaining integrated limits.
 Test observation keeps a borrowed classification seam without owner extraction.
 
-The latest integrated attempt is final19/source107: all seven gates PASS, including
-**3,901 workspace tests** (three slow, six existing manual skips), **191 doctests**,
-**138 asset-consumer tests** (one existing manual scale skip), both strict all-target/
-all-feature Clippy checks and both format checks. All 1,039 before/after inputs, 148
-frozen files and five recorded user-note identities match. This qualifies the current
-structural checkpoint; actual finite Host/Core/frozen/Postprocess and performance
-acceptance remain incomplete. The release and local-main merge remain HOLD.
+The latest integrated attempt is **final20/source126: all seven gates PASS**. It runs
+**3,916 workspace tests** (two slow, six existing manual skips), **196 doctests** and
+**138 asset-consumer tests** (one existing manual scale skip), and passes both strict
+all-target/all-feature Clippy checks and both format checks. All **1,046** before/after/
+current inputs, **155** frozen files and the five recorded user-note identities match.
+This qualifies the central/restoration structural checkpoint. Typed body-error return
+transport, complete finite final authoring/freeze/Core/Postprocess and measured layout,
+allocation and performance acceptance remain open. Release and local-main merge stay
+HOLD. Historical final19/source107 retains its distinct seven-gate result: 3,901 workspace
+tests (three slow, six skips), 191 doctests and 138 consumer tests (one skip), with 1,039
+stable inputs and 148 frozen files; it is not relabeled as source126 evidence.
+
+The later shared activation-owner slice passes 1,352 Operation tests on source113.
+The body-only finite permission closes the prepared-output escape on source115;
+source116 passes 1,353 Operation tests and 135 Operation doctests, including the actual
+attach positive example and three E0599 cases. Its independent bounded review closes
+the body authority and callback-invocation assertion findings. Source117 changes one
+private equivalent return alias; strict44 still fails on five unfinished central and
+restoration groups. Those results do not replace frozen107's full qualification.
+
+The central/restoration cut passes all 1,361 Operation tests on source126 and strict47
+passes every Operation target/feature. All 1,046 inputs and 155 frozen source files
+match. Final20 passes the original seven integrated gates as recorded above. Independent source review found the missing original
+terminal-cause latch during forced rejection; both effects are restored and a real
+semantic-false/Accept -> later rich-failure panic regression passes. New staged-Candidate
+fault tests also exposed missing finite Host containment after body/capture/payload
+cleanup. Source126 adds the original-root containment only after every disposal catch,
+including first-panic preservation and original-lineage/owned-error tests. The source125
+failure is retained; all its original assertions pass on126.
+
+This cut shares central evidence/validation/normalization once, keeps the actual input
+output under a concrete Option guard before callbacks, and restores exact finite stages
+with owned errors without revalidation or replayed discard/control. Retired central/count/
+discard forwarding chains and unused finite facades are deleted. The initial118 missing
+module path,119/124 new-fixture compilation errors,120/121 fixture failures and122/123
+strict-style failures remain recorded separately. Complete typed body-error transport,
+final authoring/freeze, Core/Postprocess, layout/allocation and native convergence remain
+open; no performance, local-main merge or release acceptance follows from scoped QA.
 
 Historical final18/source104 records **3,898 workspace tests**
 (two slow, six existing manual skips) and **191 doctests** pass. Strict workspace

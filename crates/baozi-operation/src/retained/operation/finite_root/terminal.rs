@@ -130,6 +130,10 @@ where
         }
     }
 
+    pub(crate) fn has_original_unopened_fields(&mut self) -> bool {
+        self.original_publication_identity().is_some() && self.assembly.is_none()
+    }
+
     pub(crate) fn bind_publication_failure(
         &mut self,
         failure: RetainedPublicationBorrowFailure<D>,

@@ -1,6 +1,17 @@
 //! The finite host keeps its concrete store and every original payload Option until exit.
 
+#[cfg(test)]
+mod activation_tests;
+mod completion;
+pub use completion::{
+    FiniteCanonicalInvocationCompletion, FiniteCanonicalInvocationOutcome,
+    FiniteCanonicalOperationCompletion,
+};
+
 use super::super::payload_owner::drop_captured_value;
+use super::super::{
+    CanonicalActivationSessionPolicy, CanonicalFailureRequirements, FiniteSessionOutcomeOwner,
+};
 use super::*;
 use crate::concrete_store::finite::{
     FiniteBoundStoreOperation, FiniteStoreExitCause, FiniteStoreExitError,
@@ -10,17 +21,22 @@ use crate::concrete_store::{
     CanonicalInheritanceSource, FiniteRetainedStoreOperation, FiniteRetainedStoreStartPlan,
     FiniteStoreFacts, FiniteStoreLedgerPlan, FreshStoreLineage,
     PreparedFiniteStoreEvidenceOnlyOutcome, PreparedFiniteStoreFallback, PublishedCanonicalStore,
-    RetainedStoreStartError, StoreActionExecution, StoreDimensionKey, StoreInvocation,
-    StoreInvocationError,
+    RetainedStoreReservation, RetainedStoreStartError, StoreActionExecution, StoreDimensionKey,
+    StoreInvocation, StoreInvocationError,
 };
 use crate::retained::operation::finite_root::{
     FiniteDeferredUnattachedBinding, FiniteEntryAdmission,
 };
-use crate::{FinalProgress, OperationControl, PhysicalStorageAccount};
+use crate::{
+    FinalProgress, OperationControl, PhysicalStorageAccount, RetainedStoreBatchLimits,
+    StorePhaseKey,
+};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 type RootTypeMarker<CK, CT, EK, ET> = PhantomData<fn() -> (CK, CT, EK, ET)>;
+type FiniteBodySessionResult<'inv, O, PP, U, L> =
+    Result<FiniteSessionOutcomeOwner<'inv, O, PP, U, L>, FiniteStoreExitError<O, PP, U>>;
 type FiniteHostLoan<'host, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> =
     &'host mut FiniteCanonicalInvocationHost<O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>;
 type BoundFinishResult<'host, 'account, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET> = Result<
@@ -48,10 +64,16 @@ type FiniteBodySource<'account, L> = (
     L,
 );
 
-pub(in crate::concrete_store) enum FiniteDisposition {
+pub(in crate::concrete_store::activation) enum FiniteDisposition<CK, CT, EK, ET> {
     Unattached(FiniteDeferredUnattachedBinding),
     EvidenceOnly,
     Minimal { code: u32 },
+    Candidate(driver::PendingCandidate<CK, CT, EK, ET>),
+    NeverActivated(driver::PendingNeverActivated),
+    Rejected(driver::PendingRejected),
+    CentralRejected(driver::PendingRootedFailure<EK, ET>),
+    Interrupted(driver::PendingRootedFailure<EK, ET>),
+    Fallback(crate::concrete_store::deferred::DeferredStoreFallback),
 }
 
 /// Concrete fixed invocation owner; a spent host never installs another startup root.
@@ -83,7 +105,7 @@ pub struct FiniteCanonicalInvocationHost<
     pub(in crate::concrete_store) central_fallback: Option<StoreRuntimeError>,
     pub(in crate::concrete_store) output: Option<T>,
     pub(in crate::concrete_store) proof: Option<Proof>,
-    pub(in crate::concrete_store) pending: Option<FiniteDisposition>,
+    pub(in crate::concrete_store::activation) pending: Option<FiniteDisposition<CK, CT, EK, ET>>,
     _root_types: RootTypeMarker<CK, CT, EK, ET>,
     pub(in crate::concrete_store) body_entered: bool,
     pub(in crate::concrete_store::activation) order: Cell<PayloadOrder>,
@@ -122,16 +144,27 @@ where
 }
 
 pub struct FiniteCanonicalDispositionSlot<'call, CK, CT, EK, ET> {
-    value: &'call mut Option<FiniteDisposition>,
+    value: &'call mut Option<FiniteDisposition<CK, CT, EK, ET>>,
     identity: *const (),
     _root_types: RootTypeMarker<CK, CT, EK, ET>,
 }
 
 impl<CK, CT, EK, ET> FiniteCanonicalDispositionSlot<'_, CK, CT, EK, ET> {
-    fn install(
+    pub(in crate::concrete_store::activation) fn is_vacant_for(&self, identity: *const ()) -> bool {
+        self.identity == identity && self.value.is_none()
+    }
+
+    pub(in crate::concrete_store::activation) fn install_pending(
+        self,
+        disposition: FiniteDisposition<CK, CT, EK, ET>,
+    ) {
+        *self.value = Some(disposition);
+    }
+
+    pub(in crate::concrete_store::activation) fn install(
         self,
         identity: *const (),
-        disposition: FiniteDisposition,
+        disposition: FiniteDisposition<CK, CT, EK, ET>,
     ) -> Result<(), StoreRuntimeError> {
         if self.identity != identity || self.value.is_some() {
             return Err(StoreRuntimeError::OwnershipUnverified);
@@ -170,13 +203,14 @@ where
 
     pub fn attach(
         self,
-    ) -> Result<FiniteRetainedStoreOperation<'call, O, PP, U, L>, RetainedStoreStartError> {
+    ) -> Result<FiniteCanonicalBodyOperation<'call, O, PP, U, L>, RetainedStoreStartError> {
         self.entry
             .take()
             .ok_or(RetainedStoreStartError::Runtime(
                 StoreRuntimeError::FallbackOnly,
             ))?
             .attach()
+            .map(|operation| FiniteCanonicalBodyOperation { operation })
     }
 
     pub fn request_unchanged<CK, CT, EK, ET>(
@@ -209,18 +243,147 @@ where
     }
 }
 
-impl<'inv, O, PP, U, L> FiniteRetainedStoreOperation<'inv, O, PP, U, L>
+/// The original finite operation with only bounded body capabilities.
+///
+/// Final preparation belongs to the outer host after the body and its captures are disposed.
+/// The actual finite startup permission attaches this body operation:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     FiniteCanonicalBodyOperation, FiniteCanonicalBoundBodyStart,
+///     FiniteCanonicalDispositionSlot,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
+/// fn request<'call, 'entry, 'account, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     start: FiniteCanonicalBoundBodyStart<'call, 'entry, 'account, O, P, U>,
+///     disposition: FiniteCanonicalDispositionSlot<'call, (), (), (), ()>,
+/// ) -> Result<(), StoreRuntimeError> {
+///     let operation: FiniteCanonicalBodyOperation<'call, O, P, U> = start.attach().unwrap();
+///     operation.request_unchanged(disposition)
+/// }
+/// ```
+///
+/// Attaching inside the body cannot open publication assembly:
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteCanonicalBoundBodyStart;
+/// use baozi_operation::__retained_store_integration::authority::RetainedStorePublicationPlan;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<'call, 'entry, 'account, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     start: FiniteCanonicalBoundBodyStart<'call, 'entry, 'account, O, P, U>,
+///     plan: RetainedStorePublicationPlan,
+/// ) {
+///     let operation = start.attach().unwrap();
+///     let _ = operation.try_publication_assembly(plan);
+/// }
+/// ```
+///
+/// Nor can it prepare an evidence-only success or minimal fallback:
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteCanonicalBoundBodyStart;
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<'call, 'entry, 'account, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     start: FiniteCanonicalBoundBodyStart<'call, 'entry, 'account, O, P, U>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     let operation = start.attach().unwrap();
+///     let _ = operation.prepare_evidence_only_success(progress);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteCanonicalBoundBodyStart;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<'call, 'entry, 'account, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     start: FiniteCanonicalBoundBodyStart<'call, 'entry, 'account, O, P, U>,
+/// ) {
+///     let operation = start.attach().unwrap();
+///     let _ = operation.prepare_minimal_fallback(1);
+/// }
+/// ```
+#[must_use = "body execution must request a disposition or leave cleanup to its armed host"]
+pub struct FiniteCanonicalBodyOperation<'inv, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    operation: FiniteRetainedStoreOperation<'inv, O, PP, U, L>,
+}
+
+impl<'inv, O, PP, U, L> FiniteCanonicalBodyOperation<'inv, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub fn with_exclusive_execution<R, E: From<StoreInvocationError>>(
+        &mut self,
+        body: impl for<'op> FnOnce(&mut StoreInvocation<'op, O, PP, U>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.operation.with_exclusive_execution(body)
+    }
+
+    pub fn with_action_execution<R, E: From<StoreRuntimeError>>(
+        &mut self,
+        dimension: StoreDimensionKey,
+        body: impl for<'op> FnOnce(&mut StoreActionExecution<'op, O, PP, U>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.operation.with_action_execution(dimension, body)
+    }
+
+    pub fn reserve_retained_storage(
+        &mut self,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+        allocations: u64,
+    ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
+        self.operation
+            .reserve_retained_storage(phase, dimension, bytes, allocations)
+    }
+
+    pub fn try_complete_phase(&mut self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        self.operation.try_complete_phase(phase)
+    }
+
+    pub fn physical_storage_snapshot(&mut self) -> crate::PhysicalStorageAccountSnapshot {
+        self.operation.physical_storage_snapshot()
+    }
+
+    pub fn qualify_failure_validation_work(
+        &mut self,
+        ordinary_work_dimension: StoreDimensionKey,
+        max_evidence_members: usize,
+        validation_work_limit: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.operation.qualify_failure_validation_work(
+            ordinary_work_dimension,
+            max_evidence_members,
+            validation_work_limit,
+        )
+    }
+
+    pub fn into_session_outcome_owner(
+        self,
+        policy: CanonicalActivationSessionPolicy,
+        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+        failure_requirements: CanonicalFailureRequirements,
+    ) -> FiniteBodySessionResult<'inv, O, PP, U, L> {
+        self.operation.into_session_outcome_owner(
+            policy,
+            outcome_evidence_writer_limits,
+            failure_requirements,
+        )
+    }
+
     pub fn request_unchanged<CK, CT, EK, ET>(
         mut self,
         disposition: FiniteCanonicalDispositionSlot<'inv, CK, CT, EK, ET>,
     ) -> Result<(), StoreRuntimeError> {
-        let identity = self.invocation_identity();
-        self.defer_body(None)?;
+        let identity = self.operation.invocation_identity();
+        self.operation.defer_body(None)?;
         disposition.install(identity, FiniteDisposition::EvidenceOnly)
     }
 
@@ -229,8 +392,9 @@ where
         disposition: FiniteCanonicalDispositionSlot<'inv, CK, CT, EK, ET>,
         code: u32,
     ) -> Result<(), StoreRuntimeError> {
-        let identity = self.invocation_identity();
-        self.defer_body(Some(crate::retained::PreparationFailureCode::domain(code)))?;
+        let identity = self.operation.invocation_identity();
+        self.operation
+            .defer_body(Some(crate::retained::PreparationFailureCode::domain(code)))?;
         disposition.install(identity, FiniteDisposition::Minimal { code })
     }
 }
@@ -441,6 +605,7 @@ where
         }
         if body_panic.is_some() || capture_panic.is_some() {
             let cleanup_panic = self.clear_owned_values();
+            self.contain_payload_failure();
             // Retire every actual root only after all callback and payload disposal catches.
             drop(self.store.take());
             resume_first([body_panic, capture_panic, cleanup_panic]);
@@ -463,6 +628,7 @@ where
         }
         if !admitted || !self.has_valid_disposition() {
             let panic = self.clear_owned_values();
+            self.contain_payload_failure();
             let cause = FiniteStoreExitCause::Body(
                 driver::CanonicalInvocationBodyError::invalid_disposition(),
             );
@@ -480,7 +646,7 @@ where
     }
 
     fn has_valid_disposition(&self) -> bool {
-        match self.pending {
+        match self.pending.as_ref() {
             Some(
                 FiniteDisposition::Unattached(_)
                 | FiniteDisposition::EvidenceOnly
@@ -494,6 +660,12 @@ where
                     && self.interrupted.is_none()
                     && self.central_fallback.is_none()
             }
+            Some(FiniteDisposition::Candidate(_)) => self.output.is_some() && self.proof.is_some(),
+            Some(FiniteDisposition::NeverActivated(_)) => self.never.is_some(),
+            Some(FiniteDisposition::Rejected(_)) => self.activation_rejected.is_some(),
+            Some(FiniteDisposition::CentralRejected(_)) => self.validation_rejected.is_some(),
+            Some(FiniteDisposition::Interrupted(_)) => self.interrupted.is_some(),
+            Some(FiniteDisposition::Fallback(_)) => self.central_fallback.is_some(),
             None => false,
         }
     }
@@ -501,6 +673,12 @@ where
     pub(in crate::concrete_store) fn record_payload_failure(&mut self) {
         if let Some(store) = &mut self.store {
             store.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+        }
+    }
+
+    fn contain_payload_failure(&mut self) {
+        if let Some(store) = self.store.as_mut() {
+            store.contain_payload_failure();
         }
     }
 
@@ -518,29 +696,62 @@ where
         &mut self,
     ) -> Option<Box<dyn std::any::Any + Send>> {
         self.pending = None;
-        self.central_fallback = None;
-        self.failure_fallback = None;
-        self.interrupted = None;
-        self.freeze_interrupted = None;
-        let mut first = None;
         let store = &mut self.store;
-        let mut record = || {
+        FinitePayloadFields {
+            never: &mut self.never,
+            activation_rejected: &mut self.activation_rejected,
+            validation_rejected: &mut self.validation_rejected,
+            interrupted: &mut self.interrupted,
+            freeze_interrupted: &mut self.freeze_interrupted,
+            generation_rejected: &mut self.generation_rejected,
+            failure_fallback: &mut self.failure_fallback,
+            central_fallback: &mut self.central_fallback,
+            output: &mut self.output,
+            proof: &mut self.proof,
+            order: &self.order,
+        }
+        .clear(|| {
             if let Some(store) = store {
                 store.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
             }
-        };
-        drop_captured_value(&mut self.never, &mut first, &mut record);
-        drop_captured_value(&mut self.activation_rejected, &mut first, &mut record);
-        drop_captured_value(&mut self.validation_rejected, &mut first, &mut record);
-        drop_captured_value(&mut self.generation_rejected, &mut first, &mut record);
+        })
+    }
+}
+
+/// Short views keep cleanup on the actual Host Options while a restored store loan is live.
+struct FinitePayloadFields<'host, T, Proof, EA, EV, EG> {
+    never: &'host mut Option<StoreNeverActivatedCause<EA>>,
+    activation_rejected: &'host mut Option<StoreCanonicalRejection<EA>>,
+    validation_rejected: &'host mut Option<StoreCanonicalRejection<EV>>,
+    interrupted: &'host mut Option<StoreWorkError>,
+    freeze_interrupted: &'host mut Option<CanonicalFreezeInterruption>,
+    generation_rejected: &'host mut Option<StoreCanonicalRejection<EG>>,
+    failure_fallback: &'host mut Option<StoreRuntimeError>,
+    central_fallback: &'host mut Option<StoreRuntimeError>,
+    output: &'host mut Option<T>,
+    proof: &'host mut Option<Proof>,
+    order: &'host Cell<PayloadOrder>,
+}
+
+impl<T, Proof, EA, EV, EG> FinitePayloadFields<'_, T, Proof, EA, EV, EG> {
+    fn clear(self, mut record: impl FnMut()) -> Option<Box<dyn std::any::Any + Send>> {
+        *self.central_fallback = None;
+        *self.failure_fallback = None;
+        *self.interrupted = None;
+        *self.freeze_interrupted = None;
+        let mut first = None;
+        drop_captured_value(self.never, &mut first, &mut record);
+        drop_captured_value(self.activation_rejected, &mut first, &mut record);
+        drop_captured_value(self.validation_rejected, &mut first, &mut record);
+        drop_captured_value(self.generation_rejected, &mut first, &mut record);
         match self.order.get() {
             PayloadOrder::ProofBeforeOutput => {
-                drop_captured_value(&mut self.proof, &mut first, &mut record);
-                drop_captured_value(&mut self.output, &mut first, &mut record);
+                drop_captured_value(self.proof, &mut first, &mut record);
+                drop_captured_value(self.output, &mut first, &mut record);
             }
             PayloadOrder::OutputBeforeProof => {
-                drop_captured_value(&mut self.output, &mut first, &mut record);
-                drop_captured_value(&mut self.proof, &mut first, &mut record);
+                drop_captured_value(self.output, &mut first, &mut record);
+                drop_captured_value(self.proof, &mut first, &mut record);
             }
         }
         first
@@ -583,6 +794,7 @@ where
         let panic = self.clear_owned_values();
         if panic.is_some() {
             self.record_payload_failure();
+            self.contain_payload_failure();
         }
         drop(self.store.take());
         if let Some(payload) = panic {
@@ -639,6 +851,7 @@ where
         let Some(FiniteDisposition::Unattached(binding)) = self.host.pending.take() else {
             self.host.record_payload_failure();
             let panic = self.host.clear_owned_values();
+            self.host.contain_payload_failure();
             let error = self.host.take_error(FiniteStoreExitCause::Body(
                 driver::CanonicalInvocationBodyError::invalid_disposition(),
             ));
@@ -688,6 +901,7 @@ where
             _ => {
                 self.host.record_payload_failure();
                 let panic = self.host.clear_owned_values();
+                self.host.contain_payload_failure();
                 let error = self.host.take_error(FiniteStoreExitCause::Body(
                     driver::CanonicalInvocationBodyError::invalid_disposition(),
                 ));

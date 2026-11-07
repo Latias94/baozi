@@ -61,7 +61,7 @@ fn rejected_finite_start_disposes_body_captures_before_original_uninstalled_cont
     }
 }
 
-fn plans() -> (
+pub(in crate::concrete_store) fn plans() -> (
     FiniteStoreLedgerPlan,
     FiniteRetainedStoreStartPlan,
     [StoreDimensionKey; 6],
@@ -81,7 +81,7 @@ fn plans_with_failure_members(
     plans_with_failure_work(members, 0, 0)
 }
 
-fn plans_with_failure_work(
+pub(in crate::concrete_store) fn plans_with_failure_work(
     members: usize,
     construction: u64,
     validation: u64,
@@ -936,4 +936,61 @@ fn finite_failure_fields_use_the_shared_protected_record_lane_and_keep_original_
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn finite_body_capture_cancellation_precedes_unchanged_terminal_authority() {
+    struct CancelOnDrop(crate::CancellationToken);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (facts, dimension) = {
+        let cancellation = crate::CancellationToken::new();
+        let capture = CancelOnDrop(cancellation.clone());
+        let (ledger, start, dimensions, _) = plans();
+        let mut host = Host::new();
+        let finish = host
+            .run_bound_body(
+                OperationControl::default().with_cancellation(cancellation.clone()),
+                ledger,
+                &account,
+                start,
+                move |parts, disposition| {
+                    let _capture = &capture;
+                    let mut operation = parts.startup.attach().unwrap();
+                    operation
+                        .with_action_execution(dimensions[4], |actions| {
+                            actions.begin_action(1)?;
+                            actions.complete_action()?;
+                            Ok::<_, StoreRuntimeError>(())
+                        })
+                        .unwrap();
+                    operation.request_unchanged(disposition).unwrap();
+                },
+            )
+            .unwrap();
+        assert!(cancellation.is_cancelled());
+        let publication = finish.finish_attached(progress()).unwrap();
+        let FiniteCanonicalOperationPublication::EvidenceOnly(
+            PreparedFiniteStoreEvidenceOnlyOutcome::MinimalFallback(prepared),
+        ) = publication
+        else {
+            panic!("capture cancellation must precede the outer unchanged publication gate");
+        };
+        (prepared.handoff().facts, dimensions[4])
+    };
+    let StoreTerminalCause::Failure(cause) = facts.header().terminal_cause() else {
+        panic!("original finite facts must retain the capture's control cancellation");
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Control);
+    assert_eq!(cause.code(), 1);
+    assert_eq!(facts.dimension(dimension).unwrap().consumed(), 1);
+    assert!(!account.snapshot().poisoned());
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }

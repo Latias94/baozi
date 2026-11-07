@@ -12,7 +12,10 @@ use super::activation::FiniteCanonicalInvocationHost;
 
 mod operation;
 pub use operation::FiniteRetainedStoreOperation;
+mod deferred;
 mod publication;
+pub(in crate::concrete_store) use publication::FinitePublicationTransition;
+pub(in crate::concrete_store) use publication::FiniteUnrootedStoreFailure;
 pub use publication::{
     FiniteRetainedStorePublicationAssembly, FiniteStoreControlledSuccessValidation,
     FiniteStoreFailureAssembly, FiniteStoreFailureValidation, FiniteStoreFallbackOnly,
@@ -79,6 +82,12 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreInvocatio
 
     pub(super) fn record_payload_failure(&mut self, code: u32) {
         self.raw.record_payload_failure(code);
+    }
+
+    pub(in crate::concrete_store) fn contain_payload_failure(
+        &mut self,
+    ) -> Option<FinalizationContainmentError> {
+        self.raw.fields().contain_deferred_fault()
     }
 
     pub(super) fn startup_error(&self) -> Option<RetainedStoreStartError> {
@@ -151,7 +160,7 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> Drop
 }
 
 /// The original owning Options remain recoverable through every shorter ordinary loan.
-pub(super) struct FiniteStoreFinalFields<
+pub(in crate::concrete_store) struct FiniteStoreFinalFields<
     'inv,
     O: OperationOwner,
     PP: ProgressPhase,
@@ -163,13 +172,31 @@ pub(super) struct FiniteStoreFinalFields<
 }
 
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFields<'_, O, PP, U> {
-    fn into_error(self, cause: FiniteStoreExitCause) -> FiniteStoreExitError<O, PP, U> {
+    pub(in crate::concrete_store) fn into_error(
+        self,
+        cause: FiniteStoreExitCause,
+    ) -> FiniteStoreExitError<O, PP, U> {
         FiniteStoreInvocationRoot {
             raw: self.raw.into_owned(),
             domain: self.domain.take(),
             startup: self.startup.take(),
         }
         .into_error(cause)
+    }
+
+    pub(in crate::concrete_store) fn into_request_error(
+        mut self,
+        error: Option<StorePrepareError>,
+    ) -> FiniteStoreExitError<O, PP, U> {
+        let cause = error.or_else(|| {
+            self.raw
+                .contain_deferred_fault()
+                .map(StorePrepareError::FinalizationContainment)
+        });
+        self.into_error(FiniteStoreExitCause::Finalize(cause.map_or(
+            FiniteStoreFinalizeCause::ForeignTerminalAuthority,
+            FiniteStoreFinalizeCause::Publication,
+        )))
     }
 }
 
@@ -249,6 +276,12 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError
     /// Returns whether this error owns an original root or low-level failure residue.
     pub fn has_residue(&self) -> bool {
         self.residue.is_some() || self.unattached.is_some() || self.terminal.is_some()
+    }
+
+    pub(in crate::concrete_store) fn record_payload_failure(&mut self, code: u32) {
+        if let Some(root) = self.residue.as_mut() {
+            root.record_payload_failure(code);
+        }
     }
 
     pub(super) fn with_unattached(mut self, failure: StoreUnattachedFailure<O, PP, U>) -> Self {
@@ -439,4 +472,4 @@ where
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::concrete_store) mod tests;

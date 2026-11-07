@@ -1,18 +1,53 @@
 # Owned Finite Invocation: Numerical and Control Foundation
 
-Latest checkpoint: **final19/source107 passes all seven integrated gates**:
-**3,901 workspace tests** (three slow, six existing manual skips), **191 doctests**,
+Latest checkpoint: **final20/source126 passes all seven integrated gates**:
+**3,916 workspace tests** (two slow, six existing manual skips), **196 doctests**,
 **138 asset-consumer tests** (one existing manual scale skip), workspace and consumer
-strict all-target/all-feature Clippy, and both format checks. All 1,039 before/after
-input hashes, 148 frozen files and five recorded user-note identities match. The exact
-source/log association is `owned-finite-source107-integrated-association-1.json`.
-The independent `owned-finite-source107-integrated-evidence-review-1.md` accepts
-only these frozen107 execution records, authenticating all seven log hashes, 1,039
-before/after input maps and 148 frozen files. Its user-note statement relies on the
-recorded association and Main's current hash check; no missing older baseline is
-reconstructed. Historical failed attempts retain their original outcomes.
-This is a structural checkpoint. Actual finite Host/Core/frozen/Postprocess integration,
-layout/allocation/native/heap qualification, local-main merge and release remain open.
+strict all-target/all-feature Clippy, and both format checks. All **1,046** before/after/
+current input hashes, **155** frozen files and five recorded user-note identities match.
+The exact source/log association is `owned-finite-source126-integrated-association-1.json`.
+Independent source reviews close the shared central cause-latch and finite Host
+post-cleanup-containment findings. The independent
+`owned-finite-source126-integrated-evidence-review-1.md` authenticates all seven final
+execution records, source/log hashes and counts; its interim record remains historical.
+This is a structural checkpoint. Typed body-error return transport, complete finite
+final authoring/freeze/Core/Postprocess, layout/allocation/native/heap qualification,
+local-main merge and release remain open.
+
+Historical final19/source107 separately passes 3,901 workspace tests (three slow, six
+existing manual skips), 191 doctests, 138 consumer tests (one manual scale skip), both
+strict and both format checks. Its 1,039 stable inputs, 148 frozen files and five user
+notes are bound by `owned-finite-source107-integrated-association-1.json`; its independent
+execution review accepts only that distinct checkpoint. No source107 receipt is relabeled
+as source126, and failed attempts retain their original outcomes.
+
+The earlier activation-owner slice passes 1,352 Operation tests on frozen113, zero skips,
+in 47.973s, with 1,041 stable inputs and 150 frozen files. Source114's equivalent private
+aliases leave strict42's five unfinished central/restoration consumers. Source115 adds
+the actual body-only wrapper; source116 passes 1,353 tests and 135 Operation doctests.
+Those historical scoped results remain separate from full20's current qualification.
+
+Source108 fails before tests on one private containment-field access; source109 uses
+its original getter/typed private constructor, compiles production and then fails
+libtest on twelve new test import/helper-visibility diagnostics. Source110 fixes those
+and narrows the common preflight method's visibility, then libtest finds ten borrow
+scope diagnostics in new result/variant matches. Source111 freezes the same source
+without execution after a patch assertion fails before writing. Source112 consumes
+whole Result/Outcome owners before slot/root observations and executes 1,350 PASS /
+one FAIL. The new materialization fixture calls the tableless terminal entry after
+opening real tables; the resulting fail-closed cause is preserved. Source113 uses the
+existing assembly fallback entry, adds direct Activated/NeverActivated original-L
+panic coverage and passes all 1,352 tests. Historical failures are not relabeled.
+
+The slice shares one StoreOperationLoan admission/qualification body and the existing
+scoped runner. Three concrete finite outcomes bind original opened/unopened fields,
+original Host payload permissions and lineage. Session and Activated/NeverActivated
+Drop retain fields through controlled lineage disposal, including a clean payload
+followed by lineage panic. Recorded containment is reused before requesting another
+raw loan. Normal errors own original root/domain/startup residue. Bounded source109
+review accepts those production paths, carries the exact narrowed visibility/test-only
+source relationship, and preserves the historical test blocker and coverage limits.
+Its receipt is `owned-finite-source109-activation-owner-source-review-1.md`.
 
 Historical final18/source104 passes **3,898 workspace tests** (two slow, six
 existing manual skips) and **191 doctests**, then fails strict workspace Clippy on
@@ -1340,6 +1375,56 @@ cleanup. Intentional ordinary-host unwind output remains a passing test counted 
 This overall attempt is **failed**, not inferred from source64 or promoted into full
 finite acceptance. The actual physical terminal representation and final results
 remain dynamic. Finite physical qualification and consuming results are still open.
+
+## Body authority and central restoration follow-up
+
+Source116 passes all 1,353 Operation tests and 135 Operation doctests. Its independent
+bounded review confirms actual body attachment returns only the restricted finite
+operation, the three preparation escapes fail E0599, capture cancellation precedes
+final unchanged preparation, and the foreign-output callback assertion uses an
+independent flag. Source117 changes only an equivalent private return alias; strict44
+still fails on five unfinished consumers. No source117 runtime or full Host credit is
+inferred.
+
+The central design review requires original output custody before the first callback
+and an owned error Result for every finite restoration seam. Source126 implements both,
+shares the existing central evidence/validation/normalization driver across dynamic and
+finite concrete owners, and passes all **1,361 Operation tests**, zero skips, in 68.564s.
+Strict47 passes all Operation targets/features. All **1,046** before/after/current inputs
+and **155** frozen files match. Final20 passes the unchanged seven integrated gates: 3,916 workspace
+tests (two slow, six existing manual skips), 196 doctests and 138 asset-consumer tests
+(one existing manual scale skip), both all-target/all-feature strict checks and both
+format checks. Workspace runtime is 227.864s and consumer runtime is 8.702s; these are
+correctness-run durations, not native performance evidence. All 1,046 inputs and five
+recorded user notes remain stable. This qualifies only the structural checkpoint.
+
+Independent shared-driver review found C119-SC1: moving forced causes into pending facts
+had omitted the original operation's sticky terminal-cause record. Both rejection paths
+now record the exact original cause before the single ownership-only discard. The new
+real semantic-false/typed-Accept -> request/body cleanup/resume -> rich-validator panic
+regression passes and confirms the original ProductGraph/code in published fallback
+facts. The source119 HOLD and source124 fix addendum remain separate review artifacts.
+
+New finite Candidate fault tests then exposed a real missing Host containment step:
+body/capture failure correctly disposed proof and output under separate catches but
+retired the root without the dynamic Host's post-cleanup containment. Source126 invokes
+the existing actual-root containment only after every capture/payload catch, before
+retirement or the owned error. Tests now pass for staged body/capture panic with both
+payload destructors failing, foreign Candidate restoration with throwing payloads,
+central original-lineage disposal returning an owned error, and NeverActivated request
+lineage panic plus a throwing cause. Their exact first panic, original domain custody,
+proof-before-output order, emptied Host slots and first poison evidence are asserted.
+The six-role restoration loop also passes, including cancellation observed inside the
+real validation permission, runtime scratch rejection, and recoverable evidence abort.
+
+Historical source118's module path failure,119's new-fixture compile errors,120/121's
+incorrect fixture branch expectations,122/123's style-only strict failures,124's new
+regression borrow error, and125's post-cleanup-containment failure remain recorded.
+Source125's actual result is 1,359 PASS / one failure; its failing assertion is retained
+and passes on126. Retired central/count/discard forwarding and unused finite wrappers
+are deleted instead of suppressed. Scoped source reviews retain their own boundaries;
+typed body-error transport, final authoring/freeze/joint/Core/Postprocess, complete
+integrated QA, layout/allocation and native convergence remain open.
 
 ## Remaining integration
 

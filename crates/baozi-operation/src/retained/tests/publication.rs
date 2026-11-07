@@ -2868,7 +2868,11 @@ fn assert_freeze_destination_rejected(
         match issue {
             RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
                 assert_eq!(cause.class(), PreparationFailureClass::Ledger);
-                assert!(failure.canonical_ownership_is_absent());
+                assert_eq!(
+                    failure.assembly.loan.fields.mode,
+                    RetainedOutcomeMode::FailureOnly
+                );
+                assert!(failure.assembly.loan.canonical_ownership_is_absent());
                 assert_eq!(failure.outcome_evidence_commitment_len(), 0);
                 drop(failure);
             }

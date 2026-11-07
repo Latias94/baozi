@@ -4,6 +4,11 @@ mod driver;
 use driver::{ScopedDriverTransition, run_scoped_driver};
 mod owner;
 use owner::{ScopedOwnerTransition, drop_pending_decision};
+mod finite;
+pub use finite::{
+    FiniteActivatedSession, FiniteCanonicalActivationOutcome, FiniteNeverActivatedSession,
+    FiniteRejectedSession, FiniteSessionOutcomeOwner,
+};
 
 #[cfg(test)]
 mod tests;
@@ -32,6 +37,84 @@ fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntime
     NonZeroU64::new(units).ok_or(StoreRuntimeError::Plan(StorePlanError::EmptyPayload))
 }
 
+impl<O, PP, U, L> StoreOperationLoan<'_, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(in crate::concrete_store) fn qualify_failure_validation_work(
+        &mut self,
+        ordinary_work_dimension: StoreDimensionKey,
+        max_evidence_members: usize,
+        validation_work_limit: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .preflight_failure_validation_work()
+            .map_err(|cause| map_writer_error(&cause))?;
+        if self.raw.is_terminal_only() {
+            return Err(StoreRuntimeError::FallbackOnly);
+        }
+        if !self.domain.owns_dimension(ordinary_work_dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain {
+                dimension: ordinary_work_dimension,
+            });
+        }
+        self.producer_host().poll()?;
+        self.raw
+            .qualify_failure_validation_work(
+                ordinary_work_dimension,
+                max_evidence_members,
+                validation_work_limit,
+            )
+            .map_err(|cause| map_writer_error(&cause))
+    }
+
+    fn preflight_session(
+        &self,
+        policy: &CanonicalActivationSessionPolicy,
+        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+        failure_requirements: CanonicalFailureRequirements,
+    ) -> Result<(BoundScopedFailureRequest, FailureEvidenceWorkBudget), StoreRuntimeError> {
+        let (canonical_phase, canonical_dimensions) =
+            policy.canonical_writer.keys_for_publication_validation();
+        let outcome_evidence_writer = policy
+            .outcome_evidence_writer
+            .bind(outcome_evidence_writer_limits);
+        let (evidence_phase, evidence_dimensions) =
+            outcome_evidence_writer.keys_for_publication_validation();
+        self.validate_writer_keys(canonical_phase, canonical_dimensions)?;
+        self.validate_writer_keys(evidence_phase, evidence_dimensions)?;
+        self.validate_activation_phase(policy.validation_phase)?;
+        self.validate_activation_dimensions([
+            policy.materialization_work_dimension,
+            policy.materialization_scratch_dimension,
+            policy.validation_work_dimension,
+            policy.validation_scratch_dimension,
+            policy.canonical_destination_dimension,
+            policy.outcome_evidence_destination_dimension,
+        ])?;
+        if let Some(dimension) = policy.semantic_bytes_dimension {
+            self.validate_activation_dimensions([dimension])?;
+        }
+        let failure = policy
+            .bind_scoped_failure(outcome_evidence_writer_limits, failure_requirements)
+            .map_err(StoreRuntimeError::Plan)?;
+        let (max_evidence_members, construction_work_limit, validation_work_limit) = self
+            .raw
+            .failure_terminal_work_limits()
+            .ok_or(StoreRuntimeError::ConstructionInvariantUnverified)?;
+        Ok((
+            failure,
+            FailureEvidenceWorkBudget::new(FailureEvidenceWorkEnvelope {
+                max_evidence_members,
+                construction_work_limit,
+                validation_work_limit,
+            }),
+        ))
+    }
+}
+
 impl<'inv, O, PP, U, L> RetainedStoreOperation<'inv, O, PP, U, L>
 where
     O: OperationOwner,
@@ -50,78 +133,34 @@ where
         max_evidence_members: usize,
         validation_work_limit: u64,
     ) -> Result<(), StoreRuntimeError> {
-        self.raw
-            .loan()
-            .preflight_failure_validation_work()
-            .map_err(|cause| map_writer_error(&cause))?;
-        if self.raw.loan().is_terminal_only() {
-            return Err(StoreRuntimeError::FallbackOnly);
-        }
-        self.validate_dimension_key(ordinary_work_dimension)?;
-        self.producer_host().poll()?;
-        self.raw
-            .loan_mut()
+        StoreOperationLoan::<O, PP, U, L>::from_raw(self.raw.loan_mut().reborrow(), &self.domain)
             .qualify_failure_validation_work(
                 ordinary_work_dimension,
                 max_evidence_members,
                 validation_work_limit,
             )
-            .map_err(|cause| map_writer_error(&cause))
     }
 
     /// Moves the operation into the session-lifetime outcome owner before canonical activation.
     pub fn into_session_outcome_owner(
-        self,
+        mut self,
         policy: CanonicalActivationSessionPolicy,
         outcome_evidence_writer_limits: RetainedStoreBatchLimits,
         failure_requirements: CanonicalFailureRequirements,
     ) -> Result<RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>, StoreActivationContainment>
     {
-        let (canonical_phase, canonical_dimensions) =
-            policy.canonical_writer.keys_for_publication_validation();
-        let outcome_evidence_writer = policy
-            .outcome_evidence_writer
-            .bind(outcome_evidence_writer_limits);
-        let (evidence_phase, evidence_dimensions) =
-            outcome_evidence_writer.keys_for_publication_validation();
-        let roles_are_valid = self
-            .validate_writer_keys(canonical_phase, canonical_dimensions)
-            .and_then(|()| self.validate_writer_keys(evidence_phase, evidence_dimensions))
-            .and_then(|()| self.validate_activation_phase(policy.validation_phase))
-            .and_then(|()| {
-                self.validate_activation_dimensions([
-                    policy.materialization_work_dimension,
-                    policy.materialization_scratch_dimension,
-                    policy.validation_work_dimension,
-                    policy.validation_scratch_dimension,
-                    policy.canonical_destination_dimension,
-                    policy.outcome_evidence_destination_dimension,
-                ])
-            })
-            .and_then(|()| {
-                policy.semantic_bytes_dimension.map_or(Ok(()), |dimension| {
-                    self.validate_activation_dimensions([dimension])
-                })
-            })
-            .is_ok();
-        if !roles_are_valid {
-            return Err(contain_operation(self));
-        }
-        let failure = match policy
-            .bind_scoped_failure(outcome_evidence_writer_limits, failure_requirements)
-        {
-            Ok(failure) => failure,
+        let admission = StoreOperationLoan::<O, PP, U, L>::from_raw(
+            self.raw.loan_mut().reborrow(),
+            &self.domain,
+        )
+        .preflight_session(
+            &policy,
+            outcome_evidence_writer_limits,
+            failure_requirements,
+        );
+        let (failure, failure_work) = match admission {
+            Ok(admission) => admission,
             Err(_) => return Err(contain_operation(self)),
-        };
-        let Some((max_evidence_members, construction_work_limit, validation_work_limit)) =
-            self.raw.loan().failure_terminal_work_limits()
-        else {
-            return Err(contain_operation(self));
-        };
-        let failure_work = FailureEvidenceWorkEnvelope {
-            max_evidence_members,
-            construction_work_limit,
-            validation_work_limit,
         };
         let containment_anchor = self.raw.loan().planning_containment_anchor();
         Ok(RetainedStoreSessionOutcomeOwner {
@@ -132,7 +171,7 @@ where
             },
             policy,
             scoped_failure: failure,
-            failure_work: FailureEvidenceWorkBudget::new(failure_work),
+            failure_work,
         })
     }
 }

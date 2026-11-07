@@ -28,14 +28,14 @@ pub(super) struct TestOwner;
 
 impl OperationOwner for TestOwner {}
 
-struct TestActivationDescription<P> {
+pub(super) struct TestActivationDescription<P> {
     request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
     execution: P,
 }
 
 impl<P> TestActivationDescription<P> {
-    fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
+    pub(super) fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
         let (identity, request) = mint_canonical_activation_request()
             .expect("the test activation request identity must remain available");
         Self {

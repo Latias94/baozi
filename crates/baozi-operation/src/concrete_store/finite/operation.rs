@@ -33,6 +33,64 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn ordinary_operation(
+        &mut self,
+    ) -> Result<ordinary::StoreOperationLoan<'_, O, PP, U, L>, StoreRuntimeError> {
+        self.fields.operation_loan()
+    }
+
+    pub(in crate::concrete_store) fn into_activation_parts(
+        self,
+    ) -> (FiniteStoreFinalFields<'inv, O, PP, U>, L) {
+        (self.fields, self.lineage)
+    }
+
+    pub(in crate::concrete_store) fn from_activation_parts(
+        fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+        lineage: L,
+    ) -> Self {
+        Self { fields, lineage }
+    }
+
+    pub fn qualify_failure_validation_work(
+        &mut self,
+        ordinary_work_dimension: StoreDimensionKey,
+        max_evidence_members: usize,
+        validation_work_limit: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ordinary_operation()?.qualify_failure_validation_work(
+            ordinary_work_dimension,
+            max_evidence_members,
+            validation_work_limit,
+        )
+    }
+
+    pub(in crate::concrete_store) fn contain_activation_fault(
+        self,
+    ) -> FinalizationContainmentError {
+        self.retire_activation(true)
+            .expect("a requested finite containment records its cause")
+    }
+
+    pub(in crate::concrete_store) fn retire_activation(
+        self,
+        contain: bool,
+    ) -> Option<FinalizationContainmentError> {
+        let (mut fields, lineage) = self.into_activation_parts();
+        let lineage_failed = activation::drop_scoped_value(lineage).is_err();
+        if contain || lineage_failed {
+            Some(fields.contain_publication_fault())
+        } else {
+            None
+        }
+    }
+
+    pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
+        let Self { fields, lineage } = self;
+        let _ = activation::drop_scoped_value(lineage);
+        fields.into_request_error(None)
+    }
+
     pub(in crate::concrete_store) fn invocation_identity(&mut self) -> *const () {
         self.fields
             .raw
@@ -210,6 +268,55 @@ where
 }
 
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFields<'_, O, PP, U> {
+    pub(in crate::concrete_store) fn operation_loan<L>(
+        &mut self,
+    ) -> Result<ordinary::StoreOperationLoan<'_, O, PP, U, L>, StoreRuntimeError> {
+        let raw = self.raw.loan().ok_or(StoreRuntimeError::FallbackOnly)?;
+        Ok(ordinary::StoreOperationLoan::from_raw(
+            raw,
+            self.domain.as_ref().expect("original finite domain"),
+        ))
+    }
+
+    pub(in crate::concrete_store) fn ensure_unopened_activation(
+        &mut self,
+    ) -> Result<(), StoreRuntimeError> {
+        if self.raw.has_original_unopened_fields() {
+            Ok(())
+        } else {
+            Err(StoreRuntimeError::ConstructionInvariantUnverified)
+        }
+    }
+
+    pub(in crate::concrete_store) fn bind_scoped_open(
+        &mut self,
+        opened: ordinary::StorePublicationOpenDisposition,
+    ) -> Result<(), ordinary::StorePublicationOpenDisposition> {
+        use ordinary::StorePublicationOpenDisposition;
+        match opened {
+            StorePublicationOpenDisposition::Opened(opened) => self
+                .raw
+                .bind_opened_stamp(opened)
+                .map_err(StorePublicationOpenDisposition::Opened),
+            StorePublicationOpenDisposition::Failed(failure) => self
+                .raw
+                .bind_publication_failure(failure)
+                .map(|_| ())
+                .map_err(StorePublicationOpenDisposition::Failed),
+        }
+    }
+
+    pub(in crate::concrete_store) fn into_activation_error(
+        self,
+        cause: activation::StoreActivationContainment,
+    ) -> FiniteStoreExitError<O, PP, U> {
+        self.into_error(FiniteStoreExitCause::Finalize(
+            FiniteStoreFinalizeCause::Publication(StorePrepareError::FinalizationContainment(
+                cause.cause(),
+            )),
+        ))
+    }
+
     pub(in crate::concrete_store) fn prepare_evidence_only(
         mut self,
         progress: FinalProgress<PP, U>,

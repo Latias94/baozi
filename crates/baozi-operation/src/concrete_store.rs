@@ -2903,27 +2903,6 @@ where
         Ok(())
     }
 
-    fn validate_activation_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
-        self.validate_phase_key(phase)?;
-        if !self.raw.loan().contains_phase(phase) {
-            return Err(StoreRuntimeError::InvalidPublicationPlan);
-        }
-        Ok(())
-    }
-
-    fn validate_activation_dimensions<const N: usize>(
-        &self,
-        dimensions: [StoreDimensionKey; N],
-    ) -> Result<(), StoreRuntimeError> {
-        for dimension in dimensions {
-            self.validate_dimension_key(dimension)?;
-            if !self.raw.loan().contains_dimension(dimension) {
-                return Err(StoreRuntimeError::InvalidPublicationPlan);
-            }
-        }
-        Ok(())
-    }
-
     fn validate_commitment_dimension(
         &self,
         dimension: StoreDimensionKey,
@@ -4017,10 +3996,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) const fn canonical_member_count(&self) -> usize {
-        self.raw.canonical_member_count()
-    }
-
     pub(super) fn defer_until_body_cleanup(
         self,
     ) -> Result<DeferredStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>, Self>
@@ -4044,10 +4019,6 @@ where
                 domain,
             }),
         }
-    }
-
-    pub(super) const fn outcome_evidence_member_count(&self) -> usize {
-        self.raw.outcome_evidence_member_count()
     }
 
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
@@ -4399,20 +4370,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn with_forced_cause(mut self, cause: PreparationFailureCode) -> Self {
-        self.raw = self.raw.with_fallback_cause(cause);
-        self.forced_cause = Some(cause);
-        self
-    }
-
-    pub(super) fn try_discard_canonical_for_activation(
-        mut self,
-    ) -> Result<Self, FinalizationContainmentError> {
-        self.raw = self.raw.try_discard_canonical_for_rejection()?;
-        debug_assert!(self.raw.canonical_ownership_is_absent());
-        Ok(self)
-    }
-
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()
     }

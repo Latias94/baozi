@@ -28,14 +28,14 @@ use super::{
     RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreWorkControl,
     RetainedStoreWriterPlan, RetainedStoreWriterRole, ScalarSequence, SequencePlan, SequenceWriter,
     ShareableStoreKind, StoreBuildCallbackFailure, StoreBuildError, StoreControlledError,
-    StoreControlledSuccessValidation, StoreDimensionKey, StoreDomainLoan,
-    StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureEvidenceLoan,
-    StoreFailureValidation, StoreFallbackOnly, StoreInvocation, StoreInvocationLayout,
-    StorePhaseKey, StorePlanError, StorePrepareError, StorePublicationLoan, StorePublicationState,
-    StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
-    StoreSuccessFreezePermitIssue, StoreValidationSession, StoreWorkError, StoredBlock,
-    StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
-    classify_prepared_fallback, map_publication_error, map_writer_error,
+    StoreDimensionKey, StoreDomainLoan, StoreEvidenceValidationSession, StoreFailureAssembly,
+    StoreFailureEvidenceLoan, StoreFailureValidation, StoreFallbackOnly, StoreInvocation,
+    StoreInvocationLayout, StorePhaseKey, StorePlanError, StorePrepareError, StorePublicationLoan,
+    StorePublicationState, StoreRuntimeError, StoreSuccessFreezeContribution,
+    StoreSuccessFreezePermit, StoreSuccessFreezePermitIssue, StoreValidationSession,
+    StoreWorkError, StoredBlock, StoredScalar, Utf8Block, Utf8Plan, Utf8Writer,
+    ValidatedStoreFailure, ValidatedStoreSuccess, classify_prepared_fallback,
+    map_publication_error, map_writer_error,
 };
 use crate::control::{ControlCause, ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
 use crate::coordinator::FinalProgress;
@@ -52,6 +52,11 @@ use crate::retained::{
 
 mod canonical;
 mod canonical_validation;
+mod central_driver;
+pub use canonical::finite::{
+    FiniteCanonicalCentralValidationOutcome, FiniteCentralCandidate, FiniteCentralFailure,
+    FiniteCentralFallback,
+};
 mod failure_evidence;
 pub(in crate::concrete_store) use failure_evidence::{
     failure_evidence_validator, run_failure_evidence_build,
@@ -67,13 +72,19 @@ pub use host::{
     CanonicalGenerationSlots, CanonicalInvocationBodyError, CanonicalInvocationCompletion,
     CanonicalInvocationFinish, CanonicalInvocationHost, CanonicalInvocationOutcome,
     CanonicalOperationCompletion, CanonicalOperationPublication, CanonicalOutputSlot,
-    CanonicalProofSlot, CanonicalValidationSlots, FiniteCanonicalBoundBodyParts,
-    FiniteCanonicalBoundBodyStart, FiniteCanonicalBoundInvocationFinish,
-    FiniteCanonicalDispositionSlot, FiniteCanonicalInvocationHost,
+    CanonicalProofSlot, CanonicalValidationSlots, FiniteCanonicalBodyOperation,
+    FiniteCanonicalBoundBodyParts, FiniteCanonicalBoundBodyStart,
+    FiniteCanonicalBoundInvocationFinish, FiniteCanonicalDispositionSlot,
+    FiniteCanonicalInvocationCompletion, FiniteCanonicalInvocationHost,
+    FiniteCanonicalInvocationOutcome, FiniteCanonicalOperationCompletion,
     FiniteCanonicalOperationPublication,
 };
 mod payload_owner;
 mod preflight;
+pub use preflight::{
+    FiniteActivatedSession, FiniteCanonicalActivationOutcome, FiniteNeverActivatedSession,
+    FiniteRejectedSession, FiniteSessionOutcomeOwner,
+};
 mod typed_storage;
 pub use typed_storage::{CanonicalRetainedStorageBuildControl, CanonicalStorageBuildError};
 mod work_batch;
@@ -2284,6 +2295,7 @@ struct BoundScopedSuccessRequest {
     semantic_bytes_dimension: Option<StoreDimensionKey>,
 }
 
+#[derive(Clone, Copy)]
 struct ScopedActivationValidation {
     phase: StorePhaseKey,
     work_dimension: StoreDimensionKey,
@@ -2974,13 +2986,13 @@ pub enum CanonicalCentralValidationOutcome<
 }
 
 /// One-shot canonical outcome-evidence writer used only before central validation.
-pub struct CanonicalOutcomeEvidenceLane<'inv, 'lane, O, PP, U, L = FreshStoreLineage>
+pub struct CanonicalOutcomeEvidenceLane<'op, 'lane, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly: &'lane mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+    publication: &'lane mut StorePublicationLoan<'op, O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     failure_work: &'lane mut FailureEvidenceWorkBudget,
     work_dimension: StoreDimensionKey,
@@ -3346,51 +3358,6 @@ where
     }
 }
 
-fn defer_assembly_minimal<'inv, O, PP, U, L>(
-    mut assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
-    cause_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
-    cause: StoreRuntimeError,
-    failure_code: PreparationFailureCode,
-) -> Result<PendingMinimalFallback<'inv, O, PP, U>, StoreActivationContainment>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    assembly
-        .ordinary()
-        .latch_activation_terminal_cause(failure_code);
-    let RetainedStorePublicationAssembly {
-        raw,
-        state,
-        domain,
-        lineage,
-    } = assembly;
-    let cause = ManuallyDrop::new(cause);
-    let lineage = ManuallyDrop::new(lineage);
-    let failure_code = state
-        .fallback_cause
-        .or(state.success_rejection)
-        .unwrap_or(failure_code);
-    if drop_scoped_value(ManuallyDrop::into_inner(lineage)).is_err() {
-        let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-        return Err(StoreActivationContainment {
-            cause: raw.contain_activation_fault(),
-        });
-    }
-    PendingMinimalFallback::new(
-        StoreFallbackOnly {
-            state: super::StoreFallbackState::Assembly {
-                raw,
-                cause: failure_code,
-            },
-            domain,
-        },
-        cause_slot,
-        ManuallyDrop::into_inner(cause),
-    )
-}
-
 const fn map_raw_prepare_error(
     error: RetainedPublicationPrepareError,
 ) -> FinalizationContainmentError {
@@ -3454,6 +3421,8 @@ pub struct StoreActivationContainment {
 
 #[cfg(test)]
 mod scoped_transition_tests {
+    mod central_cause;
+
     use std::cell::Cell;
     use std::num::{NonZeroU32, NonZeroU64};
 

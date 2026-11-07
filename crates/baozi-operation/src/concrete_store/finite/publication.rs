@@ -53,6 +53,37 @@ where
         }
     }
 
+    pub(in crate::concrete_store) fn from_bound_fields(
+        fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+        state: StorePublicationState,
+        lineage: L,
+    ) -> Self {
+        Self {
+            fields,
+            state,
+            lineage,
+        }
+    }
+
+    pub(in crate::concrete_store) fn contain_activation_fault(
+        self,
+    ) -> FinalizationContainmentError {
+        self.retire_activation(true)
+            .expect("a requested finite containment records its cause")
+    }
+
+    pub(in crate::concrete_store) fn retire_activation(
+        self,
+        contain: bool,
+    ) -> Option<FinalizationContainmentError> {
+        let mut transition = FinitePublicationTransition::from_assembly(self);
+        if contain {
+            transition.contain();
+        }
+        let (_, _, error) = transition.finish();
+        error.map(|StorePrepareError::FinalizationContainment(cause)| cause)
+    }
+
     /// Consumes the writable candidate and validates its exact success closure.
     pub fn validate_success<CK, CT, EK, ET>(
         self,
@@ -223,14 +254,14 @@ where
     }
 }
 
-pub(super) struct FinitePublicationTransition<'inv, O, PP, U, L>
+pub(in crate::concrete_store) struct FinitePublicationTransition<'inv, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fields: Option<FiniteStoreFinalFields<'inv, O, PP, U>>,
-    pub(super) state: StorePublicationState,
+    pub(in crate::concrete_store) fields: Option<FiniteStoreFinalFields<'inv, O, PP, U>>,
+    pub(in crate::concrete_store) state: StorePublicationState,
     lineage: Option<L>,
     containment: Option<StorePrepareError>,
 }
@@ -254,7 +285,9 @@ where
         }
     }
 
-    fn from_assembly(assembly: FiniteRetainedStorePublicationAssembly<'inv, O, PP, U, L>) -> Self {
+    pub(in crate::concrete_store) fn from_assembly(
+        assembly: FiniteRetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+    ) -> Self {
         let FiniteRetainedStorePublicationAssembly {
             fields,
             state,
@@ -263,7 +296,7 @@ where
         Self::new(fields, state, lineage)
     }
 
-    fn ordinary(&mut self) -> StorePublicationLoan<'_, O, PP, U, L> {
+    pub(in crate::concrete_store) fn ordinary(&mut self) -> StorePublicationLoan<'_, O, PP, U, L> {
         let fields = self.fields.as_mut().expect("original finite fields");
         StorePublicationLoan {
             raw: RetainedPublicationAssemblyBorrow::from_loan(
@@ -278,7 +311,7 @@ where
         }
     }
 
-    fn contain(&mut self) -> StorePrepareError {
+    pub(in crate::concrete_store) fn contain(&mut self) -> StorePrepareError {
         if let Some(error) = self.containment {
             return error;
         }
@@ -288,10 +321,20 @@ where
         error
     }
 
-    fn retire_lineage(&mut self) {
+    pub(in crate::concrete_store) fn record_containment(&mut self, original: StorePrepareError) {
+        if self.containment.is_none() {
+            self.containment = Some(original);
+        }
+    }
+
+    pub(in crate::concrete_store) fn retire_lineage(&mut self) {
         if activation::drop_scoped_value(self.lineage.take()).is_err() {
             self.contain();
         }
+    }
+
+    pub(in crate::concrete_store) fn take_lineage(&mut self) -> Option<L> {
+        self.lineage.take()
     }
 
     pub(super) fn into_assembly(
@@ -317,7 +360,7 @@ where
             ))
     }
 
-    fn finish(
+    pub(in crate::concrete_store) fn finish(
         mut self,
     ) -> (
         FiniteStoreFinalFields<'inv, O, PP, U>,
@@ -367,7 +410,9 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFiel
         )
     }
 
-    fn contain_publication_fault(&mut self) -> FinalizationContainmentError {
+    pub(in crate::concrete_store) fn contain_publication_fault(
+        &mut self,
+    ) -> FinalizationContainmentError {
         if let Some(assembly) = self.raw.assembly_loan() {
             let mut ordinary = RetainedPublicationAssemblyBorrow::from_loan(assembly);
             return ordinary.loan_mut().contain_activation_fault();
@@ -376,5 +421,62 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFiel
             .loan()
             .expect("the original attached finite operation remains installed")
             .contain_activation_fault()
+    }
+}
+
+pub(in crate::concrete_store) struct FiniteUnrootedStoreFailure<'inv, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(super) fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+    pub(super) state: StorePublicationState,
+    pub(super) failure_cause: PreparationFailureCode,
+}
+
+impl<'inv, O, PP, U> FiniteStoreFinalFields<'inv, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(in crate::concrete_store) fn bind_unrooted_failure(
+        mut self,
+        state: StorePublicationState,
+        cause: PreparationFailureCode,
+    ) -> Result<FiniteUnrootedStoreFailure<'inv, O, PP, U>, FiniteStoreExitError<O, PP, U>> {
+        let result = if let Some(raw) = self.raw.assembly_loan() {
+            let mut assembly = RetainedPublicationAssemblyBorrow::from_loan(raw);
+            assembly.loan_mut().verify_failure_only(cause)
+        } else {
+            Err(self.contain_publication_fault())
+        };
+        match result {
+            Ok(()) => Ok(FiniteUnrootedStoreFailure {
+                fields: self,
+                state,
+                failure_cause: cause,
+            }),
+            Err(cause) => Err(self
+                .into_activation_error(activation::StoreActivationContainment::from_cause(cause))),
+        }
+    }
+}
+
+impl<O, PP, U> FiniteUnrootedStoreFailure<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(in crate::concrete_store) fn contain_activation_fault(
+        mut self,
+    ) -> FinalizationContainmentError {
+        self.fields.contain_publication_fault()
+    }
+
+    pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
+        self.fields.into_request_error(None)
     }
 }

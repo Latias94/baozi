@@ -268,8 +268,9 @@ fn exact_transfer_preserves_work_and_qualifies_four_real_evidence_members() {
     let mut assembly = operation.try_publication_assembly(plan).unwrap();
     let mut fault = None;
     {
+        let mut publication = assembly.ordinary();
         let mut lane = CanonicalOutcomeEvidenceLane {
-            assembly: &mut assembly,
+            publication: &mut publication,
             first_fault: &mut fault,
             failure_work: &mut failure_work,
             work_dimension: keys.work,

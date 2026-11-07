@@ -2448,8 +2448,8 @@ fn freeze_permit_phase_order_panic_keeps_the_real_validated_tables_and_control_o
                 super::super::RetainedSuccessValidation::Valid(validated) => validated,
                 _ => panic!("the exact real closure must validate without fabricated permissions"),
             };
-        assert_eq!(validated.canonical_member_count(), 1);
-        assert_eq!(validated.outcome_evidence_member_count(), 1);
+        assert_eq!(validated.proof.canonical_member_count(), 1);
+        assert_eq!(validated.proof.outcome_evidence_member_count(), 1);
         let physical_before = account.snapshot();
         let shares_before = account.share_call_count();
         let owners_before = (Arc::strong_count(&drops), Arc::strong_count(&events));
