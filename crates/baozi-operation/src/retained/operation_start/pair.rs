@@ -25,6 +25,12 @@ use crate::retained::take_injected_start_fallback_account_anchor_loss;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+mod finite;
+pub(in crate::retained) use finite::FiniteStartupRetainedPartGuard;
+pub(crate) use finite::FiniteStartupRetainedResidue;
+#[cfg(test)]
+mod tests;
+
 struct StartupRetainedSideFailure<D> {
     cause: RetainedWriterError<D>,
     fault: Option<AccountPoisonReason>,
@@ -146,6 +152,50 @@ impl<D> StartupRetainedSideFailure<D> {
     }
 }
 
+/// Dispose both uninvoked callbacks under their original admission, even if either capture panics.
+fn dispose_uninvoked_startup_builders<First, Second>(
+    first: First,
+    second: Second,
+) -> Result<(), Box<dyn std::any::Any + Send>> {
+    let first = catch_unwind(AssertUnwindSafe(|| drop(first)));
+    let second = catch_unwind(AssertUnwindSafe(|| drop(second)));
+    match (first, second) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(payload), Ok(())) | (Ok(()), Err(payload)) => Err(payload),
+        (Err(first), Err(second)) => {
+            discard_untrusted_panic_payload(second);
+            Err(first)
+        }
+    }
+}
+
+fn startup_rejection_error<D>(
+    failure: StartupRetainedSideFailure<D>,
+    rollback: PendingRetainedRollback,
+) -> RetainedWriterError<D> {
+    let storage_failure = matches!(failure.cause, RetainedWriterError::StorageDropUnverified);
+    let ownership_failure = failure.fault.is_some()
+        || matches!(
+            rollback,
+            PendingRetainedRollback::FaultRecorded(_)
+                | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+        );
+    let charge_failure = matches!(
+        rollback,
+        PendingRetainedRollback::ChargeReleaseUnverified(_)
+            | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
+    );
+    if storage_failure {
+        RetainedWriterError::StorageDropUnverified
+    } else if ownership_failure {
+        RetainedWriterError::OwnershipUnverified
+    } else if charge_failure {
+        RetainedWriterError::ChargeReleaseUnverified
+    } else {
+        failure.cause
+    }
+}
+
 struct StartupRetainedSideConstruction<'account, O, P, D, T>
 where
     O: OperationOwner,
@@ -182,6 +232,11 @@ where
     attribution: Option<OperationAttributionReservation<O, P, D, OutcomeEvidenceDestination>>,
     account: Option<PhysicalStorageAccount>,
 }
+
+type StartupRetainedFailureOwners<T, O, P, D> = (
+    Option<ContainedStartupRetainedSide<O, P, D>>,
+    Option<RetainedPart<T, OutcomeEvidenceDestination, O, P, D>>,
+);
 
 /// A fail-closed startup pair keeps both attribution batches beside the aggregate physical lease.
 ///
@@ -646,6 +701,20 @@ where
         }
     }
 
+    /// Moves the original owned failure after pending charge resolution has selected retention.
+    /// No account borrow escapes this consuming side transition.
+    fn take_owned_failure(&mut self) -> StartupRetainedFailureOwners<T, O, P, D> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Contained(pending) => (Some(pending), None),
+            Self::Built(built) => (None, Some(built)),
+            Self::Empty => (None, None),
+            other => {
+                *self = other;
+                unreachable_final_owner_state();
+            }
+        }
+    }
+
     const fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
@@ -855,17 +924,19 @@ where
             Ok(Ok(value)) => value,
             Ok(Err(cause)) => {
                 let cleanup = self.into_cleanup_guard();
-                return Err(cleanup.finish_rejection(
+                return Err(cleanup.finish_uninvoked_rejection(
                     StartupRetainedSide::Fallback,
                     StartupRetainedSideFailure::clean(RetainedWriterError::Physical(
                         RetainedAllocationError::Build(cause),
                     )),
+                    (),
+                    build_evidence,
                 ));
             }
             Err(payload) => {
                 return Err(self
                     .into_cleanup_guard()
-                    .finish_fallback_builder_panic(payload));
+                    .finish_fallback_builder_panic(payload, build_evidence));
             }
         };
         let Self {
@@ -1321,50 +1392,37 @@ where
         drop(self.evidence_assembly.take());
     }
 
-    fn try_into_ready_pair(
-        mut self,
-    ) -> Result<StartupReadyPair<'account, O, P, D, F>, RetainedWriterError<D>> {
-        let fallback = match self.fallback.take_ready() {
-            Some(ready) => ready,
-            None => return Err(self.finish_invalid_complete_state()),
-        };
-        let evidence = match self.evidence.take_ready() {
-            Some(ready) => ready,
-            None => {
-                self.fallback = StartupRetainedSideState::Ready(fallback);
-                return Err(self.finish_invalid_complete_state());
-            }
-        };
-        let canonical_assembly = match self.canonical_assembly.take() {
-            Some(batch) => batch,
-            None => {
-                self.fallback = StartupRetainedSideState::Ready(fallback);
-                self.evidence = StartupRetainedSideState::Ready(evidence);
-                return Err(self.finish_invalid_complete_state());
-            }
-        };
-        let evidence_assembly = match self.evidence_assembly.take() {
-            Some(batch) => batch,
-            None => {
-                self.fallback = StartupRetainedSideState::Ready(fallback);
-                self.evidence = StartupRetainedSideState::Ready(evidence);
-                self.canonical_assembly = Some(canonical_assembly);
-                return Err(self.finish_invalid_complete_state());
-            }
-        };
-        if self.pending_pair.is_some()
-            || self.evidence_account.is_some()
-            || self.fallback_lease_owner.is_some()
-            || self.evidence_lease_owner.is_some()
-            || self.contained_pending.is_some()
-        {
-            self.fallback = StartupRetainedSideState::Ready(fallback);
-            self.evidence = StartupRetainedSideState::Ready(evidence);
-            self.canonical_assembly = Some(canonical_assembly);
-            self.evidence_assembly = Some(evidence_assembly);
-            return Err(self.finish_invalid_complete_state());
-        }
-        Ok(StartupReadyPair {
+    fn ready_pair_is_complete(&self) -> bool {
+        matches!(self.fallback, StartupRetainedSideState::Ready(_))
+            && matches!(self.evidence, StartupRetainedSideState::Ready(_))
+            && self.canonical_assembly.is_some()
+            && self.evidence_assembly.is_some()
+            && self.pending_pair.is_none()
+            && self.evidence_account.is_none()
+            && self.fallback_lease_owner.is_none()
+            && self.evidence_lease_owner.is_none()
+            && self.contained_pending.is_none()
+    }
+
+    fn into_ready_pair(mut self) -> StartupReadyPair<'account, O, P, D, F> {
+        // No user callback or fallible operation follows the shape gate before these moves.
+        let fallback = self
+            .fallback
+            .take_ready()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let evidence = self
+            .evidence
+            .take_ready()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let canonical_assembly = self
+            .canonical_assembly
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let evidence_assembly = self
+            .evidence_assembly
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        StartupReadyPair {
             account: self.account,
             pair_plan: self.pair_plan,
             fallback_allocation_plan: self.fallback_allocation_plan,
@@ -1373,12 +1431,10 @@ where
             evidence,
             canonical_assembly,
             evidence_assembly,
-        })
+        }
     }
 
-    fn finish_invalid_complete_state(mut self) -> RetainedWriterError<D> {
-        self.fallback.drop_unarmed_before_charge_resolution();
-        self.evidence.drop_unarmed_before_charge_resolution();
+    fn finish_invalid_after_builder_disposal(mut self) -> RetainedWriterError<D> {
         let resolution =
             self.rollback_remaining(Some(AccountPoisonReason::OwnershipGraphUnverified));
         match resolution.rollback {
@@ -1401,13 +1457,32 @@ where
         RetainedWriterError::OwnershipUnverified
     }
 
-    fn finish_rejection(
+    fn finish_uninvoked_rejection<First, Second>(
         mut self,
         failed_side: StartupRetainedSide,
         failure: StartupRetainedSideFailure<D>,
+        first: First,
+        second: Second,
     ) -> RetainedWriterError<D> {
         self.fallback.drop_unarmed_before_charge_resolution();
         self.evidence.drop_unarmed_before_charge_resolution();
+        if let Err(payload) = dispose_uninvoked_startup_builders(first, second) {
+            let poisoned = self.account.record_poison(
+                failure
+                    .fault
+                    .unwrap_or(AccountPoisonReason::RetainedBuilderPanicked),
+            );
+            self.anchor_fault(poisoned);
+            self.install_split_pending_containment(None);
+            discard_untrusted_panic_payload(payload);
+            self.drain_handled_state();
+            self.mark_drained();
+            return if failure.fault.is_some() {
+                RetainedWriterError::OwnershipUnverified
+            } else {
+                RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked)
+            };
+        }
         let resolution = self.rollback_remaining(failure.fault);
         match resolution.rollback {
             PendingRetainedRollback::FaultRecorded(poisoned)
@@ -1427,27 +1502,7 @@ where
         {
             self.retain_side_attribution(failed_side);
         }
-        let storage_failure = matches!(failure.cause, RetainedWriterError::StorageDropUnverified);
-        let ownership_failure = failure.fault.is_some()
-            || matches!(
-                resolution.rollback,
-                PendingRetainedRollback::FaultRecorded(_)
-                    | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
-            );
-        let charge_failure = matches!(
-            resolution.rollback,
-            PendingRetainedRollback::ChargeReleaseUnverified(_)
-                | PendingRetainedRollback::ChargeRetainedAfterPoison(_)
-        );
-        let error = if storage_failure {
-            RetainedWriterError::StorageDropUnverified
-        } else if ownership_failure {
-            RetainedWriterError::OwnershipUnverified
-        } else if charge_failure {
-            RetainedWriterError::ChargeReleaseUnverified
-        } else {
-            failure.cause
-        };
+        let error = startup_rejection_error(failure, resolution.rollback);
         self.drain_handled_state();
         self.mark_drained();
         error
@@ -1559,11 +1614,25 @@ where
         error
     }
 
-    fn finish_fallback_builder_panic(
+    fn finish_fallback_builder_panic<Sibling>(
         mut self,
         payload: Box<dyn std::any::Any + Send>,
+        sibling: Sibling,
     ) -> RetainedWriterError<D> {
         self.evidence.drop_unarmed_before_charge_resolution();
+        if let Err(sibling_payload) = dispose_uninvoked_startup_builders((), sibling) {
+            let poisoned = self
+                .account
+                .record_poison(AccountPoisonReason::RetainedBuilderPanicked);
+            self.anchor_fault(poisoned);
+            self.fallback.drop_unarmed_before_charge_resolution();
+            self.install_split_pending_containment(None);
+            discard_untrusted_panic_payload(payload);
+            discard_untrusted_panic_payload(sibling_payload);
+            self.drain_handled_state();
+            self.mark_drained();
+            return RetainedWriterError::Physical(RetainedAllocationError::BuilderPanicked);
+        }
         let evidence_exact = self.evidence.pending_admission().is_some_and(|admission| {
             admission.account.is_same_account(self.account)
                 && admission.charge == self.pair_plan.second
@@ -1720,21 +1789,61 @@ where
             .fallback
             .try_preflight(StartupRetainedSide::Fallback, self.fallback_allocation_plan)
         {
-            return Err(self.finish_rejection(StartupRetainedSide::Fallback, failure));
+            return Err(self.finish_uninvoked_rejection(
+                StartupRetainedSide::Fallback,
+                failure,
+                build_fallback,
+                build_evidence,
+            ));
         }
         if let Err(failure) = self
             .evidence
             .try_preflight(StartupRetainedSide::Evidence, self.evidence_allocation_plan)
         {
-            return Err(self.finish_rejection(StartupRetainedSide::Evidence, failure));
+            return Err(self.finish_uninvoked_rejection(
+                StartupRetainedSide::Evidence,
+                failure,
+                build_fallback,
+                build_evidence,
+            ));
         }
         if let Err(failure) = self.fallback.try_prepare(StartupRetainedSide::Fallback) {
-            return Err(self.finish_rejection(StartupRetainedSide::Fallback, failure));
+            return Err(self.finish_uninvoked_rejection(
+                StartupRetainedSide::Fallback,
+                failure,
+                build_fallback,
+                build_evidence,
+            ));
         }
         if let Err(failure) = self.evidence.try_prepare(StartupRetainedSide::Evidence) {
-            return Err(self.finish_rejection(StartupRetainedSide::Evidence, failure));
+            return Err(self.finish_uninvoked_rejection(
+                StartupRetainedSide::Evidence,
+                failure,
+                build_fallback,
+                build_evidence,
+            ));
         }
-        self.try_into_ready_pair()?
+        if !self.ready_pair_is_complete() {
+            self.fallback.drop_unarmed_before_charge_resolution();
+            self.evidence.drop_unarmed_before_charge_resolution();
+            return Err(
+                match dispose_uninvoked_startup_builders(build_fallback, build_evidence) {
+                    Err(payload) => {
+                        let poisoned = self
+                            .account
+                            .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                        self.anchor_fault(poisoned);
+                        self.install_split_pending_containment(None);
+                        discard_untrusted_panic_payload(payload);
+                        self.drain_handled_state();
+                        self.mark_drained();
+                        RetainedWriterError::OwnershipUnverified
+                    }
+                    Ok(()) => self.finish_invalid_after_builder_disposal(),
+                },
+            );
+        }
+        self.into_ready_pair()
             .try_build(build_fallback, build_evidence)
     }
 }

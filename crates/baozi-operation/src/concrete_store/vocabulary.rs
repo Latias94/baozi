@@ -10,6 +10,11 @@ use crate::retained::{
     RetainedHandleSharePlan, RetainedPublicationPlan, RetainedWriterPlan,
 };
 
+pub(super) mod finite;
+
+#[doc(hidden)]
+pub use finite::{FiniteStoreLedgerPlan, FiniteStoreLedgerPlanError};
+
 /// Allocation-free terminal fallback payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StoreFallbackEnvelope {
@@ -412,30 +417,7 @@ impl StoreLedgerPlan {
         limits: LedgerLimits<StoreDimensionKey>,
         phases: &[StorePhaseKey],
     ) -> Result<Self, StoreLedgerPlanError> {
-        if phases.is_empty() {
-            return Err(StoreLedgerPlanError::EmptyPhaseCatalog);
-        }
-        for dimension in limits.dimensions() {
-            if !domain.owns_dimension(dimension) {
-                return Err(StoreLedgerPlanError::ForeignDimensionDomain { dimension });
-            }
-        }
-        for phase in phases {
-            if !domain.owns_phase(*phase) {
-                return Err(StoreLedgerPlanError::ForeignPhaseDomain { phase: *phase });
-            }
-        }
-        for pair in phases.windows(2) {
-            if pair[0] == pair[1] {
-                return Err(StoreLedgerPlanError::DuplicatePhase { phase: pair[1] });
-            }
-            if pair[0] > pair[1] {
-                return Err(StoreLedgerPlanError::PhaseOutOfOrder {
-                    previous: pair[0],
-                    phase: pair[1],
-                });
-            }
-        }
+        validate_store_ledger_catalog(&domain, limits.dimensions(), phases)?;
         let mut frozen = Vec::new();
         frozen
             .try_reserve_exact(phases.len())
@@ -458,46 +440,28 @@ impl StoreLedgerPlan {
         self.phases.len()
     }
 
-    pub(super) fn contains_phase(&self, phase: StorePhaseKey) -> bool {
-        self.owns_phase(phase) && self.phases.binary_search(&phase).is_ok()
-    }
-
-    pub(super) fn contains_dimension(&self, dimension: StoreDimensionKey) -> bool {
-        self.owns_dimension(dimension) && self.limits.dimension(dimension).is_some()
-    }
-
-    pub(super) fn owns_phase(&self, phase: StorePhaseKey) -> bool {
-        self.domain.owns_phase(phase)
-    }
-
-    pub(super) fn owns_dimension(&self, dimension: StoreDimensionKey) -> bool {
-        self.domain.owns_dimension(dimension)
-    }
-
     pub(super) fn failure_terminal_budget_matches(
         &self,
         plan: &RetainedStoreFailureTerminalWorkPlan,
     ) -> bool {
-        if self.limits.dimension(plan.dimension()) != Some(plan.requirement().dimension_policy()) {
-            return false;
-        }
-        let ordinary = self
-            .limits
-            .dimensions()
-            .filter(|dimension| *dimension != plan.dimension())
-            .try_fold((0_u64, 0_u64), |(attempted, consumed), dimension| {
-                let policy = self.limits.dimension(dimension)?;
-                Some((
-                    attempted.checked_add(policy.attempted_limit())?,
-                    consumed.checked_add(policy.consumed_limit())?,
-                ))
-            });
-        matches!(
-            ordinary,
-            Some((attempted, consumed))
-                if attempted == plan.ordinary_attempted_work_limit()
-                    && consumed == plan.ordinary_consumed_work_limit()
+        failure_terminal_budget_matches(
+            self.limits.dimension(plan.dimension()),
+            self.limits
+                .dimensions()
+                .filter(|dimension| *dimension != plan.dimension())
+                .map(|dimension| self.limits.dimension(dimension)),
+            plan,
         )
+    }
+
+    pub(super) fn start_catalog(
+        &self,
+    ) -> (
+        &StoreKeyDomain,
+        &[StorePhaseKey],
+        &LedgerLimits<StoreDimensionKey>,
+    ) {
+        (&self.domain, &self.phases, &self.limits)
     }
 
     pub(super) fn into_parts(
@@ -509,6 +473,61 @@ impl StoreLedgerPlan {
     ) {
         (self.domain, self.limits, self.phases)
     }
+}
+
+fn validate_store_ledger_catalog(
+    domain: &StoreKeyDomain,
+    dimensions: impl Iterator<Item = StoreDimensionKey>,
+    phases: &[StorePhaseKey],
+) -> Result<(), StoreLedgerPlanError> {
+    if phases.is_empty() {
+        return Err(StoreLedgerPlanError::EmptyPhaseCatalog);
+    }
+    for dimension in dimensions {
+        if !domain.owns_dimension(dimension) {
+            return Err(StoreLedgerPlanError::ForeignDimensionDomain { dimension });
+        }
+    }
+    for phase in phases {
+        if !domain.owns_phase(*phase) {
+            return Err(StoreLedgerPlanError::ForeignPhaseDomain { phase: *phase });
+        }
+    }
+    for pair in phases.windows(2) {
+        if pair[0] == pair[1] {
+            return Err(StoreLedgerPlanError::DuplicatePhase { phase: pair[1] });
+        }
+        if pair[0] > pair[1] {
+            return Err(StoreLedgerPlanError::PhaseOutOfOrder {
+                previous: pair[0],
+                phase: pair[1],
+            });
+        }
+    }
+    Ok(())
+}
+
+fn failure_terminal_budget_matches(
+    terminal_policy: Option<DimensionPolicy>,
+    mut ordinary_policies: impl Iterator<Item = Option<DimensionPolicy>>,
+    plan: &RetainedStoreFailureTerminalWorkPlan,
+) -> bool {
+    if terminal_policy != Some(plan.requirement().dimension_policy()) {
+        return false;
+    }
+    let ordinary = ordinary_policies.try_fold((0_u64, 0_u64), |(attempted, consumed), policy| {
+        let policy = policy?;
+        Some((
+            attempted.checked_add(policy.attempted_limit())?,
+            consumed.checked_add(policy.consumed_limit())?,
+        ))
+    });
+    matches!(
+        ordinary,
+        Some((attempted, consumed))
+            if attempted == plan.ordinary_attempted_work_limit()
+                && consumed == plan.ordinary_consumed_work_limit()
+    )
 }
 
 impl StoreFallbackEnvelope {

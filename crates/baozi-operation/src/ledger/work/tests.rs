@@ -70,7 +70,8 @@ fn moving_state_preserves_exact_rows_and_outstanding_ownership() {
     let rows_pointer = work.rows.as_ptr();
     {
         let layout = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = layout
@@ -102,11 +103,12 @@ fn binding_validates_all_members_in_caller_order_before_mode() {
     let (catalog, mut work) = owner([(1, 10, 10)]);
     work.header.mode = WorkMode::OrdinarySealed;
     assert!(matches!(
-        work.bind_layout(&catalog, [3, 2], WorkGrant::Ordinary),
+        work.as_read(&catalog)
+            .bind_layout([3, 2], WorkGrant::Ordinary),
         Err(LedgerCause::UnknownDimension { dimension: 3 })
     ));
     assert!(matches!(
-        work.bind_layout(&catalog, [1], WorkGrant::Ordinary),
+        work.as_read(&catalog).bind_layout([1], WorkGrant::Ordinary),
         Err(LedgerCause::PublicationAlreadyPending)
     ));
     assert_eq!(counters(&work), [(0, 0, 0)]);
@@ -116,7 +118,8 @@ fn binding_validates_all_members_in_caller_order_before_mode() {
 fn attempted_stops_in_caller_order_and_keeps_representable_limit_failure() {
     let (catalog, mut work) = owner([(1, 10, 10), (2, 5, 5)]);
     let roles = work
-        .bind_layout(&catalog, [2, 1, 2, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2, 1], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.charge_attempted_in_order(&mut work.view(&catalog), [2, 4, 4, 3]),
@@ -135,7 +138,8 @@ fn attempted_overflow_keeps_last_valid_value_and_earlier_entries() {
     let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX), (2, u64::MAX, u64::MAX)]);
     work.rows[1].state.attempted = u64::MAX - 1;
     let roles = work
-        .bind_layout(&catalog, [1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.charge_attempted_in_order(&mut work.view(&catalog), [3, 2]),
@@ -151,7 +155,8 @@ fn attempted_overflow_keeps_last_valid_value_and_earlier_entries() {
 fn direct_completion_sorts_bound_positions_and_commits_duplicates_atomically() {
     let (catalog, mut work) = owner([(1, 20, 1), (2, 20, 0)]);
     let roles = work
-        .bind_layout(&catalog, [2, 1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2], WorkGrant::Ordinary)
         .unwrap();
     roles
         .charge_attempted_in_order(&mut work.view(&catalog), [3, 4, 2])
@@ -179,7 +184,8 @@ fn direct_completion_accounts_for_other_frames_pending_capacity() {
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let (layout, mut frame) = {
         let layout = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let frame = layout
@@ -188,7 +194,8 @@ fn direct_completion_accounts_for_other_frames_pending_capacity() {
         (layout, frame)
     };
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     roles
         .charge_attempted_in_order(&mut work.view(&catalog), [2])
@@ -214,7 +221,7 @@ fn direct_completion_accounts_for_other_frames_pending_capacity() {
         assert_eq!(row_counters(view.rows), [(6, 6, 0)]);
         frame.resolve(&layout, &mut view, false).unwrap();
     }
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
 }
 
 #[test]
@@ -227,7 +234,8 @@ fn direct_overflow_in_later_dimension_leaves_entire_consumed_group_unchanged() {
         pending_consumed: 0,
     };
     let roles = work
-        .bind_layout(&catalog, [2, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.consume_direct_atomic(&mut work.view(&catalog), [1, 2]),
@@ -245,7 +253,8 @@ fn direct_and_preflight_preserve_earlier_group_limit_before_later_duplicate_over
     work.rows[0].state.attempted = 2;
     work.rows[1].state.attempted = u64::MAX;
     let roles = work
-        .bind_layout(&catalog, [2, 1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.consume_direct_atomic(&mut work.view(&catalog), [u64::MAX, 2, 1]),
@@ -257,7 +266,8 @@ fn direct_and_preflight_preserve_earlier_group_limit_before_later_duplicate_over
         })
     );
     let caller_first = work
-        .bind_layout(&catalog, [1, 2, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2, 2], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         caller_first.preflight_repeated_observed(
@@ -281,7 +291,8 @@ fn direct_and_preflight_preserve_earlier_group_limit_before_later_duplicate_over
 fn ordered_observation_keeps_prior_pairs_and_the_failing_physical_prefix() {
     let (catalog, mut work) = owner([(1, 10, 10), (2, 10, 2)]);
     let roles = work
-        .bind_layout(&catalog, [1, 2, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2, 1], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.charge_observed_ordered(&mut work.view(&catalog), [3, 4, 5]),
@@ -299,7 +310,8 @@ fn ordered_observation_keeps_prior_pairs_and_the_failing_physical_prefix() {
 fn ordered_observation_stops_before_consumed_on_attempted_limit_failure() {
     let (catalog, mut work) = owner([(1, 10, 10), (2, 2, 2)]);
     let roles = work
-        .bind_layout(&catalog, [1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.charge_observed_ordered(&mut work.view(&catalog), [3, 4]),
@@ -317,13 +329,15 @@ fn ordered_observation_stops_before_consumed_on_attempted_limit_failure() {
 fn consumed_observation_uses_caller_order_without_debiting_attempts() {
     let (catalog, mut work) = owner([(1, 10, 10), (2, 10, 10)]);
     let attempted = work
-        .bind_layout(&catalog, [1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2], WorkGrant::Ordinary)
         .unwrap();
     attempted
         .charge_attempted_in_order(&mut work.view(&catalog), [3, 4])
         .unwrap();
     let roles = work
-        .bind_layout(&catalog, [2, 1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.consume_observed_in_order(&mut work.view(&catalog), [2, 2, 3]),
@@ -341,7 +355,8 @@ fn consumed_observation_retains_physical_prefix_on_pending_projection_failure() 
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let (layout, mut frame) = {
         let layout = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let frame = layout
@@ -350,7 +365,8 @@ fn consumed_observation_retains_physical_prefix_on_pending_projection_failure() 
         (layout, frame)
     };
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.consume_observed_in_order(&mut work.view(&catalog), [1]),
@@ -361,21 +377,19 @@ fn consumed_observation_retains_physical_prefix_on_pending_projection_failure() 
         })
     );
     assert_eq!(counters(&work), [(4, 1, 4)]);
-    InternalWork {
-        catalog: &catalog,
-        state: &mut work,
-    }
-    .resolve(layout, &mut frame, false)
-    .unwrap();
+    InternalWork::new(work.view(&catalog))
+        .resolve(layout, &mut frame, false)
+        .unwrap();
     assert_eq!(counters(&work), [(4, 1, 0)]);
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
 }
 
 #[test]
 fn consumed_observation_retains_limit_failure_but_not_unrepresentable_increment() {
     let (catalog, mut work) = owner([(1, u64::MAX, 2)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     roles
         .charge_attempted_in_order(&mut work.view(&catalog), [u64::MAX])
@@ -409,7 +423,8 @@ fn consumed_observation_stores_representable_prefix_before_effective_overflow() 
         pending_consumed: 2,
     };
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     assert_eq!(
         roles.consume_observed_in_order(&mut work.view(&catalog), [1]),
@@ -425,7 +440,8 @@ fn consumed_observation_stores_representable_prefix_before_effective_overflow() 
 fn repeated_preflight_aggregates_duplicates_without_changing_evidence() {
     let (catalog, work) = owner([(1, 11, 11), (2, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [2, 1, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 1], WorkGrant::Ordinary)
         .unwrap();
     let repeat = NonZeroU64::new(3).unwrap();
     roles
@@ -461,7 +477,8 @@ fn repeated_preflight_uses_current_pending_and_current_policy() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let (layout, mut frame) = {
         let layout = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let frame = layout
@@ -470,7 +487,8 @@ fn repeated_preflight_uses_current_pending_and_current_policy() {
         (layout, frame)
     };
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     work.rows[0].policy.consumed_limit = 7;
     assert_eq!(
@@ -489,19 +507,17 @@ fn repeated_preflight_uses_current_pending_and_current_policy() {
         })
     );
     assert_eq!(counters(&work), [(4, 0, 4)]);
-    InternalWork {
-        catalog: &catalog,
-        state: &mut work,
-    }
-    .resolve(layout, &mut frame, false)
-    .unwrap();
+    InternalWork::new(work.view(&catalog))
+        .resolve(layout, &mut frame, false)
+        .unwrap();
 }
 
 #[test]
 fn admission_keeps_every_representable_attempt_and_prefers_attempted_failure() {
     let (catalog, mut work) = owner([(1, 20, 0), (2, 3, 3)]);
     let layout = work
-        .bind_layout(&catalog, [1, 2, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2, 2], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     assert!(matches!(
@@ -523,7 +539,8 @@ fn admission_keeps_every_representable_attempt_and_prefers_attempted_failure() {
 fn consumed_admission_failure_keeps_attempts_without_claiming_a_lane() {
     let (catalog, mut work) = owner([(1, 10, 2)]);
     let layout = work
-        .bind_layout(&catalog, [1, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     assert!(matches!(
@@ -545,10 +562,12 @@ fn consumed_admission_failure_keeps_attempts_without_claiming_a_lane() {
 fn admission_attempted_and_duplicate_overflow_are_atomic() {
     let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX), (2, u64::MAX, u64::MAX)]);
     let distinct = work
-        .bind_layout(&catalog, [1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2], WorkGrant::Ordinary)
         .unwrap();
     let duplicate = work
-        .bind_layout(&catalog, [1, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     view.rows[1].state.attempted = u64::MAX;
@@ -574,7 +593,8 @@ fn admission_attempted_and_duplicate_overflow_are_atomic() {
 fn admission_pending_overflow_does_not_commit_an_earlier_projection() {
     let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX), (2, u64::MAX, u64::MAX)]);
     let layout = work
-        .bind_layout(&catalog, [1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     view.rows[1].state.pending_consumed = u64::MAX;
@@ -593,7 +613,8 @@ fn admission_pending_overflow_does_not_commit_an_earlier_projection() {
 fn duplicate_batch_completion_and_resolution_preserve_exact_prefixes() {
     let (catalog, mut work) = owner([(1, 20, 20), (2, 20, 20)]);
     let layout = work
-        .bind_layout(&catalog, [2, 1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -616,7 +637,8 @@ fn duplicate_batch_completion_and_resolution_preserve_exact_prefixes() {
 fn completion_overrun_and_inactive_frame_do_not_advance_any_prefix() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let layout = work
-        .bind_layout(&catalog, [1, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -652,7 +674,8 @@ fn completion_overrun_and_inactive_frame_do_not_advance_any_prefix() {
 fn internal_frames_compete_with_producer_and_retain_applied_limit_failures() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let layout = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut producer = layout
@@ -707,7 +730,8 @@ fn internal_frames_compete_with_producer_and_retain_applied_limit_failures() {
 fn grouped_applied_failure_advances_every_duplicate_and_dimension_together() {
     let (catalog, mut work) = owner([(1, 20, 20), (2, 20, 20)]);
     let layout = work
-        .bind_layout(&catalog, [2, 1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -735,7 +759,8 @@ fn grouped_applied_failure_advances_every_duplicate_and_dimension_together() {
 fn corrupt_unrepresentable_group_completion_changes_no_counter_or_remaining() {
     let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX), (2, u64::MAX, u64::MAX)]);
     let layout = work
-        .bind_layout(&catalog, [1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -772,7 +797,8 @@ fn fully_completed_unresolved_frame_keeps_ownership_after_metadata_leaves_scope(
     let (catalog, mut work) = owner([(1, 10, 10)]);
     {
         let layout = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = layout
@@ -796,7 +822,7 @@ fn fully_completed_unresolved_frame_keeps_ownership_after_metadata_leaves_scope(
     assert_eq!(counters(&work), [(3, 3, 0)]);
     assert!(work.header.producer_open);
     assert_eq!(
-        work.check_quiescent(catalog.len()),
+        work.as_read(&catalog).check_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
 }
@@ -806,9 +832,13 @@ fn zero_and_empty_envelopes_still_own_persistent_channels() {
     let (catalog, mut work) = owner([(1, 0, 0)]);
     {
         let layout = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
-        let empty_layout = work.bind_layout(&catalog, [], WorkGrant::Ordinary).unwrap();
+        let empty_layout = work
+            .as_read(&catalog)
+            .bind_layout([], WorkGrant::Ordinary)
+            .unwrap();
         let mut view = work.view(&catalog);
         let mut zero = layout
             .admit_observed(&mut view, [0], WorkLane::Producer)
@@ -832,7 +862,7 @@ fn zero_and_empty_envelopes_still_own_persistent_channels() {
     }
     assert_eq!(counters(&work), [(0, 0, 0)]);
     assert_eq!(
-        work.check_quiescent(catalog.len()),
+        work.as_read(&catalog).check_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
 }
@@ -842,7 +872,8 @@ fn replenishment_keeps_one_envelope_and_records_each_immediate_prefix() {
     let (catalog, mut work) = owner([(10, 8, 8), (90, 8, 8)]);
     {
         let layout = work
-            .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([90], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = layout
@@ -886,7 +917,7 @@ fn replenishment_keeps_one_envelope_and_records_each_immediate_prefix() {
         ));
         frame.resolve(&layout, &mut view, false).unwrap();
     }
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
     assert_eq!(counters(&work), [(0, 0, 0), (3, 3, 0)]);
 }
 
@@ -905,7 +936,8 @@ fn rejected_refill_and_fresh_admission_keep_the_same_attempted_prefix() {
         };
         let (catalog, mut fresh) = owner([(90, attempted, consumed)]);
         let fresh_layout = fresh
-            .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([90], WorkGrant::Ordinary)
             .unwrap();
         let mut fresh_view = fresh.view(&catalog);
         let mut first = fresh_layout
@@ -927,7 +959,8 @@ fn rejected_refill_and_fresh_admission_keep_the_same_attempted_prefix() {
 
         let (catalog, mut sequence) = owner([(90, attempted, consumed)]);
         let sequence_layout = sequence
-            .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([90], WorkGrant::Ordinary)
             .unwrap();
         let mut sequence_view = sequence.view(&catalog);
         let mut frame = sequence_layout
@@ -958,7 +991,8 @@ fn rejected_refill_and_fresh_admission_keep_the_same_attempted_prefix() {
 fn refill_overflow_keeps_the_last_representable_prefix_without_pending_credit() {
     let (catalog, mut work) = owner([(90, u64::MAX, u64::MAX)]);
     let layout = work
-        .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([90], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -986,7 +1020,8 @@ fn refill_overflow_keeps_the_last_representable_prefix_without_pending_credit() 
 fn refill_counts_internal_pending_and_current_policy_without_refunding_attempts() {
     let (catalog, mut work) = owner([(90, 20, 20)]);
     let layout = work
-        .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([90], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut producer = layout
@@ -1028,7 +1063,8 @@ fn layout_validation_rechecks_revoked_mode_and_protected_position_without_work()
     ] {
         let (catalog, mut work) = owner([(10, 20, 20), (90, 20, 20)]);
         let layout = work
-            .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([90], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = layout
@@ -1048,7 +1084,8 @@ fn layout_validation_rechecks_revoked_mode_and_protected_position_without_work()
     }
     let (catalog, mut work) = owner([(10, 20, 20), (90, 20, 20)]);
     let layout = work
-        .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([90], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -1069,7 +1106,8 @@ fn layout_validation_rechecks_revoked_mode_and_protected_position_without_work()
 fn internal_protected_and_faulted_frames_cannot_replenish() {
     let (catalog, mut work) = owner([(90, 20, 20)]);
     let ordinary_layout = work
-        .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([90], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut internal = ordinary_layout
@@ -1100,7 +1138,8 @@ fn internal_protected_and_faulted_frames_cannot_replenish() {
 
     let (catalog, mut work) = owner([(90, 20, 20)]);
     let layout = work
-        .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([90], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -1126,7 +1165,8 @@ fn internal_protected_and_faulted_frames_cannot_replenish() {
 fn abandoned_resolution_releases_only_pending_and_faults_even_after_full_completion() {
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let layout = work
-        .bind_layout(&catalog, [1, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -1148,7 +1188,8 @@ fn abandoned_resolution_releases_only_pending_and_faults_even_after_full_complet
 
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let layout = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = layout
@@ -1172,7 +1213,8 @@ fn interim_integrity_allows_pending_work_without_quiescence() {
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let (layout, mut frame) = {
         let layout = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let frame = layout
@@ -1182,26 +1224,24 @@ fn interim_integrity_allows_pending_work_without_quiescence() {
     };
     work.check_integrity(catalog.len()).unwrap();
     assert_eq!(
-        work.check_quiescent(catalog.len()),
+        work.as_read(&catalog).check_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
-    InternalWork {
-        catalog: &catalog,
-        state: &mut work,
-    }
-    .resolve(layout, &mut frame, false)
-    .unwrap();
+    InternalWork::new(work.view(&catalog))
+        .resolve(layout, &mut frame, false)
+        .unwrap();
     assert!(!frame.active);
     assert_eq!(counters(&work), [(3, 0, 0)]);
     work.check_integrity(catalog.len()).unwrap();
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
 }
 
 #[test]
 fn interim_integrity_retains_header_fault_after_pending_cleanup() {
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let layout = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut frame = layout
         .admit_observed(&mut work.view(&catalog), [3], WorkLane::Producer)
@@ -1211,12 +1251,9 @@ fn interim_integrity_retains_header_fault_after_pending_cleanup() {
         work.check_integrity(catalog.len()),
         Err(LedgerCause::FinalSnapshotShapeMismatch)
     );
-    InternalWork {
-        catalog: &catalog,
-        state: &mut work,
-    }
-    .resolve(layout, &mut frame, false)
-    .unwrap();
+    InternalWork::new(work.view(&catalog))
+        .resolve(layout, &mut frame, false)
+        .unwrap();
     assert!(!frame.active);
     assert_eq!(counters(&work), [(3, 0, 0)]);
     assert_eq!(work.header.open_envelopes, 0);
@@ -1231,13 +1268,15 @@ fn interim_integrity_retains_header_fault_after_pending_cleanup() {
 fn modes_invalidate_old_layouts_and_protected_work_needs_private_grant_and_lane() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let ordinary = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     assert!(matches!(
-        work.bind_layout(&catalog, [1], WorkGrant::Protected),
+        work.as_read(&catalog)
+            .bind_layout([1], WorkGrant::Protected),
         Err(LedgerCause::InactiveLinearWorkPermit)
     ));
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
     work.header.mode = WorkMode::OrdinarySealed;
     assert_eq!(
         ordinary.validate_active(&work.view(&catalog)),
@@ -1250,7 +1289,8 @@ fn modes_invalidate_old_layouts_and_protected_work_needs_private_grant_and_lane(
         Err(LedgerCause::PublicationAlreadyPending)
     );
     let protected_layout = work
-        .bind_layout(&catalog, [1], WorkGrant::Protected)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Protected)
         .unwrap();
     {
         let mut view = work.view(&catalog);
@@ -1278,9 +1318,10 @@ fn modes_invalidate_old_layouts_and_protected_work_needs_private_grant_and_lane(
         ));
         frame.resolve(&protected_layout, &mut view, false).unwrap();
     }
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
     let protected = work
-        .bind_layout(&catalog, [1], WorkGrant::Protected)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Protected)
         .unwrap();
     work.header.mode = WorkMode::Closed;
     assert_eq!(
@@ -1294,7 +1335,8 @@ fn modes_invalidate_old_layouts_and_protected_work_needs_private_grant_and_lane(
 fn parser_channels_and_orphan_pending_also_prevent_quiescence() {
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let layout = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     view.header.parser_parent_open = true;
@@ -1330,7 +1372,8 @@ fn numeric_view_mutates_only_its_borrowed_state() {
     let (catalog, mut first) = owner([(1, 10, 10)]);
     let (_, second) = owner([(1, 1, 1)]);
     let roles = first
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     {
         let mut view = first.view(&catalog);
@@ -1347,17 +1390,20 @@ fn shape_mismatch_and_open_count_overflow_are_contained_without_numeric_changes(
     let malformed = WorkState::new(catalog.len(), Vec::new());
     assert!(malformed.header.integrity_fault);
     assert_eq!(
-        malformed.check_quiescent(catalog.len()),
+        malformed.as_read(&catalog).check_quiescent(),
         Err(LedgerCause::FinalSnapshotShapeMismatch)
     );
     assert!(matches!(
-        malformed.bind_layout(&catalog, [1], WorkGrant::Ordinary),
+        malformed
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary),
         Err(LedgerCause::FinalSnapshotShapeMismatch)
     ));
 
     let (catalog, mut work) = owner([(1, 10, 10)]);
     let layout = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     view.header.open_envelopes = u64::MAX;
@@ -1583,7 +1629,8 @@ fn numeric_helper_errors_resolve_their_exact_key_once() {
 fn duplicate_bound_lanes_recheck_noncontiguous_protected_keys_without_work() {
     let (catalog, mut work) = owner([(10, 20, 20), (30, 20, 20), (90, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [30, 90, 30, 10], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([30, 90, 30, 10], WorkGrant::Ordinary)
         .unwrap();
     work.header.protected_dimension = Some(2);
     assert_eq!(
@@ -1601,7 +1648,7 @@ fn duplicate_bound_lanes_recheck_noncontiguous_protected_keys_without_work() {
         Err(LedgerCause::UnknownDimension { dimension: 90 })
     );
     assert_eq!(counters(&work), [(0, 0, 0); 3]);
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
 }
 
 #[test]
@@ -1653,7 +1700,8 @@ fn bound_numeric_errors_name_registered_keys_and_binding_errors_keep_caller_keys
         }],
     );
     let roles = work
-        .bind_layout(&catalog, [caller], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([caller], WorkGrant::Ordinary)
         .unwrap();
     let Err(LedgerCause::LimitExceeded {
         class: CounterClass::Attempted,
@@ -1674,8 +1722,9 @@ fn bound_numeric_errors_name_registered_keys_and_binding_errors_keep_caller_keys
         panic!("expected the revoked bound role");
     };
     assert_eq!(dimension.label, registered.label);
-    let Err(LedgerCause::UnknownDimension { dimension }) =
-        work.bind_layout(&catalog, [caller], WorkGrant::Ordinary)
+    let Err(LedgerCause::UnknownDimension { dimension }) = work
+        .as_read(&catalog)
+        .bind_layout([caller], WorkGrant::Ordinary)
     else {
         panic!("expected the protected role to reject binding");
     };
@@ -1685,8 +1734,9 @@ fn bound_numeric_errors_name_registered_keys_and_binding_errors_keep_caller_keys
         id: 30,
         label: "missing caller",
     };
-    let Err(LedgerCause::UnknownDimension { dimension }) =
-        work.bind_layout(&catalog, [missing], WorkGrant::Ordinary)
+    let Err(LedgerCause::UnknownDimension { dimension }) = work
+        .as_read(&catalog)
+        .bind_layout([missing], WorkGrant::Ordinary)
     else {
         panic!("expected the absent caller key");
     };
@@ -1713,7 +1763,10 @@ fn direct_state_and_numeric_interfaces_accept_keys_without_debug() {
     );
     assert_eq!(catalog.len(), 1);
     assert!(work.check_integrity(catalog.len()).is_ok());
-    let Ok(roles) = work.bind_layout(&catalog, [OpaqueKey(1)], WorkGrant::Ordinary) else {
+    let Ok(roles) = work
+        .as_read(&catalog)
+        .bind_layout([OpaqueKey(1)], WorkGrant::Ordinary)
+    else {
         panic!("valid opaque key was rejected");
     };
     assert!(
@@ -1722,7 +1775,10 @@ fn direct_state_and_numeric_interfaces_accept_keys_without_debug() {
             .is_ok()
     );
     {
-        let Ok(layout) = work.bind_layout(&catalog, [OpaqueKey(1)], WorkGrant::Ordinary) else {
+        let Ok(layout) = work
+            .as_read(&catalog)
+            .bind_layout([OpaqueKey(1)], WorkGrant::Ordinary)
+        else {
             panic!("valid opaque work layout was rejected");
         };
         let mut view = work.view(&catalog);
@@ -1735,7 +1791,7 @@ fn direct_state_and_numeric_interfaces_accept_keys_without_debug() {
         ));
         assert!(frame.resolve(&layout, &mut view, false).is_ok());
     }
-    assert!(work.check_quiescent(catalog.len()).is_ok());
+    assert!(work.as_read(&catalog).check_quiescent().is_ok());
     assert!(!work.header.integrity_fault);
 }
 
@@ -1788,11 +1844,9 @@ fn comparator_panic_leaves_state_unchanged_and_bound_numeric_paths_never_compare
     );
     PANIC_COMPARISON.with(|panic| panic.set(true));
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        let _ = work.bind_layout(
-            &catalog,
-            [ComparingKey(2), ComparingKey(1)],
-            WorkGrant::Ordinary,
-        );
+        let _ = work
+            .as_read(&catalog)
+            .bind_layout([ComparingKey(2), ComparingKey(1)], WorkGrant::Ordinary);
     }));
     PANIC_COMPARISON.with(|panic| panic.set(false));
     assert!(panicked.is_err());
@@ -1800,8 +1854,8 @@ fn comparator_panic_leaves_state_unchanged_and_bound_numeric_paths_never_compare
     assert_eq!(work.rows[0].state, WorkDimensionState::default());
     assert_eq!(work.rows[1].state, WorkDimensionState::default());
     let roles = work
+        .as_read(&catalog)
         .bind_layout(
-            &catalog,
             [ComparingKey(2), ComparingKey(1), ComparingKey(2)],
             WorkGrant::Ordinary,
         )
@@ -1837,7 +1891,7 @@ fn comparator_panic_leaves_state_unchanged_and_bound_numeric_paths_never_compare
         ));
         frame.resolve(&roles, &mut view, false).unwrap();
     }
-    work.check_quiescent(catalog.len()).unwrap();
+    work.as_read(&catalog).check_quiescent().unwrap();
     assert_eq!(COMPARISONS.with(Cell::get), comparisons);
     assert_eq!(
         work.rows[0].state,

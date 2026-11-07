@@ -24,6 +24,7 @@ use crate::concrete_store::{
 };
 use crate::{FinalProgress, retained::PreparationFailureCode};
 use crate::{OperationControl, PhysicalStorageAccount};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[derive(Debug)]
 pub enum CanonicalBoundBodyError {
@@ -133,6 +134,10 @@ pub struct CanonicalInvocationBodyError {
 }
 
 impl CanonicalInvocationBodyError {
+    pub(super) const fn invalid_disposition() -> Self {
+        Self { containment: None }
+    }
+
     pub const fn containment(&self) -> Option<&super::super::StoreActivationContainment> {
         self.containment.as_ref()
     }
@@ -521,7 +526,8 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation: RetainedStoreOperation<'inv, O, PP, U, TerminalStoreLineage>,
+    root: &'inv mut StoreInvocationRoot<O, PP, U>,
+    pending: DeferredStoreOperation,
     request: OperationDisposition,
 }
 
@@ -543,12 +549,12 @@ where
     ) -> Result<CanonicalOperationPublication, StorePrepareError> {
         match self.request {
             OperationDisposition::Unchanged => self
-                .operation
-                .prepare_evidence_only_success(final_progress)
+                .root
+                .finish_deferred_evidence_only_operation(self.pending, final_progress)
                 .map(CanonicalOperationPublication::Unchanged),
             OperationDisposition::MinimalFallback { code } => self
-                .operation
-                .prepare_minimal_fallback(code)
+                .root
+                .finish_deferred_minimal_operation(self.pending, code)
                 .map(CanonicalOperationPublication::MinimalFallback),
         }
     }
@@ -1001,10 +1007,8 @@ where
             }
             PendingDisposition::Operation(pending) => {
                 CanonicalInvocationOutcome::Operation(CanonicalOperationCompletion {
-                    operation: host
-                        .store
-                        .resume_deferred_operation(pending.store)
-                        .expect("the same root retains the deferred started operation"),
+                    root: &mut host.store,
+                    pending: pending.store,
                     request: pending.request,
                 })
             }
@@ -1046,7 +1050,7 @@ where
                 ))
             }
             PendingDisposition::Rejected(pending) => {
-                let (raw, domain) = host
+                let (raw, domain, state) = host
                     .store
                     .resume_deferred_unrooted_failure(pending.store)
                     .expect("the same root retains the unrooted failure assembly");
@@ -1062,6 +1066,7 @@ where
                                 raw,
                             ),
                             domain,
+                            state,
                             failure_code: pending.failure_code,
                             failure_work: pending.failure_work,
                             outcome_evidence_destination_dimension: pending.destination,

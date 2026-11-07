@@ -1,10 +1,11 @@
 #[cfg(test)]
 use super::lock;
-use super::storage::DynamicStorage;
-use super::work::WorkState;
+use super::storage::{DynamicStorage, StorageView};
+use super::work::{WorkEntry, WorkHeader, WorkState};
 use super::{
     AttributionReservationBatch, CanonicalOutput, DimensionState, LedgerCause, LedgerEvidenceError,
-    LedgerEvidencePurpose, LedgerState, OutcomeEvidenceDestination, PhaseState, release_evidence,
+    LedgerEvidencePurpose, LedgerState, OutcomeEvidenceDestination, PhaseEntry, PhaseState,
+    release_evidence,
 };
 use crate::{CapacityPlan, CapacityPlanError, OperationOwner};
 
@@ -399,73 +400,158 @@ where
     Ok(snapshot)
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-pub(super) fn validate_final_snapshot_shape<P: Copy + PartialEq, D>(
+pub(super) struct SnapshotRows<'rows, P, D> {
+    pub(super) storage: StorageView<'rows, P, D>,
+    pub(super) phases: &'rows [PhaseEntry<P>],
+    pub(super) work_rows: &'rows [WorkEntry<D>],
+    pub(super) work_header: &'rows WorkHeader,
+}
+
+impl<P, D> SnapshotRows<'_, P, D> {
+    fn dynamic<'rows>(
+        state: &'rows LedgerState<P, D>,
+        work: &'rows WorkState<D>,
+    ) -> SnapshotRows<'rows, P, D> {
+        SnapshotRows {
+            storage: state.view(),
+            phases: &state.phases,
+            work_rows: &work.rows,
+            work_header: &work.header,
+        }
+    }
+
+    pub(super) fn validate_final_shape(
+        &self,
+        dimension_staging_len: usize,
+        phase_staging_len: usize,
+    ) -> Result<(), LedgerCause<D>> {
+        if self.work_header.integrity_fault {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        if self.work_header.open_envelopes != 0
+            || self.work_header.producer_open
+            || self.work_header.parser_parent_open
+            || self.work_header.parser_child_open
+            || self.work_header.protected_open
+            || self
+                .work_rows
+                .iter()
+                .any(|row| row.state.pending_consumed != 0)
+        {
+            return Err(LedgerCause::OutstandingLinearWorkPermits {
+                count: self.work_header.open_envelopes.max(1),
+            });
+        }
+        if self.storage.dimensions.len() != self.work_rows.len()
+            || self.storage.dimensions.len() != dimension_staging_len
+            || !super::storage::phase_positions_are_valid(
+                self.phases,
+                self.storage.phase_states.len(),
+                phase_staging_len,
+                self.storage
+                    .last_completed_phase
+                    .as_ref()
+                    .map(|entry| entry.state_position),
+            )
+        {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl<P: Copy, D: Copy> SnapshotRows<'_, P, D> {
+    pub(super) fn write_current(
+        &self,
+        dimensions: &mut [(D, DimensionSnapshot)],
+        phases: &mut [(P, PhaseSnapshot)],
+    ) {
+        for ((entry, row), staging) in self
+            .storage
+            .dimensions
+            .iter()
+            .zip(self.work_rows)
+            .zip(dimensions)
+        {
+            staging.0 = entry.dimension;
+            staging.1 = dimension_snapshot(DimensionState::join(row.state, entry.state));
+        }
+        for (entry, staging) in self.phases.iter().zip(phases) {
+            staging.0 = entry.phase;
+            staging.1 = self
+                .storage
+                .phase_states
+                .get(entry.state_position)
+                .copied()
+                .map(phase_snapshot)
+                .unwrap_or_default();
+        }
+    }
+
+    /// Qualification proves all positioned sums and limits before this infallible projection.
+    pub(super) fn write_terminal<O: OperationOwner>(
+        &self,
+        dimensions: &mut [(D, DimensionSnapshot)],
+        phases: &mut [(P, PhaseSnapshot)],
+        canonical: &AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        evidence: &AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
+    ) where
+        P: Ord,
+        D: Ord,
+    {
+        for (index, ((entry, row), staging)) in self
+            .storage
+            .dimensions
+            .iter()
+            .zip(self.work_rows)
+            .zip(dimensions)
+            .enumerate()
+        {
+            let canonical_increment = canonical.qualified_commitment_amount(index);
+            let evidence_increment = evidence.qualified_commitment_amount(index);
+            let joined = DimensionState::join(row.state, entry.state);
+            staging.0 = entry.dimension;
+            staging.1 = DimensionSnapshot::from_terminal_evidence(DimensionSnapshotScalars {
+                attempted: joined.attempted,
+                consumed: joined.consumed,
+                current_live_bytes: 0,
+                peak_live_bytes: joined.peak_live_bytes,
+                pending_publication: joined.pending_publication,
+                committed: joined.committed + canonical_increment,
+                committed_canonical_output: joined.committed_canonical_output + canonical_increment,
+                published_outcome_evidence: joined.published_outcome_evidence + evidence_increment,
+            });
+        }
+        for (entry, staging) in self.phases.iter().zip(phases) {
+            staging.0 = entry.phase;
+            staging.1 = PhaseSnapshot::from_terminal_evidence(
+                0,
+                self.storage.phase_states[entry.state_position].peak_live_bytes,
+            );
+        }
+    }
+}
+
+pub(super) fn validate_final_snapshot_shape<P, D>(
     state: &LedgerState<P, D>,
     work: &WorkState<D>,
 ) -> Result<(), LedgerCause<D>> {
-    if work.header.integrity_fault {
-        return Err(LedgerCause::FinalSnapshotShapeMismatch);
-    }
-    if work.header.open_envelopes != 0
-        || work.header.producer_open
-        || work.header.parser_parent_open
-        || work.header.parser_child_open
-        || work.header.protected_open
-        || work.rows.iter().any(|row| row.state.pending_consumed != 0)
-    {
-        return Err(LedgerCause::OutstandingLinearWorkPermits {
-            count: work.header.open_envelopes.max(1),
-        });
-    }
-    if state.dimensions.len() != work.rows.len()
-        || state.dimensions.len() != state.dimension_snapshot_staging.len()
-        || !phase_catalog_shape_is_valid(state)
-    {
-        return Err(LedgerCause::FinalSnapshotShapeMismatch);
-    }
-    Ok(())
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-pub(super) fn typed_terminal_snapshot_positions_are_valid<P, D>(
-    state: &LedgerState<P, D>,
-    work: &WorkState<D>,
-) -> bool {
-    !work.header.integrity_fault
-        && work.header.open_envelopes == 0
-        && !work.header.producer_open
-        && !work.header.parser_parent_open
-        && !work.header.parser_child_open
-        && !work.header.protected_open
-        && work.rows.iter().all(|row| row.state.pending_consumed == 0)
-        && state.dimensions.len() == work.rows.len()
-        && state.dimensions.len() == state.dimension_snapshot_staging.len()
-        && phase_catalog_positions_are_valid(state)
+    SnapshotRows::dynamic(state, work).validate_final_shape(
+        state.dimension_snapshot_staging.len(),
+        state.phase_snapshot_staging.len(),
+    )
 }
 
 fn phase_catalog_positions_are_valid<P, D>(state: &LedgerState<P, D>) -> bool {
-    let phase_count = state.phases.len();
-    phase_count == state.phase_states.len()
-        && phase_count == state.phase_snapshot_staging.len()
-        && (0..phase_count).all(|state_position| {
-            state
-                .phases
-                .iter()
-                .filter(|entry| entry.state_position == state_position)
-                .count()
-                == 1
-        })
-        && state
+    super::storage::phase_positions_are_valid(
+        &state.phases,
+        state.phase_states.len(),
+        state.phase_snapshot_staging.len(),
+        state
             .last_completed_phase
             .as_ref()
-            .is_none_or(|completed| completed.state_position < phase_count)
+            .map(|completed| completed.state_position),
+    )
 }
 
 pub(super) fn phase_catalog_shape_is_valid<P, D>(state: &LedgerState<P, D>) -> bool {
@@ -476,34 +562,25 @@ pub(super) fn phase_catalog_shape_is_valid<P, D>(state: &LedgerState<P, D>) -> b
 pub(super) fn take_final_snapshot<P, D>(
     state: &mut LedgerState<P, D>,
     work: &WorkState<D>,
-    _clean: bool,
 ) -> LedgerSnapshot<P, D>
 where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    for ((entry, row), staging) in state
-        .dimensions
-        .iter()
-        .zip(&work.rows)
-        .zip(state.dimension_snapshot_staging.iter_mut())
-    {
-        staging.0 = entry.dimension;
-        staging.1 = dimension_snapshot(DimensionState::join(row.state, entry.state));
-    }
-    for (entry, staging) in state
-        .phases
-        .iter()
-        .zip(state.phase_snapshot_staging.iter_mut())
-    {
-        staging.0 = entry.phase;
-        staging.1 = state
-            .phase_states
-            .get(entry.state_position)
-            .copied()
-            .map(phase_snapshot)
-            .unwrap_or_default();
-    }
+    let rows = SnapshotRows {
+        storage: StorageView {
+            dimensions: &state.dimensions,
+            phase_states: &state.phase_states,
+            header: &state.header,
+        },
+        phases: &state.phases,
+        work_rows: &work.rows,
+        work_header: &work.header,
+    };
+    rows.write_current(
+        &mut state.dimension_snapshot_staging,
+        &mut state.phase_snapshot_staging,
+    );
     let retained_evidence = state.current_administrative_bytes;
     let last_completed_phase = state.last_completed_phase.map(|completed| completed.phase);
     LedgerSnapshot {
@@ -514,45 +591,6 @@ where
         peak_live_bytes: state.peak_live_bytes,
         active_reservations: state.active_reservations,
         current_administrative_bytes: retained_evidence,
-        peak_administrative_bytes: state.peak_administrative_bytes,
-        covered_administrative_bytes: None,
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
-pub(super) fn take_typed_final_snapshot<P: Copy, D: Copy>(
-    state: &mut LedgerState<P, D>,
-    work: &WorkState<D>,
-    last_completed_phase: Option<P>,
-) -> LedgerSnapshot<P, D> {
-    for ((entry, row), staging) in state
-        .dimensions
-        .iter()
-        .zip(&work.rows)
-        .zip(state.dimension_snapshot_staging.iter_mut())
-    {
-        staging.0 = entry.dimension;
-        staging.1 = dimension_snapshot(DimensionState::join(row.state, entry.state));
-    }
-    for (entry, staging) in state
-        .phases
-        .iter()
-        .zip(state.phase_snapshot_staging.iter_mut())
-    {
-        staging.0 = entry.phase;
-        staging.1 = phase_snapshot(state.phase_states[entry.state_position]);
-    }
-    LedgerSnapshot {
-        dimensions: std::mem::take(&mut state.dimension_snapshot_staging),
-        phases: std::mem::take(&mut state.phase_snapshot_staging),
-        last_completed_phase,
-        current_live_bytes: state.current_live_bytes,
-        peak_live_bytes: state.peak_live_bytes,
-        active_reservations: state.active_reservations,
-        current_administrative_bytes: state.current_administrative_bytes,
         peak_administrative_bytes: state.peak_administrative_bytes,
         covered_administrative_bytes: None,
     }
@@ -575,39 +613,22 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    for (index, ((entry, row), staging)) in state
-        .dimensions
-        .iter()
-        .zip(&work.rows)
-        .zip(state.dimension_snapshot_staging.iter_mut())
-        .enumerate()
-    {
-        let canonical_increment = canonical.qualified_commitment_amount(index);
-        let evidence_increment = evidence.qualified_commitment_amount(index);
-        let joined = DimensionState::join(row.state, entry.state);
-        staging.0 = entry.dimension;
-        staging.1 = DimensionSnapshot::from_terminal_evidence(DimensionSnapshotScalars {
-            attempted: joined.attempted,
-            consumed: joined.consumed,
-            current_live_bytes: 0,
-            peak_live_bytes: joined.peak_live_bytes,
-            pending_publication: joined.pending_publication,
-            committed: joined.committed + canonical_increment,
-            committed_canonical_output: joined.committed_canonical_output + canonical_increment,
-            published_outcome_evidence: joined.published_outcome_evidence + evidence_increment,
-        });
-    }
-    for (entry, staging) in state
-        .phases
-        .iter()
-        .zip(state.phase_snapshot_staging.iter_mut())
-    {
-        staging.0 = entry.phase;
-        staging.1 = PhaseSnapshot::from_terminal_evidence(
-            0,
-            state.phase_states[entry.state_position].peak_live_bytes,
-        );
-    }
+    let rows = SnapshotRows {
+        storage: StorageView {
+            dimensions: &state.dimensions,
+            phase_states: &state.phase_states,
+            header: &state.header,
+        },
+        phases: &state.phases,
+        work_rows: &work.rows,
+        work_header: &work.header,
+    };
+    rows.write_terminal(
+        &mut state.dimension_snapshot_staging,
+        &mut state.phase_snapshot_staging,
+        canonical,
+        evidence,
+    );
     LedgerSnapshot {
         dimensions: std::mem::take(&mut state.dimension_snapshot_staging),
         phases: std::mem::take(&mut state.phase_snapshot_staging),

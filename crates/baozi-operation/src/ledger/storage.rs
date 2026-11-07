@@ -2,10 +2,13 @@ use super::*;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(super) mod finite;
+use finite::{FiniteStorage, FiniteStorageRead, FiniteStorageWrite};
+
 static NEXT_LEDGER_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct LedgerIdentity(NonZeroU64);
+pub(crate) struct LedgerIdentity(NonZeroU64);
 
 impl LedgerIdentity {
     pub(super) fn try_new() -> Option<Self> {
@@ -26,6 +29,25 @@ impl LedgerIdentity {
 pub(super) type SharedStorage<P, D> = Arc<Mutex<Option<LedgerState<P, D>>>>;
 pub(super) type WeakStorage<P, D> = std::sync::Weak<Mutex<Option<LedgerState<P, D>>>>;
 
+pub(super) fn phase_positions_are_valid<P>(
+    phases: &[PhaseEntry<P>],
+    phase_state_count: usize,
+    phase_staging_count: usize,
+    last_completed_position: Option<usize>,
+) -> bool {
+    let phase_count = phases.len();
+    phase_count == phase_state_count
+        && phase_count == phase_staging_count
+        && (0..phase_count).all(|state_position| {
+            phases
+                .iter()
+                .filter(|entry| entry.state_position == state_position)
+                .count()
+                == 1
+        })
+        && last_completed_position.is_none_or(|position| position < phase_count)
+}
+
 #[derive(Debug)]
 pub(super) enum DynamicStorage<P, D> {
     Inline(Option<LedgerState<P, D>>),
@@ -40,6 +62,179 @@ pub(super) enum StorageRead<'storage, P, D> {
 pub(super) enum StorageWrite<'storage, P, D> {
     Inline(&'storage mut LedgerState<P, D>),
     Shared(StorageGuard<'storage, P, D>),
+}
+
+pub(super) enum StorageOwner<'storage, P, D> {
+    Dynamic(&'storage mut DynamicStorage<P, D>),
+    Finite(&'storage mut FiniteStorage<P, D>),
+}
+
+pub(super) enum StorageRef<'storage, P, D> {
+    Dynamic(&'storage DynamicStorage<P, D>),
+    Finite(&'storage FiniteStorage<P, D>),
+}
+
+impl<P, D> StorageRef<'_, P, D> {
+    pub(super) fn read(&self) -> SelectedStorageRead<'_, P, D> {
+        match self {
+            Self::Dynamic(owner) => SelectedStorageRead::Dynamic(owner.read()),
+            Self::Finite(owner) => SelectedStorageRead::Finite(owner.read()),
+        }
+    }
+
+    pub(super) fn shared(&self) -> Option<&SharedStorage<P, D>> {
+        match self {
+            Self::Dynamic(owner) => owner.shared(),
+            Self::Finite(owner) => owner.shared(),
+        }
+    }
+
+    pub(super) fn owns(&self, owner: &SharedStorage<P, D>) -> bool {
+        self.shared()
+            .is_some_and(|shared| Arc::ptr_eq(shared, owner))
+    }
+}
+
+pub(super) enum SelectedStorageRead<'storage, P, D> {
+    Dynamic(StorageRead<'storage, P, D>),
+    Finite(FiniteStorageRead<'storage, P, D>),
+}
+
+pub(super) enum SelectedStorageWrite<'storage, P, D> {
+    Dynamic(StorageWrite<'storage, P, D>),
+    Finite(FiniteStorageWrite<'storage, P, D>),
+}
+
+impl<P, D> StorageOwner<'_, P, D> {
+    pub(super) fn as_read(&self) -> StorageRef<'_, P, D> {
+        match self {
+            Self::Dynamic(owner) => StorageRef::Dynamic(owner),
+            Self::Finite(owner) => StorageRef::Finite(owner),
+        }
+    }
+
+    pub(super) fn reborrow(&mut self) -> StorageOwner<'_, P, D> {
+        match self {
+            Self::Dynamic(owner) => StorageOwner::Dynamic(owner),
+            Self::Finite(owner) => StorageOwner::Finite(owner),
+        }
+    }
+
+    pub(super) fn read(&self) -> SelectedStorageRead<'_, P, D> {
+        match self {
+            Self::Dynamic(owner) => SelectedStorageRead::Dynamic(owner.read()),
+            Self::Finite(owner) => SelectedStorageRead::Finite(owner.read()),
+        }
+    }
+
+    pub(super) fn write(&mut self) -> SelectedStorageWrite<'_, P, D> {
+        match self {
+            Self::Dynamic(owner) => SelectedStorageWrite::Dynamic(owner.write()),
+            Self::Finite(owner) => SelectedStorageWrite::Finite(owner.write()),
+        }
+    }
+
+    pub(super) fn shared(&self) -> Option<&SharedStorage<P, D>> {
+        match self {
+            Self::Dynamic(owner) => owner.shared(),
+            Self::Finite(owner) => owner.shared(),
+        }
+    }
+
+    pub(super) fn ensure_shared(&mut self) -> Result<&SharedStorage<P, D>, LedgerEvidenceError> {
+        match self {
+            Self::Dynamic(owner) => owner.ensure_shared(),
+            Self::Finite(owner) => owner.ensure_shared(),
+        }
+    }
+}
+
+impl<P, D> SelectedStorageRead<'_, P, D> {
+    pub(super) fn phases(&self) -> &[PhaseEntry<P>] {
+        match self {
+            Self::Dynamic(state) => &state.phases,
+            Self::Finite(state) => state.phases(),
+        }
+    }
+
+    pub(super) fn snapshot_staging_lengths(&self) -> (usize, usize) {
+        match self {
+            Self::Dynamic(state) => (
+                state.dimension_snapshot_staging.len(),
+                state.phase_snapshot_staging.len(),
+            ),
+            Self::Finite(_) => (finite::FINITE_DIMENSION_COUNT, finite::FINITE_PHASE_COUNT),
+        }
+    }
+
+    pub(super) fn view(&self) -> StorageView<'_, P, D> {
+        match self {
+            Self::Dynamic(state) => state.view(),
+            Self::Finite(state) => state.view(),
+        }
+    }
+}
+
+impl<P, D> SelectedStorageWrite<'_, P, D> {
+    pub(super) fn phases(&self) -> &[PhaseEntry<P>] {
+        match self {
+            Self::Dynamic(state) => &state.phases,
+            Self::Finite(state) => state.phases(),
+        }
+    }
+
+    pub(super) fn snapshot_staging_lengths(&self) -> (usize, usize) {
+        match self {
+            Self::Dynamic(state) => (
+                state.dimension_snapshot_staging.len(),
+                state.phase_snapshot_staging.len(),
+            ),
+            Self::Finite(_) => (finite::FINITE_DIMENSION_COUNT, finite::FINITE_PHASE_COUNT),
+        }
+    }
+
+    pub(super) fn phase_positions_are_valid(&self) -> bool {
+        match self {
+            Self::Dynamic(state) => phase_catalog_shape_is_valid(state),
+            Self::Finite(state) => state.phase_positions_are_valid(),
+        }
+    }
+
+    pub(super) fn view(&self) -> StorageView<'_, P, D> {
+        match self {
+            Self::Dynamic(state) => state.view(),
+            Self::Finite(state) => state.view(),
+        }
+    }
+
+    pub(super) fn view_mut(&mut self) -> StorageViewMut<'_, P, D> {
+        match self {
+            Self::Dynamic(state) => state.view_mut(),
+            Self::Finite(state) => state.view_mut(),
+        }
+    }
+}
+
+impl<P, D> Deref for SelectedStorageRead<'_, P, D> {
+    type Target = LedgerHeader<P>;
+
+    fn deref(&self) -> &Self::Target {
+        self.view().header
+    }
+}
+
+impl<P, D> Deref for SelectedStorageWrite<'_, P, D> {
+    type Target = LedgerHeader<P>;
+
+    fn deref(&self) -> &Self::Target {
+        self.view().header
+    }
+}
+
+impl<P, D> DerefMut for SelectedStorageWrite<'_, P, D> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.view_mut().header
+    }
 }
 
 pub(super) struct StorageGuard<'storage, P, D>(MutexGuard<'storage, Option<LedgerState<P, D>>>);

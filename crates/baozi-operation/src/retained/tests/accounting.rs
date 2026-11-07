@@ -652,11 +652,7 @@ fn admission_first_direct_fallback_ends_in_finalization_containment() {
         .unwrap_or_else(|_| panic!("poison thread must be contained"));
     let before_prepare = account.snapshot();
     let first_evidence = before_prepare.first_poison_evidence();
-    let ledger = operation
-        .common
-        .coordinator
-        .retained_ledger()
-        .test_shared_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let active_before = ledger.active_reservations();
     let live_before = ledger.current_live_bytes();
     assert!(active_before > 0);
@@ -717,8 +713,8 @@ fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
         .test_source_allocation(source_slot.identity())
         .unwrap_or_else(|| panic!("source slot must resolve before poison"));
     let source_share_calls = source_allocation.share_call_count();
-    let target_len = assembly.canonical_len();
-    let ledger = assembly.test_ledger_probe();
+    let target_len = assembly.loan().canonical_len();
+    let ledger = assembly.loan().test_ledger_probe();
     let active = ledger.active_reservations();
     let live = ledger.current_live_bytes();
     let poisoner = account
@@ -730,14 +726,16 @@ fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
     let poisoned = account.snapshot();
     let _ = take_test_member_lookups();
 
-    let result = assembly.try_share_canonical(source.aggregate(), source_slot);
+    let result = assembly
+        .loan_mut()
+        .try_share_canonical(source.aggregate(), source_slot);
     assert!(matches!(
         result,
         Err(RetainedPublicationError::Writer(
             RetainedWriterError::AccountPoisoned(_)
         ))
     ));
-    assert_eq!(assembly.canonical_len(), target_len);
+    assert_eq!(assembly.loan().canonical_len(), target_len);
     assert_eq!(ledger.active_reservations(), active);
     assert_eq!(ledger.current_live_bytes(), live);
     assert_eq!(source_allocation.share_call_count(), source_share_calls);
@@ -812,6 +810,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         .try_publication_assembly(publication_plan_with_canonical_source_mapping(2, 1, 1))
         .unwrap_or_else(|_| panic!("admission-first share target must open"));
     assembly
+        .loan_mut()
         .try_bind_canonical_source(source.aggregate(), TestDimension::Bytes)
         .unwrap_or_else(|_| panic!("canonical source map must bind before admitted share"));
     let poisoner = account
@@ -819,8 +818,9 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
             Ok::<_, RetainedBuildFailureCode>(PanickingDropProbe(&DROP_COUNT))
         })
         .unwrap_or_else(|_| panic!("share-race poison probe must retain"));
-    let target_account = assembly
-        .fields
+    let loan = assembly.loan_mut();
+    let fields = &mut *loan.fields;
+    let target_account = fields
         .account
         .as_ref()
         .unwrap_or_else(|| panic!("target retains account"));
@@ -839,7 +839,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         .inner
         .test_source_allocation(source_slot.identity())
         .unwrap_or_else(|| panic!("source slot must resolve"));
-    let mut root = assembly
+    let mut root = loan
         .operation
         .as_mut()
         .unwrap_or_else(|| panic!("target retains operation"))
@@ -853,14 +853,13 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     >(
         &mut root,
         share_admission,
-        assembly.fields.ordinary_handle_share_work,
-        assembly
-            .fields
+        fields.ordinary_handle_share_work,
+        fields
             .canonical_table
             .as_mut()
             .and_then(PolicyRetainedAllocation::table_mut_during_construction)
             .unwrap_or_else(|| panic!("target retains canonical table")),
-        assembly.fields.set_id,
+        fields.set_id,
         RetainedMembershipDestination::Canonical,
         0,
         1,
@@ -869,19 +868,21 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     )
     .unwrap_or_else(|_| panic!("admission-first share must complete"));
     assert_eq!(identity.index, 0);
-    assert_eq!(assembly.canonical_len(), 1);
+    assert_eq!(assembly.loan().canonical_len(), 1);
     assert_eq!(source_allocation.share_call_count(), source_share_calls + 1);
     assert_eq!(account.snapshot(), poisoned);
 
-    let before_later = assembly.canonical_len();
-    let later = assembly.try_share_canonical(source.aggregate(), source_slot);
+    let before_later = assembly.loan().canonical_len();
+    let later = assembly
+        .loan_mut()
+        .try_share_canonical(source.aggregate(), source_slot);
     assert!(matches!(
         later,
         Err(RetainedPublicationError::Writer(
             RetainedWriterError::AccountPoisoned(_)
         ))
     ));
-    assert_eq!(assembly.canonical_len(), before_later);
+    assert_eq!(assembly.loan().canonical_len(), before_later);
     drop(source_evidence);
 }
 
@@ -939,11 +940,7 @@ fn eligibility_first_capability_completes_preparation_after_later_account_poison
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation
-        .common
-        .coordinator
-        .retained_ledger()
-        .test_shared_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let eligibility_entered = StdArc::new(Barrier::new(2));
     let eligibility_resume = StdArc::new(Barrier::new(2));
     let worker_entered = StdArc::clone(&eligibility_entered);
@@ -997,11 +994,7 @@ fn poisoned_joint_commit_account_cannot_be_substituted_with_healthy_foreign_acco
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation
-        .common
-        .coordinator
-        .retained_ledger()
-        .test_shared_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("poison-first publication must open"));
@@ -1118,11 +1111,7 @@ fn primary_eligibility_first_capability_completes_after_later_account_poison() {
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation
-        .common
-        .coordinator
-        .retained_ledger()
-        .test_shared_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("primary eligibility publication must open"));
@@ -1351,14 +1340,15 @@ fn side_owner_escape_keeps_physical_and_operation_attribution_fail_closed() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("side-owner publication must open"));
     let ledger = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("side-owner assembly retains operation")
         .common
-        .coordinator
-        .retained_ledger()
+        .test_ledger()
         .test_shared_probe();
     let account = assembly
+        .loan()
         .fields
         .account
         .as_ref()
@@ -1372,10 +1362,12 @@ fn side_owner_escape_keeps_physical_and_operation_attribution_fail_closed() {
     let physical_before = account.snapshot();
     let plan = RetainedAllocationPlan::new(64, 1).unwrap();
 
-    let result = assembly.try_retain_canonical::<CanonicalRootTag>(plan, move |_emplacer| {
-        *lock_recovering_poison(&escaped) = Some(vec![0_u8; 64]);
-        panic!("builder escaped side-owned storage")
-    });
+    let result = assembly
+        .loan_mut()
+        .try_retain_canonical::<CanonicalRootTag>(plan, move |_emplacer| {
+            *lock_recovering_poison(&escaped) = Some(vec![0_u8; 64]);
+            panic!("builder escaped side-owned storage")
+        });
 
     assert!(matches!(
         result,
@@ -1487,12 +1479,12 @@ fn allocation_failure_rolls_back_block_attribution_before_build() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let probe = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("assembly retains the operation")
         .common
-        .coordinator
-        .retained_ledger()
+        .test_ledger()
         .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
@@ -1500,6 +1492,7 @@ fn allocation_failure_rolls_back_block_attribution_before_build() {
     DROP_COUNT.store(0, Ordering::SeqCst);
     fail_next_final_owner_allocation();
     let error = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingDropProbe(&DROP_COUNT), CanonicalRootTag))
         })

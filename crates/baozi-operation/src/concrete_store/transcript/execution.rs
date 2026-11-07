@@ -6,7 +6,8 @@ use super::super::{
     OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef, OutcomeEvidenceUtf8Ref,
     PreparedStoreFallback, PublishedCanonicalStore, RetainedStorePublicationAssembly,
     ScalarSequence, SequenceWriter, StoreBatchRuntimeError, StoreBuildError, StoreDestination,
-    StoreDimensionKey, StorePrepareError, StoreRuntimeError, StoredScalar, Utf8Writer,
+    StoreDimensionKey, StorePrepareError, StorePublicationLoan, StoreRuntimeError, StoredScalar,
+    Utf8Writer,
 };
 use super::{
     CounterDelta, DestinationCounters, PlannedCanonicalBytes, PlannedCanonicalBytesBatch,
@@ -210,17 +211,18 @@ where
         Ok(())
     }
 
-    fn table_state(&self) -> TableState {
+    fn table_state(&mut self) -> TableState {
+        let assembly = self.assembly.ordinary();
         TableState {
             canonical: DestinationState {
-                members: self.assembly.canonical_len(),
-                new_blocks: self.assembly.canonical_new_blocks(),
-                commitments: self.assembly.canonical_commitment_len(),
+                members: assembly.canonical_len(),
+                new_blocks: assembly.canonical_new_blocks(),
+                commitments: assembly.canonical_commitment_len(),
             },
             evidence: DestinationState {
-                members: self.assembly.outcome_evidence_len(),
-                new_blocks: self.assembly.outcome_evidence_new_blocks(),
-                commitments: self.assembly.outcome_evidence_commitment_len(),
+                members: assembly.outcome_evidence_len(),
+                new_blocks: assembly.outcome_evidence_new_blocks(),
+                commitments: assembly.outcome_evidence_commitment_len(),
             },
         }
     }
@@ -236,13 +238,14 @@ where
         &mut self,
         ticket: &PlannedStoreInstruction<Plan, Tag, Destination>,
         delta: CounterDelta,
-        action: impl FnOnce(
-            &mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
-        ) -> Result<T, StoreRuntimeError>,
+        action: impl FnOnce(&mut StorePublicationLoan<'_, O, PP, U, L>) -> Result<T, StoreRuntimeError>,
     ) -> Result<T, StoreExecutionError> {
         self.ensure(ticket)?;
         let before = self.table_state();
-        let result = action(&mut self.assembly);
+        let result = {
+            let mut assembly = self.assembly.ordinary();
+            action(&mut assembly)
+        };
         self.finish(result, before, delta)
     }
 
@@ -253,15 +256,14 @@ where
         delta: CounterDelta,
     ) -> Result<T, StoreExecutionError> {
         let after = self.table_state();
+        let fallback_only = self.assembly.ordinary().is_fallback_only();
         match result {
-            Ok(value)
-                if !self.assembly.is_fallback_only() && before.try_apply(delta) == Some(after) =>
-            {
+            Ok(value) if !fallback_only && before.try_apply(delta) == Some(after) => {
                 self.advance(delta)?;
                 Ok(value)
             }
             Ok(_) => self.abandon_invariant(),
-            Err(cause) if self.assembly.is_fallback_only() => {
+            Err(cause) if fallback_only => {
                 let failed_instruction = self.cursor.next_ordinal;
                 self.state = ExecutionState::Abandoned { failed_instruction };
                 Err(StoreExecutionError::Contained {
@@ -279,12 +281,15 @@ where
         ticket: &PlannedStoreInstruction<Plan, Tag, Destination>,
         delta: CounterDelta,
         action: impl FnOnce(
-            &mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+            &mut StorePublicationLoan<'_, O, PP, U, L>,
         ) -> Result<T, StoreBatchRuntimeError>,
     ) -> Result<T, StoreExecutionError> {
         self.ensure(ticket)?;
         let before = self.table_state();
-        let result = action(&mut self.assembly);
+        let result = {
+            let mut assembly = self.assembly.ordinary();
+            action(&mut assembly)
+        };
         self.finish_batch(result, before, delta)
     }
 
@@ -295,10 +300,9 @@ where
         delta: CounterDelta,
     ) -> Result<T, StoreExecutionError> {
         let after = self.table_state();
+        let fallback_only = self.assembly.ordinary().is_fallback_only();
         match result {
-            Ok(value)
-                if !self.assembly.is_fallback_only() && before.try_apply(delta) == Some(after) =>
-            {
+            Ok(value) if !fallback_only && before.try_apply(delta) == Some(after) => {
                 self.advance(delta)?;
                 Ok(value)
             }
@@ -311,7 +315,7 @@ where
                     cause,
                 })
             }
-            Err(cause) if self.assembly.is_fallback_only() => {
+            Err(cause) if fallback_only => {
                 let failed_instruction = self.cursor.next_ordinal;
                 self.state = ExecutionState::Abandoned { failed_instruction };
                 Err(StoreExecutionError::BatchContained {
@@ -496,7 +500,7 @@ where
         reason = "an ordinary pre-handoff rejection preserves the complete executor"
     )]
     pub(super) fn try_into_primary_parts(
-        self,
+        mut self,
     ) -> Result<PrimaryTranscriptParts<'inv, O, PP, U, L>, (Self, StoreExecutionError)> {
         if let ExecutionState::Abandoned { failed_instruction } = self.state {
             return Err((self, StoreExecutionError::Abandoned { failed_instruction }));

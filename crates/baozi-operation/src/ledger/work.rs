@@ -15,7 +15,7 @@ mod parser;
 
 pub(crate) use kernel::ParserChannel;
 pub(crate) use kernel::{
-    ParserFrame, ParserReadRow, ReservedProducerRow, WorkFrame, WorkLayout, WorkView,
+    ParserFrame, ParserReadRow, ReservedProducerRow, WorkFrame, WorkLayout, WorkReadView, WorkView,
 };
 #[cfg(test)]
 use kernel::{
@@ -87,6 +87,21 @@ pub(super) struct WorkHeader {
     pub(super) integrity_fault: bool,
 }
 
+impl WorkHeader {
+    pub(super) const fn new() -> Self {
+        Self {
+            mode: WorkMode::Ordinary,
+            open_envelopes: 0,
+            producer_open: false,
+            parser_parent_open: false,
+            parser_child_open: false,
+            protected_open: false,
+            protected_dimension: None,
+            integrity_fault: false,
+        }
+    }
+}
+
 pub(super) struct WorkState<D> {
     pub(super) rows: Vec<WorkEntry<D>>,
     pub(super) header: WorkHeader,
@@ -98,37 +113,14 @@ impl<D> WorkState<D> {
         Self {
             rows,
             header: WorkHeader {
-                mode: WorkMode::Ordinary,
-                open_envelopes: 0,
-                producer_open: false,
-                parser_parent_open: false,
-                parser_child_open: false,
-                protected_open: false,
-                protected_dimension: None,
                 integrity_fault,
+                ..WorkHeader::new()
             },
         }
     }
 
     pub(super) fn check_integrity(&self, catalog_len: usize) -> Result<(), LedgerCause<D>> {
-        if self.header.integrity_fault || self.rows.len() != catalog_len {
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
-        }
-        Ok(())
-    }
-
-    pub(super) fn ensure_active(
-        &self,
-        catalog_len: usize,
-        grant: WorkGrant,
-    ) -> Result<(), LedgerCause<D>> {
-        self.check_integrity(catalog_len)?;
-        kernel::check_active_mode(&self.header, grant)
-    }
-
-    pub(super) fn check_quiescent(&self, catalog_len: usize) -> Result<(), LedgerCause<D>> {
-        self.check_integrity(catalog_len)?;
-        kernel::check_quiescent(&self.rows, &self.header)
+        kernel::check_row_shape(&self.rows, &self.header, catalog_len)
     }
 
     pub(super) fn view<'a>(&'a mut self, catalog: &'a [D]) -> WorkView<'a, D> {
@@ -138,48 +130,42 @@ impl<D> WorkState<D> {
             header: &mut self.header,
         }
     }
-}
 
-impl<D: Copy + Ord> WorkState<D> {
-    pub(super) fn bind_layout<const N: usize>(
-        &self,
-        catalog: &[D],
-        dimensions: [D; N],
-        grant: WorkGrant,
-    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
-        let layout = WorkLayout::bind(catalog, &dimensions, grant)?;
-        self.ensure_active(catalog.len(), grant)?;
-        layout.validate_binding(&self.header, &dimensions)?;
-        Ok(layout)
+    pub(super) fn as_read<'a>(&'a self, catalog: &'a [D]) -> WorkReadView<'a, D> {
+        WorkReadView {
+            catalog,
+            rows: &self.rows,
+            header: &self.header,
+        }
     }
 }
 
 pub(crate) struct InternalWork<'op, D> {
-    pub(super) catalog: &'op [D],
-    pub(super) state: &'op mut WorkState<D>,
+    pub(super) state: WorkView<'op, D>,
 }
 
-impl<D> InternalWork<'_, D> {
+impl<'op, D> InternalWork<'op, D> {
+    pub(super) fn new(state: WorkView<'op, D>) -> Self {
+        Self { state }
+    }
+
+    pub(super) fn catalog(&self) -> &[D] {
+        self.state.catalog
+    }
+
     pub(crate) fn loan(&mut self) -> InternalWork<'_, D> {
-        InternalWork {
-            catalog: self.catalog,
-            state: self.state,
-        }
+        InternalWork::new(self.state.reborrow())
     }
 
-    pub(super) fn read_state(&self) -> &WorkState<D> {
-        self.state
-    }
-
-    pub(super) fn ensure_active(&self, grant: WorkGrant) -> Result<(), LedgerCause<D>> {
-        self.state.ensure_active(self.catalog.len(), grant)
+    pub(super) fn read_state(&self) -> WorkReadView<'_, D> {
+        self.state.as_read()
     }
 
     pub(crate) fn reborrow(&mut self) -> Result<super::ExclusiveWork<'_, D>, LedgerCause<D>> {
-        self.state.check_integrity(self.catalog.len())?;
+        self.read_state().check_integrity()?;
         Ok(super::ExclusiveWork {
-            catalog: self.catalog,
-            work: self.state.view(self.catalog),
+            catalog: self.state.catalog,
+            work: self.state.reborrow(),
         })
     }
 }
@@ -194,13 +180,13 @@ impl<D: Copy> InternalWork<'_, D> {
         if !frame.active {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
-        layout.aggregate(self.catalog, frame.remaining, CounterClass::Consumed)?;
-        if self.state.rows.len() != self.catalog.len() {
+        layout.aggregate(self.catalog(), frame.remaining, CounterClass::Consumed)?;
+        if self.state.rows.len() != self.catalog().len() {
             self.state.header.integrity_fault = true;
             frame.active = false;
             return Err(LedgerCause::FinalSnapshotShapeMismatch);
         }
-        frame.resolve(&layout, &mut self.state.view(self.catalog), abandoned)
+        frame.resolve(&layout, &mut self.state, abandoned)
     }
 }
 
@@ -209,16 +195,16 @@ impl<D: Copy + Ord> InternalWork<'_, D> {
         &self,
         dimensions: [D; N],
     ) -> Result<WorkLayout<N>, LedgerCause<D>> {
-        self.state
-            .bind_layout(self.catalog, dimensions, WorkGrant::Ordinary)
+        self.read_state()
+            .bind_layout(dimensions, WorkGrant::Ordinary)
     }
 
     pub(crate) fn bind_protected<const N: usize>(
         &self,
         dimensions: [D; N],
     ) -> Result<WorkLayout<N>, LedgerCause<D>> {
-        self.state
-            .bind_layout(self.catalog, dimensions, WorkGrant::Protected)
+        self.read_state()
+            .bind_layout(dimensions, WorkGrant::Protected)
     }
 
     pub(crate) fn bind_share<const N: usize>(
@@ -229,7 +215,7 @@ impl<D: Copy + Ord> InternalWork<'_, D> {
             WorkMode::Protected => WorkGrant::Protected,
             _ => WorkGrant::Ordinary,
         };
-        self.state.bind_layout(self.catalog, dimensions, grant)
+        self.read_state().bind_layout(dimensions, grant)
     }
 }
 

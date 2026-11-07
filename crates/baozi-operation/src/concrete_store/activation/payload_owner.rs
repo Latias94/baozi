@@ -4,6 +4,22 @@ use super::*;
 use crate::control::discard_untrusted_panic_payload;
 use std::cell::Cell;
 
+/// Disposes one original capture or payload without replacing an earlier unwind cause.
+pub(super) fn drop_captured_value<T>(
+    value: &mut Option<T>,
+    first_panic: &mut Option<Box<dyn std::any::Any + Send>>,
+    record_failure: impl FnOnce(),
+) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(value.take()))) {
+        record_failure();
+        if first_panic.is_some() {
+            discard_untrusted_panic_payload(payload);
+        } else {
+            *first_panic = Some(payload);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum PayloadOrder {
     ProofBeforeOutput,

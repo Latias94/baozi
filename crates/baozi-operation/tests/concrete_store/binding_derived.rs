@@ -125,21 +125,26 @@ fn derived_binding_preserves_prework_account_and_original_source_through_inherit
     );
     let mut assembly = operation.try_publication_assembly(plan).unwrap();
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .unwrap();
     let before_inheritance = account.snapshot();
     assembly
+        .ordinary()
         .try_inherit_all_canonical_leaves(&source.canonical, keys.dimension)
         .unwrap();
     let sequence = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.canonical_sequence)
         .unwrap();
     let bytes = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.canonical_bytes)
         .unwrap();
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_eq!(account.snapshot(), before_inheritance);
     let root = assembly
+        .ordinary()
         .try_rewrite_canonical_records_controlled(
             &source.canonical,
             original_root,
@@ -149,6 +154,7 @@ fn derived_binding_preserves_prework_account_and_original_source_through_inherit
         )
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).unwrap(),
             EvidenceRootTag,
@@ -268,38 +274,46 @@ fn derived_binding_rejects_same_account_generation_before_callbacks_and_cleans_u
         .unwrap();
     let before_rejections = account.snapshot();
     assert!(matches!(
-        assembly.try_bind_canonical_source(&sibling.canonical, keys.other_dimension),
+        assembly
+            .ordinary()
+            .try_bind_canonical_source(&sibling.canonical, keys.other_dimension),
         Err(StoreRuntimeError::InvalidSourceSlot)
     ));
     assert!(matches!(
-        assembly.try_inherit_all_canonical_leaves(&sibling.canonical, keys.other_dimension),
+        assembly
+            .ordinary()
+            .try_inherit_all_canonical_leaves(&sibling.canonical, keys.other_dimension),
         Err(StoreRuntimeError::InvalidSourceSlot)
     ));
     let rewrite_called = Cell::new(false);
     assert!(matches!(
-        assembly.try_rewrite_canonical_sequence_controlled(
-            &sibling.canonical,
-            sibling.canonical_sequence,
-            SequencePlan::<u32>::new(1).unwrap(),
-            keys.other_dimension,
-            SequenceTag,
-            |writer, _control| {
-                rewrite_called.set(true);
-                writer.push(99).map_err(Into::into)
-            },
-        ),
+        assembly
+            .ordinary()
+            .try_rewrite_canonical_sequence_controlled(
+                &sibling.canonical,
+                sibling.canonical_sequence,
+                SequencePlan::<u32>::new(1).unwrap(),
+                keys.other_dimension,
+                SequenceTag,
+                |writer, _control| {
+                    rewrite_called.set(true);
+                    writer.push(99).map_err(Into::into)
+                },
+            ),
         Err(StoreRuntimeError::InvalidSourceSlot)
     ));
     assert!(!rewrite_called.get());
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert_eq!(account.snapshot(), before_rejections);
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .unwrap();
     assembly
+        .ordinary()
         .try_inherit_all_canonical_leaves(&source.canonical, keys.dimension)
         .unwrap();
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_eq!(account.snapshot(), before_rejections);
     let published = assembly.prepare_minimal_fallback().unwrap().handoff();
     let units = published

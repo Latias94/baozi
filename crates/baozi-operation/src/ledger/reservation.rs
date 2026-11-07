@@ -1,4 +1,4 @@
-use super::storage::{SharedStorage, WeakStorage};
+use super::storage::{LedgerIdentity, SharedStorage, StorageViewMut, WeakStorage};
 use super::{
     AttributionBatchCreateError, CanonicalOutput, DestinationKind, DestinationState,
     DimensionEntry, LedgerCause, LedgerState, OutcomeEvidenceDestination, OutputCommitment,
@@ -8,6 +8,12 @@ use crate::{CapacityPlan, OperationOwner};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, Weak};
+
+mod borrowed;
+pub(crate) use borrowed::{FallbackBatchReadView, FallbackBatchView};
+
+#[cfg(test)]
+mod detach_tests;
 
 pub(crate) struct RetainedStorageOperation;
 impl OperationOwner for RetainedStorageOperation {}
@@ -215,7 +221,7 @@ where
         self.active = false;
     }
 
-    fn release_bound_locked(&mut self, state: &mut LedgerState<P, D>) {
+    fn release_bound_locked(&mut self, state: &mut StorageViewMut<'_, P, D>) {
         state.active_reservations -= 1;
         state.current_live_bytes -= self.bytes;
         state.dimensions[self.dimension_position]
@@ -567,6 +573,24 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
+    pub(crate) fn view(&mut self) -> FallbackBatchView<'_, O, P, D> {
+        FallbackBatchView {
+            canonical_assembly: &mut self.canonical_assembly,
+            evidence_assembly: &mut self.evidence_assembly,
+            fallback: &mut self.fallback,
+            numerical_evidence: Some(&mut self.evidence),
+        }
+    }
+
+    pub(crate) fn as_read(&self) -> FallbackBatchReadView<'_, O, P, D> {
+        FallbackBatchReadView {
+            canonical_assembly: &self.canonical_assembly,
+            evidence_assembly: &self.evidence_assembly,
+            fallback: &self.fallback,
+            numerical_evidence: Some(&self.evidence),
+        }
+    }
+
     pub(crate) const fn new_unbound(
         canonical_assembly: AttributionReservationBatch<O, P, D, CanonicalOutput>,
         evidence_assembly: AttributionReservationBatch<O, P, D, OutcomeEvidenceDestination>,
@@ -604,26 +628,11 @@ where
         AttributionReservationBatch<O, P, D, CanonicalOutput>,
         AttributionReservationBatch<O, P, D, CanonicalOutput>,
     > {
-        if !self.canonical_assembly.is_empty_storage_shell()
-            || !replacement.is_empty_storage_shell()
-        {
-            return Err(replacement);
-        }
-        Ok(std::mem::replace(&mut self.canonical_assembly, replacement))
+        self.view().replace_empty_canonical_assembly(replacement)
     }
 
     pub(super) fn try_prepare_fallback_sources(&mut self) -> Result<(), ()> {
-        if !self
-            .evidence_assembly
-            .can_absorb_sources([Some(&self.evidence), Some(&self.fallback)])
-        {
-            return Err(());
-        }
-        self.evidence_assembly
-            .absorb_proven_retaining_source_storage(&mut self.evidence);
-        self.evidence_assembly
-            .absorb_proven_retaining_source_storage(&mut self.fallback);
-        Ok(())
+        self.view().try_prepare_fallback_sources()
     }
 }
 
@@ -776,6 +785,10 @@ where
     }
 
     pub(super) fn validate_selected_owner(&self, ledger: &super::Ledger<O, P, D>) -> bool {
+        self.validate_owner_view(&ledger.as_read())
+    }
+
+    pub(super) fn validate_owner_view(&self, ledger: &super::LedgerReadView<'_, O, P, D>) -> bool {
         match &self.owner {
             AttributionBatchOwner::Empty(identity) => {
                 *identity == ledger.identity
@@ -786,7 +799,7 @@ where
                     && self.commitment_limit == 0
             }
             AttributionBatchOwner::Shared(owner) => {
-                ledger.state.owns(owner)
+                ledger.storage.owns(owner)
                     && self
                         .attributions
                         .iter()
@@ -895,7 +908,7 @@ where
         })
     }
 
-    pub(super) fn release_bound_attributions(&mut self, state: &mut LedgerState<P, D>) {
+    pub(super) fn release_bound_attributions(&mut self, state: &mut StorageViewMut<'_, P, D>) {
         for token in &mut self.attributions {
             token.core.release_bound_locked(state);
         }
@@ -912,15 +925,18 @@ where
                         .shared()
                         .expect("a capacity cover retains its actual shared owner"),
                 );
-                capacity_cover.core.release_bound_locked(&mut state);
+                capacity_cover
+                    .core
+                    .release_bound_locked(&mut state.view_mut());
             }
             drop(capacity_cover);
         }
     }
 
-    pub(super) fn into_detached(
-        mut self,
-        expected: &Arc<Mutex<Option<LedgerState<P, D>>>>,
+    pub(super) fn detach_in_place(
+        &mut self,
+        expected: Option<&SharedStorage<P, D>>,
+        identity: LedgerIdentity,
     ) -> DetachedAttributionBatch<O, P, D, Destination> {
         debug_assert!(match &self.owner {
             AttributionBatchOwner::Empty(_) => {
@@ -928,20 +944,42 @@ where
                     && self.commitments.capacity() == 0
                     && self.capacity_cover.is_none()
             }
-            AttributionBatchOwner::Shared(owner) => Arc::ptr_eq(owner, expected),
+            AttributionBatchOwner::Shared(owner) => {
+                expected.is_some_and(|expected| Arc::ptr_eq(owner, expected))
+            }
         });
         for attribution in &mut self.attributions {
-            attribution.core.detach_owner(expected);
+            attribution.core.detach_owner(
+                expected.expect("a qualified attribution retains its actual shared owner"),
+            );
         }
         if let Some(capacity_cover) = self.capacity_cover.as_mut() {
-            capacity_cover.core.detach_owner(expected);
+            capacity_cover.core.detach_owner(
+                expected.expect("a qualified capacity cover retains its actual shared owner"),
+            );
         }
-        drop(self.owner);
+        let attributions = std::mem::take(&mut self.attributions);
+        let commitments = std::mem::take(&mut self.commitments);
+        let capacity_cover = self.capacity_cover.take();
+        self.retire_empty_owner(identity);
         DetachedAttributionBatch {
-            attributions: self.attributions,
-            commitments: self.commitments,
-            capacity_cover: self.capacity_cover,
+            attributions,
+            commitments,
+            capacity_cover,
         }
+    }
+
+    /// Called outside accounting guards after the actual batch storage has been destroyed or moved.
+    pub(super) fn retire_empty_owner(&mut self, identity: LedgerIdentity) {
+        debug_assert!(self.attributions.is_empty());
+        debug_assert_eq!(self.attributions.capacity(), 0);
+        debug_assert!(self.commitments.is_empty());
+        debug_assert_eq!(self.commitments.capacity(), 0);
+        debug_assert!(self.capacity_cover.is_none());
+        let owner = std::mem::replace(&mut self.owner, AttributionBatchOwner::Empty(identity));
+        self.attribution_limit = 0;
+        self.commitment_limit = 0;
+        drop(owner);
     }
 }
 
@@ -967,13 +1005,16 @@ where
         }
     }
 
-    pub(super) fn release_attributions(&mut self, state: &mut LedgerState<P, D>) {
+    pub(super) fn release_attributions(&mut self, state: &mut StorageViewMut<'_, P, D>) {
         for attribution in &mut self.attributions {
             attribution.core.release_bound_locked(state);
         }
     }
 
-    pub(super) fn destroy_storage_then_release_cover(&mut self, state: &mut LedgerState<P, D>) {
+    pub(super) fn destroy_storage_then_release_cover(
+        &mut self,
+        state: &mut StorageViewMut<'_, P, D>,
+    ) {
         drop(std::mem::take(&mut self.attributions));
         drop(std::mem::take(&mut self.commitments));
         if let Some(mut capacity_cover) = self.capacity_cover.take() {

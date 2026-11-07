@@ -810,7 +810,7 @@ fn a_scan_boundary_cannot_heal_a_caught_physical_prefix_panic() {
 #[test]
 fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, mut storage) = owner.exclusive().unwrap();
+    let (mut exclusive, mut storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .admit_observed(&mut exclusive.work, [4], WorkLane::Producer)
@@ -856,7 +856,7 @@ fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
 #[test]
 fn unapplied_completion_failure_has_no_invented_consumption_and_no_later_abandonment() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .admit_observed(&mut exclusive.work, [1], WorkLane::Producer)
@@ -886,7 +886,7 @@ fn unapplied_completion_failure_has_no_invented_consumption_and_no_later_abandon
 #[test]
 fn an_internal_frame_does_not_claim_or_close_the_attempted_only_parser_channels() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let parent_layout = exclusive.bind([key]).unwrap();
     let mut parent = parent_layout
         .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Parent)
@@ -928,7 +928,7 @@ fn an_internal_frame_does_not_claim_or_close_the_attempted_only_parser_channels(
 #[test]
 fn real_import_boundary_defers_only_unclassified_unwind_and_caught_return_is_sticky() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let failure = Cell::new(None);
     let execution_state = Cell::new(StoreExecutionState::Running);
@@ -991,7 +991,7 @@ fn real_import_boundary_defers_only_unclassified_unwind_and_caught_return_is_sti
 #[test]
 fn cleanup_fault_precedes_later_import_disposition_and_preserves_the_actual_prefix() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let failure = Cell::new(Some(PreparationFailureCode::ledger()));
     let state = Cell::new(StoreExecutionState::Running);
@@ -1081,7 +1081,7 @@ fn failure_materializer_observes_active_frame_before_resolution() {
     let execution_state = Cell::new(StoreExecutionState::Running);
     let share_work = RetainedHandleSharePlan::new(internal_key, internal_key);
     let (poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
-    let (work, storage) = ledger.exclusive().unwrap();
+    let (work, storage) = ledger.view().into_exclusive().unwrap();
     let share_layout = work.bind(share_work.charges().map(|(key, _)| key)).unwrap();
     let mut context = StoreInvocation {
         parts: ExclusiveOperationParts {
@@ -1177,7 +1177,7 @@ fn failure_materializer_observes_active_frame_before_resolution() {
 #[test]
 fn parser_completion_failure_after_real_write_resolves_suffix_without_abandonment() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, mut storage) = owner.exclusive().unwrap();
+    let (mut exclusive, mut storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Child)

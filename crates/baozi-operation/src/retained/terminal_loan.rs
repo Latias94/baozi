@@ -1,16 +1,172 @@
+use super::ownership::FallbackPublicationBaselineLoan;
+use super::terminal_physical::{
+    FiniteTerminalPhysicalState, TerminalPhysicalGraph, TerminalPhysicalRefs, TerminalPhysicalSlots,
+};
 use super::*;
 use std::ops::{Deref, DerefMut};
 
-pub(super) struct TerminalPhysicalState<P, D, F, CanonicalBlock, EvidenceBlock> {
-    pub(super) fallback: Option<DetachedRetainedPart<F>>,
-    pub(super) evidence: Option<DetachedRetainedPart<TerminalLedgerEvidence<P, D>>>,
-    pub(super) canonical_table: Option<RetainedTableAllocation<CanonicalBlock>>,
-    pub(super) evidence_table: Option<RetainedTableAllocation<EvidenceBlock>>,
-    pub(super) account: Option<PhysicalStorageAccount>,
+/// A short loan of the original concrete terminal slot, never an owning backend union.
+pub(in crate::retained) enum TerminalPhysicalSlot<'inv, P, D, F, CB, EB> {
+    Dynamic(&'inv mut Option<TerminalPhysicalState<P, D, F, CB, EB>>),
+    Finite(&'inv mut Option<FiniteTerminalPhysicalState<F, CB, EB>>),
+}
+
+type TerminalInstallation<'inv, O, P, D, F, CB, EB> = (
+    BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CB, EB>,
+    crate::ledger::FallbackBatchView<'inv, O, P, D>,
+    PrimaryPublicationBatches<'inv, O, P, D>,
+);
+
+impl<'inv, P, D, F, CB, EB> TerminalPhysicalSlot<'inv, P, D, F, CB, EB> {
+    pub(super) const fn is_finite(&self) -> bool {
+        matches!(self, Self::Finite(_))
+    }
+
+    /// All physical owners move into their actual terminal slot before qualification lends them.
+    pub(super) fn install<O>(
+        self,
+        baseline: FallbackPublicationBaselineLoan<'inv, O, P, D, F>,
+        assembly: Option<&'inv mut PublicationAssemblyFields<O, P, D, CB, EB>>,
+    ) -> TerminalInstallation<'inv, O, P, D, F, CB, EB>
+    where
+        O: OperationOwner,
+        P: Copy + Ord,
+        D: Copy + Ord,
+    {
+        assert_eq!(
+            self.is_finite(),
+            baseline.is_finite(),
+            "the original terminal and baseline backends must match"
+        );
+        assert!(
+            baseline.can_take_physical(),
+            "the original baseline must retain all physical owners and batches"
+        );
+        assert!(
+            match &self {
+                Self::Dynamic(slot) => slot.is_none(),
+                Self::Finite(slot) => slot.is_none(),
+            },
+            "one physical terminal transition per invocation"
+        );
+        if let Some(fields) = &assembly {
+            assert!(
+                fields.account.is_some(),
+                "the original assembly retains its account"
+            );
+        }
+
+        let (canonical_table, evidence_table, assembly_account, primary) = match assembly {
+            Some(fields) => (
+                fields.canonical_table.take(),
+                fields.evidence_table.take(),
+                fields.account.take(),
+                PrimaryPublicationBatches::new(
+                    Some(&mut fields.canonical_batch),
+                    Some(&mut fields.evidence_batch),
+                ),
+            ),
+            None => (None, None, None, PrimaryPublicationBatches::new(None, None)),
+        };
+        match (self, baseline) {
+            (Self::Dynamic(slot), FallbackPublicationBaselineLoan::Dynamic(baseline)) => {
+                let (fallback, evidence, batches) = baseline.take_physical_and_lend_batches();
+                *slot = Some(TerminalPhysicalState::new(
+                    fallback,
+                    evidence,
+                    canonical_table,
+                    evidence_table,
+                    assembly_account,
+                ));
+                let physical = slot
+                    .as_mut()
+                    .expect("the actual dynamic slot was installed")
+                    .borrow();
+                let batches = batches
+                    .as_mut()
+                    .expect("the original dynamic batch owner was checked")
+                    .view();
+                (physical, batches, primary)
+            }
+            (Self::Finite(slot), FallbackPublicationBaselineLoan::Finite(baseline)) => {
+                let (fallback, account, batches) = baseline.take_physical_and_lend_batches();
+                *slot = Some(FiniteTerminalPhysicalState::new(
+                    fallback,
+                    canonical_table,
+                    evidence_table,
+                    account,
+                ));
+                // The finite terminal keeps its original independent anchor; the assembly's
+                // additional admitted share can retire after that original owner is installed.
+                drop(assembly_account);
+                let physical = slot
+                    .as_mut()
+                    .expect("the actual finite slot was installed")
+                    .borrow();
+                let batches = batches
+                    .as_mut()
+                    .expect("the original finite batch owner was checked")
+                    .view();
+                (physical, batches, primary)
+            }
+            _ => unreachable!("the original backend pair was checked before any owner moved"),
+        }
+    }
 }
 
 pub(super) struct TerminalPartLoan<'inv, T> {
     pub(super) owner: &'inv mut Option<DetachedRetainedPart<T>>,
+}
+
+pub(super) enum BorrowedTerminalEvidence<'inv, P, D> {
+    Dynamic(TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>),
+    Finite,
+}
+
+pub(super) enum TerminalEvidenceQualification {
+    Dynamic(TerminalEvidenceFreezeQualification),
+    Finite,
+}
+
+impl TerminalEvidenceQualification {
+    pub(super) const fn is_finite(&self) -> bool {
+        matches!(self, Self::Finite)
+    }
+}
+
+impl<'inv, P, D> From<TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>>
+    for BorrowedTerminalEvidence<'inv, P, D>
+{
+    fn from(owner: TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>) -> Self {
+        Self::Dynamic(owner)
+    }
+}
+
+impl<P, D> BorrowedTerminalEvidence<'_, P, D> {
+    pub(super) const fn is_finite(&self) -> bool {
+        matches!(self, Self::Finite)
+    }
+
+    pub(super) fn dynamic(&self) -> Option<&DetachedRetainedPart<TerminalLedgerEvidence<P, D>>> {
+        match self {
+            Self::Dynamic(owner) => Some(owner),
+            Self::Finite => None,
+        }
+    }
+
+    fn account(&self) -> Option<&PhysicalStorageAccount> {
+        self.dynamic()
+            .and_then(DetachedRetainedPart::account_anchor)
+    }
+
+    fn qualifies_for_account(&self, account: &PhysicalStorageAccount) -> bool {
+        match self {
+            Self::Dynamic(owner) => {
+                owner.has_exact_owner() && owner.account().is_same_account(account)
+            }
+            Self::Finite => true,
+        }
+    }
 }
 
 impl<T> Deref for TerminalPartLoan<'_, T> {
@@ -28,14 +184,6 @@ impl<T> DerefMut for TerminalPartLoan<'_, T> {
         self.owner
             .as_mut()
             .expect("terminal physical part remains in its root")
-    }
-}
-
-impl<T> TerminalPartLoan<'_, T> {
-    pub(super) fn into_owned(self) -> DetachedRetainedPart<T> {
-        self.owner
-            .take()
-            .expect("detach consumes the original physical part once")
     }
 }
 
@@ -88,12 +236,6 @@ impl Deref for TerminalAccountLoan<'_> {
 }
 
 impl TerminalAccountLoan<'_> {
-    pub(super) fn into_owned(self) -> PhysicalStorageAccount {
-        self.owner
-            .take()
-            .expect("detach consumes the original account anchor once")
-    }
-
     pub(super) fn retire(self) {
         drop(self.owner.take());
     }
@@ -105,65 +247,63 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
     pub(super) fn borrow(
         &mut self,
     ) -> BorrowedTerminalPhysicalOwnershipManifest<'_, P, D, F, CanonicalBlock, EvidenceBlock> {
-        BorrowedTerminalPhysicalOwnershipManifest {
-            fallback: self
+        let evidence = self.evidence.as_ref().map(|_| ()).map(|()| {
+            BorrowedTerminalEvidence::Dynamic(TerminalPartLoan {
+                owner: &mut self.evidence,
+            })
+        });
+        BorrowedTerminalPhysicalOwnershipManifest::from_graph(&mut self.graph, evidence)
+    }
+}
+
+impl<F, CanonicalBlock, EvidenceBlock>
+    FiniteTerminalPhysicalState<F, CanonicalBlock, EvidenceBlock>
+{
+    pub(super) fn borrow<P, D>(
+        &mut self,
+    ) -> BorrowedTerminalPhysicalOwnershipManifest<'_, P, D, F, CanonicalBlock, EvidenceBlock> {
+        BorrowedTerminalPhysicalOwnershipManifest::from_graph(
+            &mut self.graph,
+            Some(BorrowedTerminalEvidence::Finite),
+        )
+    }
+}
+
+impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+    BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
+{
+    fn from_graph(
+        graph: &'inv mut TerminalPhysicalGraph<F, CanonicalBlock, EvidenceBlock>,
+        evidence: Option<BorrowedTerminalEvidence<'inv, P, D>>,
+    ) -> Self {
+        Self {
+            fallback: graph
                 .fallback
                 .as_ref()
                 .map(|_| ())
                 .map(|()| TerminalPartLoan {
-                    owner: &mut self.fallback,
+                    owner: &mut graph.fallback,
                 }),
-            evidence: self
-                .evidence
-                .as_ref()
-                .map(|_| ())
-                .map(|()| TerminalPartLoan {
-                    owner: &mut self.evidence,
-                }),
-            canonical_table: self.canonical_table.as_ref().map(|_| ()).map(|()| {
+            evidence,
+            canonical_table: graph.canonical_table.as_ref().map(|_| ()).map(|()| {
                 TerminalTableLoan {
-                    owner: &mut self.canonical_table,
+                    owner: &mut graph.canonical_table,
                 }
             }),
-            evidence_table: self
+            evidence_table: graph
                 .evidence_table
                 .as_ref()
                 .map(|_| ())
                 .map(|()| TerminalTableLoan {
-                    owner: &mut self.evidence_table,
+                    owner: &mut graph.evidence_table,
                 }),
-            account: self
+            account: graph
                 .account
                 .as_ref()
                 .map(|_| ())
                 .map(|()| TerminalAccountLoan {
-                    owner: &mut self.account,
+                    owner: &mut graph.account,
                 }),
-        }
-    }
-}
-
-impl<P, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for TerminalPhysicalState<P, D, F, CanonicalBlock, EvidenceBlock>
-{
-    fn drop(&mut self) {
-        if self.fallback.is_some()
-            || self.evidence.is_some()
-            || self.canonical_table.is_some()
-            || self.evidence_table.is_some()
-            || self.account.is_some()
-        {
-            drop(TerminalPhysicalOwnershipManifest::new(
-                self.fallback
-                    .take()
-                    .unwrap_or_else(DetachedRetainedPart::empty),
-                self.evidence
-                    .take()
-                    .unwrap_or_else(DetachedRetainedPart::empty),
-                self.canonical_table.take(),
-                self.evidence_table.take(),
-                self.account.take(),
-            ));
         }
     }
 }
@@ -177,7 +317,7 @@ pub(super) struct BorrowedTerminalPhysicalOwnershipManifest<
     EvidenceBlock,
 > {
     pub(super) fallback: Option<TerminalPartLoan<'inv, F>>,
-    pub(super) evidence: Option<TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>>,
+    pub(super) evidence: Option<BorrowedTerminalEvidence<'inv, P, D>>,
     pub(super) canonical_table: Option<TerminalTableLoan<'inv, CanonicalBlock>>,
     pub(super) evidence_table: Option<TerminalTableLoan<'inv, EvidenceBlock>>,
     pub(super) account: Option<TerminalAccountLoan<'inv>>,
@@ -185,7 +325,7 @@ pub(super) struct BorrowedTerminalPhysicalOwnershipManifest<
 
 pub(super) struct BorrowedExactPreDiscardSuccess<'inv, P, D, F, CanonicalBlock, EvidenceBlock> {
     pub(super) fallback: TerminalPartLoan<'inv, F>,
-    pub(super) evidence: TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>,
+    pub(super) evidence: BorrowedTerminalEvidence<'inv, P, D>,
     pub(super) canonical_table: TerminalTableLoan<'inv, CanonicalBlock>,
     pub(super) evidence_table: TerminalTableLoan<'inv, EvidenceBlock>,
     pub(super) account: TerminalAccountLoan<'inv>,
@@ -195,7 +335,7 @@ pub(super) struct BorrowedExactPreDiscardSuccess<'inv, P, D, F, CanonicalBlock, 
 
 type BorrowedTerminalPhysicalParts<'inv, P, D, F, CanonicalBlock, EvidenceBlock> = (
     TerminalPartLoan<'inv, F>,
-    TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>,
+    BorrowedTerminalEvidence<'inv, P, D>,
     Option<TerminalTableLoan<'inv, CanonicalBlock>>,
     Option<TerminalTableLoan<'inv, EvidenceBlock>>,
     Option<TerminalAccountLoan<'inv>>,
@@ -204,107 +344,64 @@ type BorrowedTerminalPhysicalParts<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
 impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
     BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
 {
-    pub(super) fn from_owned(
-        slot: &'inv mut Option<TerminalPhysicalState<P, D, F, CanonicalBlock, EvidenceBlock>>,
-        fallback: DetachedRetainedPart<F>,
-        evidence: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
-        canonical_table: Option<RetainedTableAllocation<CanonicalBlock>>,
-        evidence_table: Option<RetainedTableAllocation<EvidenceBlock>>,
-        account: Option<PhysicalStorageAccount>,
-    ) -> Self {
-        assert!(
-            slot.is_none(),
-            "one physical terminal transition per invocation"
-        );
-        *slot = Some(TerminalPhysicalState {
-            fallback: Some(fallback),
-            evidence: Some(evidence),
-            canonical_table,
-            evidence_table,
-            account,
-        });
-        slot.as_mut()
-            .expect("the root owns the actual terminal physical graph")
-            .borrow()
-    }
-}
-
-impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
-    BorrowedTerminalPhysicalOwnershipManifest<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
-{
     pub(super) fn new(
         fallback: impl Into<Option<TerminalPartLoan<'inv, F>>>,
-        evidence: TerminalPartLoan<'inv, TerminalLedgerEvidence<P, D>>,
+        evidence: impl Into<BorrowedTerminalEvidence<'inv, P, D>>,
         canonical_table: Option<TerminalTableLoan<'inv, CanonicalBlock>>,
         evidence_table: Option<TerminalTableLoan<'inv, EvidenceBlock>>,
         account: Option<TerminalAccountLoan<'inv>>,
     ) -> Self {
         Self {
             fallback: fallback.into(),
-            evidence: Some(evidence),
+            evidence: Some(evidence.into()),
             canonical_table,
             evidence_table,
             account,
         }
     }
 
-    pub(super) fn account(&self) -> &PhysicalStorageAccount {
-        match self.account.as_ref() {
-            Some(account) => account,
-            None => unreachable_final_owner_state(),
-        }
+    pub(super) fn terminal_account(&self) -> Option<&PhysicalStorageAccount> {
+        self.account.as_deref().or_else(|| {
+            self.evidence
+                .as_ref()
+                .and_then(BorrowedTerminalEvidence::account)
+        })
     }
 
-    pub(super) fn evidence(&self) -> &DetachedRetainedPart<TerminalLedgerEvidence<P, D>> {
-        match self.evidence.as_ref() {
-            Some(evidence) => evidence,
-            None => unreachable_final_owner_state(),
-        }
+    pub(super) fn matches_backend(&self, is_finite: bool) -> bool {
+        self.evidence.as_ref().is_some_and(|evidence| {
+            evidence.is_finite() == is_finite && (!is_finite || self.account.is_some())
+        })
     }
 
     pub(super) fn first_account(&self) -> Option<&PhysicalStorageAccount> {
-        self.account
-            .as_deref()
-            .or_else(|| {
-                self.fallback
-                    .as_ref()
-                    .and_then(|part| part.account_anchor())
-            })
-            .or_else(|| {
-                self.evidence
-                    .as_ref()
-                    .and_then(|part| part.account_anchor())
-            })
-            .or_else(|| self.canonical_table.as_ref().map(|table| table.account()))
-            .or_else(|| {
-                self.canonical_table.as_ref().and_then(|table| {
-                    table
-                        .as_ref()
-                        .members
-                        .first()
-                        .map(|member| member.allocation.account())
-                })
-            })
-            .or_else(|| self.evidence_table.as_ref().map(|table| table.account()))
-            .or_else(|| {
-                self.evidence_table.as_ref().and_then(|table| {
-                    table
-                        .as_ref()
-                        .members
-                        .first()
-                        .map(|member| member.allocation.account())
-                })
-            })
-            .or_else(|| {
-                self.fallback
-                    .as_ref()
-                    .and_then(|part| part.allocation_anchor())
-            })
-            .or_else(|| {
-                self.evidence
-                    .as_ref()
-                    .and_then(|part| part.allocation_anchor())
-            })
+        self.as_read().first_account()
+    }
+
+    fn as_read(&self) -> TerminalPhysicalRefs<'_, P, D, F, CanonicalBlock, EvidenceBlock> {
+        TerminalPhysicalRefs {
+            fallback: self.fallback.as_deref(),
+            evidence: self
+                .evidence
+                .as_ref()
+                .and_then(BorrowedTerminalEvidence::dynamic),
+            canonical_table: self.canonical_table.as_deref(),
+            evidence_table: self.evidence_table.as_deref(),
+            account: self.account.as_deref(),
+        }
+    }
+
+    fn slots(&mut self) -> TerminalPhysicalSlots<'_, P, D, F, CanonicalBlock, EvidenceBlock> {
+        TerminalPhysicalSlots {
+            fallback: self.fallback.as_mut().map(|part| &mut *part.owner),
+            evidence: self.evidence.as_mut().and_then(|evidence| match evidence {
+                BorrowedTerminalEvidence::Dynamic(part) => Some(&mut *part.owner),
+                BorrowedTerminalEvidence::Finite => None,
+            }),
+            canonical_table: self.canonical_table.as_mut().map(|table| &mut *table.owner),
+            evidence_table: self.evidence_table.as_mut().map(|table| &mut *table.owner),
+            account: self.account.as_mut().map(|account| &mut *account.owner),
+        }
     }
 
     pub(super) fn has_exact_fallback_shape(&self) -> bool {
@@ -312,67 +409,37 @@ impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
         else {
             return false;
         };
+        let Some(account) = self.terminal_account() else {
+            return false;
+        };
         self.canonical_table.is_none()
             && self.evidence_table.is_none()
             && fallback.has_exact_owner()
-            && evidence.has_exact_owner()
-            && fallback.account().is_same_account(evidence.account())
-            && self
-                .account
-                .as_ref()
-                .is_none_or(|account| account.is_same_account(evidence.account()))
+            && evidence.qualifies_for_account(account)
+            && fallback.account().is_same_account(account)
     }
 
     pub(super) fn record_forgotten_physical_edges(
         &self,
         reason: AccountPoisonReason,
     ) -> FinalizationContainmentError {
-        let account = match self.first_account() {
-            Some(account) => account,
-            None => unreachable_final_owner_state(),
-        };
-        if let Some(canonical) = self.canonical_table.as_ref() {
-            record_forgotten_table_edges(canonical);
-        }
-        if let Some(evidence) = self.evidence_table.as_ref() {
-            record_forgotten_table_edges(evidence);
-        }
-        if let Some(fallback) = self.fallback.as_ref() {
-            fallback.record_forgotten_physical_edge();
-        }
-        if let Some(evidence) = self.evidence.as_ref() {
-            evidence.record_forgotten_physical_edge();
-        }
-        FinalizationContainmentError::new(AccountPoisoned::new(account.snapshot()), reason)
+        self.as_read().record_forgotten_physical_edges(reason)
     }
 
     pub(super) fn record_new_fault(
         &self,
         reason: AccountPoisonReason,
     ) -> AccountPoisonEventWitness {
-        let account = match self.account.as_deref().or_else(|| self.first_account()) {
-            Some(account) => account,
-            None => unreachable_final_owner_state(),
-        };
-        record_account_poison_event(account, reason)
+        self.as_read().record_new_fault(reason)
     }
 
     fn fail_closed_after_recorded_poison(&mut self) {
-        if let Some(canonical) = self.canonical_table.take() {
-            canonical.retain_fail_closed();
-        }
-        if let Some(evidence) = self.evidence_table.take() {
-            evidence.retain_fail_closed();
-        }
-        if let Some(account) = self.account.take() {
-            account.retire();
-        }
-        if let Some(mut fallback) = self.fallback.take() {
-            fallback.fail_closed_after_recorded_poison();
-        }
-        if let Some(mut evidence) = self.evidence.take() {
-            evidence.fail_closed_after_recorded_poison();
-        }
+        self.slots().fail_closed_after_recorded_poison();
+        self.fallback = None;
+        self.evidence = None;
+        self.canonical_table = None;
+        self.evidence_table = None;
+        self.account = None;
     }
 
     pub(super) fn contain_new_fault(
@@ -443,9 +510,8 @@ impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
             return false;
         };
         fallback.has_exact_owner()
-            && evidence.has_exact_owner()
+            && evidence.qualifies_for_account(account)
             && fallback.account().is_same_account(account)
-            && evidence.account().is_same_account(account)
             && canonical.belongs_to(account)
             && outcome_evidence.belongs_to(account)
     }
@@ -461,9 +527,8 @@ impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
         };
         self.canonical_table.is_some() == expect_canonical
             && fallback.has_exact_owner()
-            && evidence.has_exact_owner()
+            && evidence.qualifies_for_account(account)
             && fallback.account().is_same_account(account)
-            && evidence.account().is_same_account(account)
             && evidence_table.belongs_to(account)
             && self
                 .canonical_table
@@ -481,12 +546,15 @@ impl<'inv, P, D, F, CanonicalBlock, EvidenceBlock>
             return false;
         };
         let table_expected = expect_canonical || expect_evidence;
+        let Some(account) = self.terminal_account() else {
+            return false;
+        };
         self.canonical_table.is_some() == expect_canonical
             && self.evidence_table.is_some() == expect_evidence
-            && self.account.is_some() == table_expected
+            && self.account.is_some() == (table_expected || evidence.is_finite())
             && fallback.has_exact_owner()
-            && evidence.has_exact_owner()
-            && fallback.account().is_same_account(evidence.account())
+            && evidence.qualifies_for_account(account)
+            && fallback.account().is_same_account(account)
             && self.account.as_ref().is_none_or(|account| {
                 fallback.account().is_same_account(account)
                     && self

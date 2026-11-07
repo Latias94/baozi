@@ -707,6 +707,7 @@ fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource 
         .try_publication_assembly(publication_plan(keys, 3, 3))
         .unwrap();
     let sequence = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u32>::new(1).unwrap(),
             SequenceTag,
@@ -714,11 +715,13 @@ fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource 
         )
         .unwrap();
     let canonical_bytes = assembly
+        .ordinary()
         .try_retain_canonical_bytes(BytesPlan::new(2).unwrap(), BytesTag, |writer| {
             writer.write_bytes(&[12, 13])
         })
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_records(RecordPlan::new(1, 2).unwrap(), CanonicalRootTag, |writer| {
             writer.write_row(|row| {
                 row.write_sequence_ref(sequence)?;
@@ -727,6 +730,7 @@ fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource 
         })
         .unwrap();
     let evidence_leaf = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).unwrap(),
             EvidenceLeafTag,
@@ -734,11 +738,13 @@ fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource 
         )
         .unwrap();
     let evidence_text = assembly
+        .ordinary()
         .try_retain_outcome_evidence_utf8(Utf8Plan::new(2).unwrap(), EvidenceTextTag, |writer| {
             writer.write_str("ok")
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 2).unwrap(),
             EvidenceRootTag,

@@ -16,8 +16,8 @@ pub use super::super::construction::node_scene::edit::transaction::{
     SceneEditPublication, SceneEditPublicationError, SceneEditPublishedSuccess, SceneEditRejection,
     SceneEditTarget, SceneEditTransaction, SceneEditValidationProof, SceneGeometryCornerOriginsTag,
     SceneGeometryFaceOffsetsTag, SceneSpaceConversionEvidence, SceneSpaceConversionIssue,
-    consume_scene_edit_freeze_permit, resolve_scene_space_conversion, run_scene_edit_body,
-    try_start_scene_edit_operation,
+    consume_scene_edit_freeze_permit, resolve_scene_space_conversion, run_finite_scene_edit_body,
+    run_scene_edit_body, try_start_scene_edit_operation,
 };
 pub use super::super::construction::node_scene::edit::transaction::{
     SceneGeometryPlanScratch, SceneGeometryPlanStorage, SceneGeometryReplacement,

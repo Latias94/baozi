@@ -8,6 +8,7 @@ pub use exclusive::{
     StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
     StoreInvocationParser, StoreInvocationServices, StoreParserReadRow, StoreScanReturn,
 };
+pub(super) use exclusive::{execute_store_action_parts, execute_store_parts};
 
 /// Ordinary storage and real poll authority, borrowing no numeric work or progress state.
 pub struct StoreOrdinaryStorage<'b, 'op: 'b, O, PP, U> {

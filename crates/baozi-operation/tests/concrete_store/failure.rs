@@ -11,6 +11,7 @@ fn builder_panic_is_fatal_and_cannot_publish_fallback() {
         .unwrap();
     let before = account.snapshot();
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u32>::new(1).unwrap(),
             SequenceTag,
@@ -31,7 +32,7 @@ fn builder_panic_is_fatal_and_cannot_publish_fallback() {
     assert!(after.live_retained_bytes() > before.live_retained_bytes());
     assert!(after.live_retained_allocations() > before.live_retained_allocations());
     assert!(matches!(
-        assembly.try_retain_outcome_evidence_records(
+        assembly.ordinary().try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
             |writer| writer.write_row(|row| row.write_scalar(1_u8)),
@@ -40,11 +41,13 @@ fn builder_panic_is_fatal_and_cannot_publish_fallback() {
     ));
     for dimension in [foreign_dimension(), keys.other_dimension] {
         assert!(matches!(
-            assembly.try_commit_canonical(dimension, 1),
+            assembly.ordinary().try_commit_canonical(dimension, 1),
             Err(StoreRuntimeError::FallbackOnly)
         ));
         assert!(matches!(
-            assembly.try_commit_outcome_evidence(dimension, 1),
+            assembly
+                .ordinary()
+                .try_commit_outcome_evidence(dimension, 1),
             Err(StoreRuntimeError::FallbackOnly)
         ));
     }
@@ -68,11 +71,13 @@ fn failure_assembly_commit_preserves_fallback_first_error_precedence() {
         .try_publication_assembly(publication_plan(keys, 1, 2))
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
@@ -128,11 +133,13 @@ fn semantic_rejection_can_publish_rich_failure() {
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
@@ -193,19 +200,25 @@ fn success_primary_rejection_returns_the_exact_minimal_fallback_owner() {
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).unwrap(),
             EvidenceLeafTag,
             |writer| writer.push(7),
         )
         .unwrap();
-    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
     assembly
+        .ordinary()
+        .try_commit_canonical(keys.dimension, 9)
+        .unwrap();
+    assembly
+        .ordinary()
         .try_commit_outcome_evidence(keys.dimension, 4)
         .unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {
@@ -268,11 +281,13 @@ fn rich_failure_primary_rejection_returns_the_exact_minimal_fallback_owner() {
         .try_publication_assembly(rich_failure_plan(keys, 1))
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_bytes(BytesPlan::new(2).unwrap(), EvidenceBytesTag, |writer| {
             writer.write_bytes(&[7, 8])
         })
         .unwrap();
     assembly
+        .ordinary()
         .try_commit_outcome_evidence(keys.dimension, 4)
         .unwrap();
     let validated = match assembly.validate_rich_failure(evidence, |session, evidence| {
@@ -331,18 +346,23 @@ fn downgrade_revalidation_panic_exposes_only_minimal_fallback() {
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
             |writer| writer.write_row(|row| row.write_scalar(7_u8)),
         )
         .unwrap();
-    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
+    assembly
+        .ordinary()
+        .try_commit_canonical(keys.dimension, 9)
+        .unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {
         session.canonical_sequence(c).is_some() && session.outcome_evidence_records(e).is_some()
     }) {

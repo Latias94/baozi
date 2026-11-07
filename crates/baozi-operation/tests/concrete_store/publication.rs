@@ -12,19 +12,25 @@ fn final_cancellation_downgrades_validated_success_before_pure_handoff() {
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
             |writer| writer.write_row(|row| row.write_scalar(7_u8)),
         )
         .unwrap();
-    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
     assembly
+        .ordinary()
+        .try_commit_canonical(keys.dimension, 9)
+        .unwrap();
+    assembly
+        .ordinary()
         .try_commit_outcome_evidence(keys.dimension, 6)
         .unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {
@@ -77,19 +83,25 @@ fn validated_success_downgrade_preserves_evidence_and_publishes_exact_rich_failu
         .try_publication_assembly(publication_plan(keys, 1, 3))
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
             |writer| writer.write_row(|row| row.write_scalar(7_u8)),
         )
         .unwrap();
-    assembly.try_commit_canonical(keys.dimension, 9).unwrap();
     assembly
+        .ordinary()
+        .try_commit_canonical(keys.dimension, 9)
+        .unwrap();
+    assembly
+        .ordinary()
         .try_commit_outcome_evidence(keys.dimension, 6)
         .unwrap();
     let validated = match assembly.validate_success(canonical, evidence, |session, c, e| {

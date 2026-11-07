@@ -345,11 +345,13 @@ where
         let (phase, dimension) = self
             .assembly
             .raw
+            .loan()
             .storage_destination()
             .map_err(|cause| map_publication_error(&cause))?;
         let operation = self
             .assembly
             .raw
+            .loan_mut()
             .storage_operation()
             .map_err(|cause| map_publication_error(&cause))?;
         let (mut attribution, physical) = operation
@@ -390,7 +392,7 @@ where
             }
             return Err(cause.into());
         }
-        let operation = match self.assembly.raw.storage_operation() {
+        let operation = match self.assembly.raw.loan_mut().storage_operation() {
             Ok(operation) => operation,
             Err(cause) => {
                 let cause = map_publication_error(&cause);
@@ -554,6 +556,7 @@ where
         let result = self
             .assembly
             .raw
+            .loan_mut()
             .share_typed_storage(source)
             .map_err(|cause| map_publication_error(&cause));
         preserve_first_fault(self.first_fault, result)

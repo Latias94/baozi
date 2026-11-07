@@ -72,7 +72,7 @@ fn with_actual_host<R>(
     let execution_state = Cell::new(StoreExecutionState::Running);
     let share_work = crate::retained::RetainedHandleSharePlan::new(key, key);
     let (poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
-    let (work, storage) = ledger.exclusive().unwrap();
+    let (work, storage) = ledger.view().into_exclusive().unwrap();
     let share_layout = work.bind(share_work.charges().map(|(key, _)| key)).unwrap();
     let layout = work.bind([key]).unwrap();
     let context = StoreInvocation {
@@ -107,7 +107,8 @@ fn with_actual_host<R>(
     let (work, _storage) = coordinator
         .split_exclusive_progress_and_ledger()
         .2
-        .exclusive()
+        .view()
+        .into_exclusive()
         .unwrap();
     let counters = work.counters(key).unwrap();
     work.check_quiescent().unwrap();

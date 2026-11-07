@@ -7,17 +7,32 @@ pub(crate) struct ExclusiveWork<'op, D> {
 }
 
 pub(crate) struct ExclusiveStorage<'op, O, P, D> {
-    state: &'op mut DynamicStorage<P, D>,
-    phases: &'op [PhaseEntry<P>],
-    catalog: &'op [D],
-    operation_live_byte_limit: u64,
+    pub(super) state: StorageOwner<'op, P, D>,
+    pub(super) phases: &'op [PhaseEntry<P>],
+    pub(super) catalog: &'op [D],
+    pub(super) operation_live_byte_limit: u64,
     owner: PhantomData<fn() -> O>,
 }
 
 impl<'op, O, P, D> ExclusiveStorage<'op, O, P, D> {
+    pub(super) fn new(
+        state: StorageOwner<'op, P, D>,
+        phases: &'op [PhaseEntry<P>],
+        catalog: &'op [D],
+        operation_live_byte_limit: u64,
+    ) -> Self {
+        Self {
+            state,
+            phases,
+            catalog,
+            operation_live_byte_limit,
+            owner: PhantomData,
+        }
+    }
+
     pub(crate) fn reborrow(&mut self) -> ExclusiveStorage<'_, O, P, D> {
         ExclusiveStorage {
-            state: self.state,
+            state: self.state.reborrow(),
             phases: self.phases,
             catalog: self.catalog,
             operation_live_byte_limit: self.operation_live_byte_limit,
@@ -41,7 +56,7 @@ impl<'op, O, P, D> ExclusiveStorage<'op, O, P, D> {
         retained_bytes: &mut u64,
     ) -> Result<(), LedgerEvidenceError> {
         evidence::try_grow_selected_evidence_vec(
-            self.state,
+            self.state.reborrow(),
             values,
             desired_capacity,
             retained_bytes,
@@ -50,69 +65,40 @@ impl<'op, O, P, D> ExclusiveStorage<'op, O, P, D> {
     }
 }
 
-type WorkAndStorage<'op, O, P, D> = (ExclusiveWork<'op, D>, ExclusiveStorage<'op, O, P, D>);
+pub(super) type WorkAndStorage<'op, O, P, D> =
+    (ExclusiveWork<'op, D>, ExclusiveStorage<'op, O, P, D>);
 
-impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, D> {
-    pub(crate) fn split_internal(
-        &mut self,
-    ) -> (InternalWork<'_, D>, ExclusiveStorage<'_, O, P, D>) {
-        let work = InternalWork {
-            catalog: &self.work_catalog,
-            state: &mut self.work,
-        };
-        let storage = ExclusiveStorage {
-            state: &mut self.state,
+impl<O, P, D> Ledger<O, P, D> {
+    pub(crate) fn as_read(&self) -> LedgerReadView<'_, O, P, D> {
+        LedgerReadView {
+            identity: self.identity,
+            work: self.work.as_read(&self.work_catalog),
+            storage: storage::StorageRef::Dynamic(&self.state),
             phases: &self.phase_catalogue,
-            catalog: work.catalog,
-            operation_live_byte_limit: self.operation_live_byte_limit,
-            owner: PhantomData,
-        };
-        (work, storage)
-    }
-
-    pub(crate) fn storage_view(&mut self) -> ExclusiveStorage<'_, O, P, D> {
-        ExclusiveStorage {
-            state: &mut self.state,
-            phases: &self.phase_catalogue,
-            catalog: &self.work_catalog,
             operation_live_byte_limit: self.operation_live_byte_limit,
             owner: PhantomData,
         }
     }
+}
 
-    pub(crate) fn exclusive(&mut self) -> Result<WorkAndStorage<'_, O, P, D>, LedgerCause<D>> {
-        self.work.check_quiescent(self.work_catalog.len())?;
-        self.work
-            .ensure_active(self.work_catalog.len(), WorkGrant::Ordinary)?;
-        let catalog = &self.work_catalog;
-        let work = self.work.view(catalog);
-        Ok((
-            ExclusiveWork { catalog, work },
-            ExclusiveStorage {
-                state: &mut self.state,
-                phases: &self.phase_catalogue,
-                catalog,
-                operation_live_byte_limit: self.operation_live_byte_limit,
-                owner: PhantomData,
-            },
-        ))
+impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug> Ledger<O, P, D> {
+    pub(crate) fn view(&mut self) -> LedgerView<'_, O, P, D> {
+        LedgerView::new(
+            self.identity,
+            self.work.view(&self.work_catalog),
+            ExclusiveStorage::new(
+                StorageOwner::Dynamic(&mut self.state),
+                &self.phase_catalogue,
+                &self.work_catalog,
+                self.operation_live_byte_limit,
+            ),
+        )
     }
 
-    /// Binds at the actual Internal action boundary, then lends the sole numeric state. Binding
-    /// retains the existing key/mode/role precedence and never admits attempted or consumed work.
-    pub(crate) fn bind_internal_work<const N: usize>(
+    pub(crate) fn split_internal(
         &mut self,
-        dimensions: [D; N],
-    ) -> Result<(ExclusiveWork<'_, D>, WorkLayout<N>), LedgerCause<D>> {
-        let grant = match self.work.header.mode {
-            WorkMode::Protected => WorkGrant::Protected,
-            _ => WorkGrant::Ordinary,
-        };
-        let catalog = &self.work_catalog;
-        let layout = self.work.bind_layout(catalog, dimensions, grant)?;
-        let work = self.work.view(catalog);
-        layout.validate_active(&work)?;
-        Ok((ExclusiveWork { catalog, work }, layout))
+    ) -> (InternalWork<'_, D>, ExclusiveStorage<'_, O, P, D>) {
+        self.view().into_internal()
     }
 }
 
@@ -148,7 +134,7 @@ impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {
         let admission =
             Ledger::<O, P, D>::storage_admission_for_mode::<Destination>(self.work.header.mode)?;
         Ledger::<O, P, D>::reserve_selected_core(
-            storage.state,
+            storage.state.reborrow(),
             storage.operation_live_byte_limit,
             phase,
             dimension,
@@ -247,7 +233,7 @@ impl<D: Copy + Ord + fmt::Debug> ExclusiveWork<'_, D> {
             .map_err(|_| LedgerCause::UnknownDimension { dimension })?;
         Ok(dimension_snapshot(DimensionState::join(
             self.work.rows[position].state,
-            storage.state.read().dimensions[position].state,
+            storage.state.read().view().dimensions[position].state,
         )))
     }
 
@@ -308,7 +294,7 @@ impl<'op, O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug>
         &self,
         observation: LedgerStorageObservation<'_, P, D>,
     ) -> u64 {
-        self.state.read().dimensions[observation.position]
+        self.state.read().view().dimensions[observation.position]
             .state
             .current_live_bytes
     }
@@ -371,7 +357,7 @@ impl<'op, O: OperationOwner, P: Copy + Ord, D: Copy + Ord + fmt::Debug>
                 .ok_or(LedgerCause::UnknownPhase),
         };
         Ledger::<O, P, D>::reserve_selected_core(
-            self.state,
+            self.state.reborrow(),
             self.operation_live_byte_limit,
             phase,
             dimension,

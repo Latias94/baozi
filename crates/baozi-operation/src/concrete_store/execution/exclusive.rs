@@ -1,5 +1,6 @@
 //! Exclusive numeric execution and host-owned action/parser frames over one invocation.
 
+use super::super::ordinary::StoreOperationLoan;
 use super::*;
 use crate::ledger::{
     ParserChannel, ParserFrame, ParserReadRow, WorkFrame, WorkLane, WorkLayout, WorkView,
@@ -14,6 +15,7 @@ use std::rc::Rc;
 
 mod actions;
 pub use actions::StoreActionExecution;
+pub(in crate::concrete_store) use actions::execute_store_action_parts;
 mod copy_units;
 mod services;
 pub use services::{StoreChildAdmission, StoreInvocationServices};
@@ -1799,8 +1801,22 @@ impl<'inv, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L>
         &'op mut self,
         boundary: Option<&'op StoreImporterBoundary>,
     ) -> Result<StoreInvocation<'op, O, PP, U>, StoreRuntimeError> {
-        let parts = self.raw.exclusive_parts().map_err(map_execution_error)?;
+        let parts = self
+            .raw
+            .loan_mut()
+            .exclusive_parts()
+            .map_err(map_execution_error)?;
         bind_invocation_context(parts, &self.domain, boundary)
+    }
+}
+
+impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> StoreOperationLoan<'_, O, PP, U, L> {
+    pub(in crate::concrete_store) fn invocation_context<'op>(
+        &'op mut self,
+        boundary: Option<&'op StoreImporterBoundary>,
+    ) -> Result<StoreInvocation<'op, O, PP, U>, StoreRuntimeError> {
+        let parts = self.raw.exclusive_parts().map_err(map_execution_error)?;
+        bind_invocation_context(parts, self.domain, boundary)
     }
 }
 
@@ -1845,6 +1861,22 @@ fn bind_invocation_context<'op, O: OperationOwner, PP: ProgressPhase, U: Progres
         brand: PhantomData,
         local: PhantomData,
     })
+}
+
+pub(in crate::concrete_store) fn execute_store_parts<'op, O, PP, U, R, E>(
+    parts: ExclusiveOperationParts<'op, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+    domain: &'op StoreKeyDomain,
+    body: impl for<'region> FnOnce(&mut StoreInvocation<'region, O, PP, U>) -> Result<R, E>,
+) -> Result<R, E>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    E: From<StoreInvocationError>,
+{
+    let context =
+        bind_invocation_context(parts, domain, None).map_err(StoreInvocationError::from)?;
+    execute_invocation_region(context, RegionPolicy::Exclusive, body)
 }
 
 fn execute_invocation_region<

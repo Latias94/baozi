@@ -68,7 +68,7 @@ pub(super) enum RetainedDeferredStage<CanonicalBlock, EvidenceBlock> {
     },
 }
 
-pub(super) enum RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U> {
+pub(crate) enum RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U> {
     Success {
         proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
         final_progress: super::FinalProgress<PP, U>,
@@ -105,9 +105,9 @@ pub(super) enum RetainedTerminalMode {
     },
 }
 
-/// Module-private exact-closure witness consumed by success preparation.
+/// Opaque exact-closure witness whose original fields stay private to retained storage.
 #[must_use = "the closure proof must be consumed by terminal preparation"]
-pub(super) struct RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
+pub(crate) struct RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
     pub(super) set_id: super::RetainedSetId,
     pub(super) canonical_count: usize,
     pub(super) evidence_count: usize,
@@ -116,9 +116,9 @@ pub(super) struct RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock> {
     pub(super) marker: PhantomData<fn() -> (CanonicalBlock, EvidenceBlock)>,
 }
 
-/// Module-private exact-closure witness consumed by evidence-only preparation.
+/// Opaque evidence-closure witness whose original fields stay private to retained storage.
 #[must_use = "the closure proof must be consumed by terminal preparation"]
-pub(super) struct RetainedEvidenceClosureProof<EvidenceBlock> {
+pub(crate) struct RetainedEvidenceClosureProof<EvidenceBlock> {
     pub(super) set_id: super::RetainedSetId,
     pub(super) evidence_count: usize,
     pub(super) evidence_root: RetainedSlotIdentity,

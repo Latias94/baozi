@@ -770,7 +770,7 @@ where
     }
 
     pub fn canonical_len(&self) -> usize {
-        self.owner.storage().canonical_len()
+        self.owner.storage().raw.loan().canonical_len()
     }
 
     /// Consumes the candidate through the operation-owned evidence and validation seam.
@@ -925,7 +925,7 @@ where
             }
             (None, OutcomeEvidenceDecision::Complete(root)) => root,
         };
-        if assembly.is_fallback_only() {
+        if assembly.ordinary().is_fallback_only() {
             let _ = drop_optional_callback(validate);
             let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
             return Err(StoreActivationContainment {
@@ -933,7 +933,7 @@ where
             });
         }
 
-        assembly.report_progress(
+        assembly.ordinary().report_progress(
             progress.phase(),
             progress.unit(),
             0,
@@ -1732,6 +1732,7 @@ where
             Ok(qualified) => Ok(qualified),
             Err(cause) => {
                 self.assembly
+                    .ordinary()
                     .reject_failure_terminal_work_envelope(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
                 Err(cause)
             }
@@ -1782,6 +1783,7 @@ where
         let mut controlled_failure = None;
         let result = self
             .assembly
+            .ordinary()
             .try_retain_success_outcome_evidence_controlled(
                 self.work_dimension,
                 allocation,

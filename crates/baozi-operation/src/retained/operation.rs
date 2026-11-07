@@ -1,16 +1,18 @@
 use super::operation_start::RetainedFailureTerminalWorkRequirement;
+use super::ownership::FallbackPublicationBaselineLoan;
 use super::ownership::finish_pre_attribution_batch_cleanup;
 use super::publication_contract::{
     RetainedDeferredStage, RetainedPublicationOpenDisposition,
     retained_open_failure_is_rollback_safe,
 };
 use super::startup;
+use super::terminal_loan::TerminalPhysicalSlot;
 use super::{
     AccountPoisonReason, AssemblyContainmentProvenance, CanonicalLineageAuthority,
     EvidenceOnlySuccessPrimaryTransition, FailureTerminalWorkState, FallbackPublicationBaseline,
     PhysicalStorageAccount, PreparationFailureClass, PreparationFailureCode,
     PreparedRetainedEvidenceOnlyOutcome, PreparedRetainedPublication,
-    PreparedRetainedPublicationOutcome, PrimaryPublicationBatches, PublishedCanonicalAggregate,
+    PreparedRetainedPublicationOutcome, PublishedCanonicalAggregate,
     QualifiedRetainedBlockTablePlan, RetainedAllocationError, RetainedAllocationPlan,
     RetainedBatchLimits, RetainedBuildFailureCode, RetainedFailureTerminalWorkPlan,
     RetainedHandleSharePlan, RetainedMembershipDestination, RetainedOperationStartError,
@@ -34,7 +36,7 @@ use super::{
     test_retained_final_owner_allocator_entries,
 };
 use crate::control::discard_untrusted_panic_payload;
-use crate::coordinator::{OperationCoordinator, OperationPollCheckpoint};
+use crate::coordinator::{CoordinatorView, OperationCoordinator, OperationPollCheckpoint};
 use crate::ledger::{
     AttributionBatchPlan, CanonicalOutput, LedgerCause, LedgerLimits, LiveReservation,
     OutcomeEvidenceDestination, PhaseCompletionError, StartupAccountShareEnvelope,
@@ -53,6 +55,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 mod borrowed_work;
+pub(crate) mod finite_root;
+mod invocation;
+mod publication_open;
 pub(crate) use borrowed_work::{
     BorrowedRetainedWorkPermission, RetainedFailureWorkBinding, RetainedFailureWorkConsumeError,
     RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermission,
@@ -60,6 +65,11 @@ pub(crate) use borrowed_work::{
     RetainedWorkControl, RetainedWorkFinishError, RetainedWorkPermission, RetainedWorkRoot,
     RetainedWorkStartError,
 };
+use invocation::InvocationLifecycle;
+pub(crate) use invocation::{AttachedTerminalDecision, AttachedTerminalStamp};
+pub(super) use invocation::{DynamicTerminalRootFields, InvocationSlot};
+pub(crate) use invocation::{FiniteOperationInvocation, OperationInvocationView};
+pub(crate) use publication_open::{RetainedAssemblyOpened, RetainedPublicationBorrowFailure};
 mod execution;
 #[cfg(test)]
 mod root_tests;
@@ -151,11 +161,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     pub(super) coordinator: OperationCoordinator<O, P, PP, U, D>,
-    sticky_terminal_cause: Cell<Option<PreparationFailureCode>>,
-    control_action_debt: Cell<u16>,
-    execution_state: Cell<StoreExecutionState>,
-    canonical_lineage: CanonicalLineageAuthority,
-    terminal_outstanding: bool,
+    lifecycle: InvocationLifecycle<P>,
 }
 
 impl<O, P, PP, U, D> OperationInvocation<O, P, PP, U, D>
@@ -170,23 +176,7 @@ where
         &self,
         result: Result<(), PublicationCause<D>>,
     ) -> Option<ControlCause> {
-        match result {
-            Ok(()) => None,
-            Err(PublicationCause::Control(cause)) => {
-                record_terminal_cause_with_precedence(
-                    &self.sticky_terminal_cause,
-                    PreparationFailureCode::from_control(&cause),
-                );
-                Some(cause)
-            }
-            Err(PublicationCause::Ledger(_)) => {
-                record_terminal_cause_with_precedence(
-                    &self.sticky_terminal_cause,
-                    PreparationFailureCode::ledger(),
-                );
-                None
-            }
-        }
+        self.lifecycle.record_terminal_gate(result)
     }
 
     pub(crate) fn terminal_ledger_mut(&mut self) -> &mut crate::ledger::Ledger<O, P, D> {
@@ -200,6 +190,10 @@ where
 
     pub(crate) fn retire_after_detach(self, state: &mut crate::ledger::LedgerState<P, D>) {
         self.coordinator.retire_after_detach(state);
+    }
+
+    pub(crate) fn known_administrative_bytes(&self) -> Option<u64> {
+        self.coordinator.known_administrative_bytes()
     }
 }
 
@@ -238,6 +232,19 @@ pub(crate) struct PendingRetainedAttachment<
     local: PhantomData<Rc<()>>,
 }
 
+type RetainedAttachmentResult<'inv, 'account, O, P, PP, U, D, F, CB, EB> = Result<
+    PendingRetainedAttachment<'inv, 'account, O, P, PP, U, D, F, CB, EB>,
+    RetainedOperationStartError<D>,
+>;
+
+type RetainedAttachmentFieldsResult<O, P, D, F, CB, EB> =
+    Result<RetainedOperationFields<O, P, D, F, CB, EB>, RetainedOperationStartError<D>>;
+
+type RetainedAssemblyOpenResult<'inv, O, P, PP, U, D, F, CB, EB> = Result<
+    RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CB, EB>,
+    RetainedPublicationOpenError<RetainedOperation<'inv, O, P, PP, U, D, F, CB, EB>, D>,
+>;
+
 /// Original account admission retained after a terminal request ends the numeric loan.
 /// The actual common/control stays in its outer root through client capture cleanup.
 pub(crate) struct DeferredUnattachedBinding<'account> {
@@ -273,23 +280,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     fn reject(&mut self, cause: PreparationFailureCode) {
-        StoreExecutionState::stop(
-            &self.common.execution_state,
-            StoreExecutionState::KnownError,
-        );
-        record_terminal_cause_with_precedence(&self.common.sticky_terminal_cause, cause);
-        if self
-            .common
-            .coordinator
-            .retained_ledger_mut()
-            .seal_ordinary_work()
-            .is_err()
-        {
-            record_terminal_cause_with_precedence(
-                &self.common.sticky_terminal_cause,
-                PreparationFailureCode::ledger(),
-            );
-        }
+        reject_retained_attachment(&mut self.common.view(), cause);
         self.resolved = true;
     }
 }
@@ -320,19 +311,10 @@ where
     D: TerminalEvidenceKey + fmt::Debug,
 {
     fn preflight_exclusive(&self) -> Result<(), ExecutionError<D>> {
-        check_execution_state(&self.sticky_terminal_cause, &self.execution_state, || {
-            self.coordinator.recorded_control_cause()
-        })?;
-        self.coordinator
-            .retained_ledger()
-            .check_work_quiescent()
-            .map_err(|cause| {
-                record_terminal_cause_with_precedence(
-                    &self.sticky_terminal_cause,
-                    PreparationFailureCode::ledger(),
-                );
-                ExecutionError::Ledger(cause)
-            })
+        self.lifecycle.preflight_exclusive(
+            || self.coordinator.recorded_control_cause(),
+            self.coordinator.retained_ledger().as_read(),
+        )
     }
 
     fn borrow_exclusive_parts<'loan>(
@@ -340,34 +322,7 @@ where
         account: &'loan PhysicalStorageAccount,
         share_work: RetainedHandleSharePlan<D>,
     ) -> Result<ExclusiveOperationParts<'loan, O, P, PP, U, D>, ExecutionError<D>> {
-        let Self {
-            coordinator,
-            sticky_terminal_cause,
-            control_action_debt,
-            execution_state,
-            ..
-        } = self;
-        let (poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
-        let (work, storage) = ledger.exclusive().map_err(|cause| {
-            record_terminal_cause_with_precedence(
-                sticky_terminal_cause,
-                PreparationFailureCode::ledger(),
-            );
-            ExecutionError::Ledger(cause)
-        })?;
-        Ok(ExclusiveOperationParts {
-            work,
-            progress,
-            ordinary: ExecutionOrdinaryStorage {
-                storage,
-                poll,
-                failure: sticky_terminal_cause,
-                debt: control_action_debt,
-                execution_state,
-            },
-            account,
-            share_work,
-        })
+        self.view().into_exclusive_parts(account, share_work)
     }
 }
 
@@ -404,10 +359,10 @@ where
             return Err(self);
         };
         if let Some(cause) = requested {
-            record_terminal_cause_with_precedence(&common.sticky_terminal_cause, cause);
-        } else if common.execution_state.get() != StoreExecutionState::Running {
+            record_terminal_cause_with_precedence(&common.lifecycle.sticky_terminal_cause, cause);
+        } else if common.lifecycle.execution_state.get() != StoreExecutionState::Running {
             record_terminal_cause_with_precedence(
-                &common.sticky_terminal_cause,
+                &common.lifecycle.sticky_terminal_cause,
                 PreparationFailureCode::product_graph(StoreExecutionState::ABANDONED),
             );
         }
@@ -418,7 +373,7 @@ where
             .is_err()
         {
             record_terminal_cause_with_precedence(
-                &common.sticky_terminal_cause,
+                &common.lifecycle.sticky_terminal_cause,
                 PreparationFailureCode::ledger(),
             );
         }
@@ -499,19 +454,20 @@ where
         guard.resolved = true;
         drop(guard);
         root.retained = Some(fields);
-        Ok(RetainedOperation {
+        Ok(RetainedOperation::from_loan(RetainedOperationLoan {
             retained: root
                 .retained
                 .as_mut()
-                .expect("attachment installs fully qualified retained fields"),
+                .expect("attachment installs fully qualified retained fields")
+                .into(),
             assembly: Some(&mut root.assembly),
-            terminal: &mut root.terminal,
+            terminal: TerminalPhysicalSlot::Dynamic(&mut root.terminal),
             common: InvocationLoan {
-                common: &mut root.common,
+                common: InvocationSlot::Dynamic(&mut root.common),
                 contained: &mut root.contained,
                 not_send_or_sync: PhantomData,
             },
-        })
+        }))
     }
 }
 
@@ -565,18 +521,30 @@ where
         self.started = true;
         self.common = Some(OperationInvocation {
             coordinator: OperationCoordinator::from_ledger_for_test(ledger),
-            sticky_terminal_cause: Cell::new(None),
-            control_action_debt: Cell::new(0),
-            execution_state: Cell::new(StoreExecutionState::Running),
-            canonical_lineage: CanonicalLineageAuthority::fresh(),
-            terminal_outstanding: false,
+            lifecycle: InvocationLifecycle::new(CanonicalLineageAuthority::fresh()),
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_terminal_invocation_for_test(
+        &mut self,
+    ) -> OperationInvocation<O, P, PP, U, D> {
+        // Numeric fixtures own their batches separately; keep their outer containment duty armed.
+        self.contained = true;
+        let common = self
+            .common
+            .as_mut()
+            .expect("the fixture installed its original invocation");
+        common.lifecycle.terminal_outstanding = true;
+        self.common
+            .take()
+            .expect("the fixture takes its actual invocation once")
     }
 
     #[cfg(test)]
     pub(crate) fn terminal_loan_for_test(&mut self) -> TerminalInvocationLoan<'_, O, P, PP, U, D> {
         InvocationLoan {
-            common: &mut self.common,
+            common: InvocationSlot::Dynamic(&mut self.common),
             contained: &mut self.contained,
             not_send_or_sync: PhantomData,
         }
@@ -585,51 +553,36 @@ where
 
     pub(crate) fn cleanup_owned_state(&mut self) {
         if let Some(physical) = self.terminal.take() {
-            self.contained |= physical.fallback.is_some()
-                || physical.evidence.is_some()
-                || physical.canonical_table.is_some()
-                || physical.evidence_table.is_some()
-                || physical.account.is_some();
+            self.contained |= !physical.is_empty();
             drop(physical);
         }
-        if let (Some(fields), Some(retained)) = (self.assembly.as_mut(), self.retained.as_mut())
-            && !fields.is_empty()
-            && self.common.is_some()
-        {
-            drop(RetainedPublicationAssembly {
-                fields,
-                operation: Some(RetainedOperation {
-                    retained,
-                    assembly: None,
-                    terminal: &mut self.terminal,
-                    common: InvocationLoan {
-                        common: &mut self.common,
-                        contained: &mut self.contained,
-                        not_send_or_sync: PhantomData,
-                    },
-                }),
-            });
-        }
-        drop(self.retained.take());
-        if let Some(common) = self.common.as_mut()
-            && !common.terminal_outstanding
-        {
-            // Ordinary abandonment ends extension ownership before retaining unresolved
-            // accounting. An outstanding terminal loan still owns its full quarantine.
-            let close = common.coordinator.close_for_terminal_extraction();
-            common.record_terminal_gate(close);
-        }
-        let unresolved = self.common.as_ref().is_some_and(|common| {
-            common.terminal_outstanding
-                || common
-                    .coordinator
-                    .retained_ledger()
-                    .terminal_residue_cause()
-                    .is_some()
-        });
-        self.contained |= unresolved;
-        if unresolved && let Some(common) = self.common.take() {
-            std::mem::forget(common);
+        let retain = cleanup_retained_root_graph(
+            self.retained
+                .as_mut()
+                .map(RetainedOperationFieldsLoan::from),
+            &mut self.assembly,
+            TerminalPhysicalSlot::Dynamic(&mut self.terminal),
+            InvocationLoan {
+                common: InvocationSlot::Dynamic(&mut self.common),
+                contained: &mut self.contained,
+                not_send_or_sync: PhantomData,
+            },
+        );
+        if retain {
+            std::mem::forget(self.assembly.take());
+            std::mem::forget(self.retained.take());
+            std::mem::forget(self.common.take());
+        } else {
+            drop(self.retained.take());
+            let unresolved = InvocationLoan {
+                common: InvocationSlot::Dynamic(&mut self.common),
+                contained: &mut self.contained,
+                not_send_or_sync: PhantomData,
+            }
+            .close_abandoned_common();
+            if unresolved {
+                std::mem::forget(self.common.take());
+            }
         }
     }
 
@@ -669,13 +622,13 @@ where
         if self.common.is_none() || retained.baseline.first_account().is_none() {
             return None;
         }
-        retained.deferred_stage = None;
-        let operation = RetainedOperation {
-            retained,
+        retained.metadata.deferred_stage = None;
+        let operation = RetainedOperationLoan {
+            retained: retained.into(),
             assembly: None,
-            terminal: &mut self.terminal,
+            terminal: TerminalPhysicalSlot::Dynamic(&mut self.terminal),
             common: InvocationLoan {
-                common: &mut self.common,
+                common: InvocationSlot::Dynamic(&mut self.common),
                 contained: &mut self.contained,
                 not_send_or_sync: PhantomData,
             },
@@ -684,8 +637,8 @@ where
             && !fields.is_empty()
         {
             Some(
-                RetainedPublicationAssembly {
-                    fields,
+                super::RetainedPublicationAssemblyLoan {
+                    fields: fields.into(),
                     operation: Some(operation),
                 }
                 .contain_activation_fault(),
@@ -708,77 +661,52 @@ where
         {
             return Err(binding);
         }
-        let common = self
-            .common
-            .as_mut()
-            .expect("the original common was checked");
         let account = binding.admission.account();
-        let account_ready = match account.try_begin_account_preflight() {
-            Ok(permit) => {
-                drop(permit);
-                true
-            }
-            Err(_) => {
-                record_terminal_cause_with_precedence(
-                    &common.sticky_terminal_cause,
-                    PreparationFailureCode::product_graph(0x5541_4343),
-                );
-                false
-            }
+        let prepared = {
+            let _preparation_unwind = scopeguard::guard_on_unwind(account, |account| {
+                let _ = account.record_poison(super::AccountPoisonReason::OwnershipGraphUnverified);
+            });
+            self.common
+                .as_mut()
+                .expect("the original common was checked")
+                .view()
+                .prepare_unattached_terminal(account, final_progress)
         };
-        if account_ready && common.sticky_terminal_cause.get().is_none() {
-            let result = common.coordinator.try_prepare_typed_control(final_progress);
-            common.record_terminal_gate(result);
-        }
-        let close = common.coordinator.close_for_terminal_extraction();
-        common.record_terminal_gate(close);
-        // Extension disposal may quarantine the same account. No client callback follows
-        // this gate, and no replacement admission or retained graph is constructed.
-        match account.try_begin_account_preflight() {
-            Ok(permit) => drop(permit),
-            Err(_) => record_terminal_cause_with_precedence(
-                &common.sticky_terminal_cause,
-                PreparationFailureCode::product_graph(0x5541_4343),
-            ),
-        }
-        let common = self
-            .common
-            .as_mut()
-            .expect("unattached terminal state remains in its root");
-        let (snapshot, ledger_cause) = common.coordinator.take_terminal_snapshot();
-        if ledger_cause.is_some() {
-            record_terminal_cause_with_precedence(
-                &common.sticky_terminal_cause,
-                PreparationFailureCode::ledger(),
-            );
-        }
-        let cause = common.sticky_terminal_cause.get();
+        let stamp = match prepared {
+            Ok(stamp) => stamp,
+            Err(()) => return Err(binding),
+        };
+        // All preparation loans have ended. The concrete leaf owns capture and dirty state.
+        // Keep the original domain protected if capture unwinds after taking common.
+        let already_contained = self.contained;
+        self.contained = true;
         let common = self
             .common
             .take()
-            .expect("unattached close consumes the original state once");
-        let contained = ledger_cause.is_some();
-        if contained {
-            self.contained = true;
-            let _ = account.record_poison(super::AccountPoisonReason::OwnershipGraphUnverified);
-            std::mem::forget(common);
-        } else {
-            drop(common);
+            .expect("unattached close consumes the actual state once");
+        match common.finish_unattached(stamp, account) {
+            Ok(prepared) => {
+                self.contained = already_contained || prepared.contained;
+                Ok(prepared)
+            }
+            Err(common) => {
+                // A private stamp mismatch returns the same state, never fresh start authority.
+                self.common = Some(common);
+                Err(binding)
+            }
         }
-        Ok(UnattachedTerminalEvidence {
-            snapshot,
-            cause,
-            contained,
-        })
     }
 
     pub(crate) fn record_payload_failure(&mut self, code: u32) {
         let Some(common) = self.common.as_mut() else {
             return;
         };
-        StoreExecutionState::stop(&common.execution_state, StoreExecutionState::KnownError);
+        StoreExecutionState::stop(
+            &common.lifecycle.execution_state,
+            StoreExecutionState::KnownError,
+        );
         record_terminal_cause_with_precedence(
-            &common.sticky_terminal_cause,
+            &common.lifecycle.sticky_terminal_cause,
             PreparationFailureCode::product_graph(code),
         );
         if common
@@ -788,7 +716,7 @@ where
             .is_err()
         {
             record_terminal_cause_with_precedence(
-                &common.sticky_terminal_cause,
+                &common.lifecycle.sticky_terminal_cause,
                 PreparationFailureCode::ledger(),
             );
         }
@@ -822,23 +750,23 @@ where
         let retained = self.retained.as_mut()?;
         if !retained.has_deferred_storage()
             || !matches!(
-                retained.deferred_stage,
+                retained.metadata.deferred_stage,
                 Some(RetainedDeferredStage::Operation)
             )
         {
             return None;
         }
-        retained.deferred_stage = Some(RetainedDeferredStage::TerminalOperation);
-        Some(RetainedOperation {
-            retained,
+        retained.metadata.deferred_stage = Some(RetainedDeferredStage::TerminalOperation);
+        Some(RetainedOperation::from_loan(RetainedOperationLoan {
+            retained: retained.into(),
             assembly: Some(&mut self.assembly),
-            terminal: &mut self.terminal,
+            terminal: TerminalPhysicalSlot::Dynamic(&mut self.terminal),
             common: InvocationLoan {
-                common: &mut self.common,
+                common: InvocationSlot::Dynamic(&mut self.common),
                 contained: &mut self.contained,
                 not_send_or_sync: PhantomData,
             },
-        })
+        }))
     }
 
     #[allow(
@@ -855,25 +783,27 @@ where
         let retained = self.retained.as_mut()?;
         let fields = self.assembly.as_mut()?;
         if !matches!(
-            retained.deferred_stage,
+            retained.metadata.deferred_stage,
             Some(RetainedDeferredStage::Assembly)
         ) {
             return None;
         }
-        retained.deferred_stage = None;
-        Some(RetainedPublicationAssembly {
-            fields,
-            operation: Some(RetainedOperation {
-                retained,
-                assembly: None,
-                terminal: &mut self.terminal,
-                common: InvocationLoan {
-                    common: &mut self.common,
-                    contained: &mut self.contained,
-                    not_send_or_sync: PhantomData,
-                },
-            }),
-        })
+        retained.metadata.deferred_stage = None;
+        Some(RetainedPublicationAssembly::from_loan(
+            super::RetainedPublicationAssemblyLoan {
+                fields: fields.into(),
+                operation: Some(RetainedOperationLoan {
+                    retained: retained.into(),
+                    assembly: None,
+                    terminal: TerminalPhysicalSlot::Dynamic(&mut self.terminal),
+                    common: InvocationLoan {
+                        common: InvocationSlot::Dynamic(&mut self.common),
+                        contained: &mut self.contained,
+                        not_send_or_sync: PhantomData,
+                    },
+                }),
+            },
+        ))
     }
 
     #[allow(
@@ -889,26 +819,29 @@ where
         }
         let retained = self.retained.as_mut()?;
         let fields = self.assembly.as_mut()?;
-        let RetainedDeferredStage::Failure { fallback_cause } = retained.deferred_stage.as_ref()?
+        let RetainedDeferredStage::Failure { fallback_cause } =
+            retained.metadata.deferred_stage.as_ref()?
         else {
             return None;
         };
         let fallback_cause = *fallback_cause;
-        retained.deferred_stage = None;
+        retained.metadata.deferred_stage = None;
         Some(super::RetainedFailureAssembly {
-            assembly: RetainedPublicationAssembly {
-                fields,
-                operation: Some(RetainedOperation {
-                    retained,
-                    assembly: None,
-                    terminal: &mut self.terminal,
-                    common: InvocationLoan {
-                        common: &mut self.common,
-                        contained: &mut self.contained,
-                        not_send_or_sync: PhantomData,
-                    },
-                }),
-            },
+            assembly: RetainedPublicationAssembly::from_loan(
+                super::RetainedPublicationAssemblyLoan {
+                    fields: fields.into(),
+                    operation: Some(RetainedOperationLoan {
+                        retained: retained.into(),
+                        assembly: None,
+                        terminal: TerminalPhysicalSlot::Dynamic(&mut self.terminal),
+                        common: InvocationLoan {
+                            common: InvocationSlot::Dynamic(&mut self.common),
+                            contained: &mut self.contained,
+                            not_send_or_sync: PhantomData,
+                        },
+                    }),
+                },
+            ),
             fallback_cause,
         })
     }
@@ -929,27 +862,29 @@ where
         let RetainedDeferredStage::Fallback {
             cause,
             activation_containment_required,
-        } = retained.deferred_stage.as_ref()?
+        } = retained.metadata.deferred_stage.as_ref()?
         else {
             return None;
         };
         let cause = *cause;
         let activation_containment_required = *activation_containment_required;
-        retained.deferred_stage = None;
+        retained.metadata.deferred_stage = None;
         Some(super::RetainedFallbackOnly {
-            assembly: RetainedPublicationAssembly {
-                fields,
-                operation: Some(RetainedOperation {
-                    retained,
-                    assembly: None,
-                    terminal: &mut self.terminal,
-                    common: InvocationLoan {
-                        common: &mut self.common,
-                        contained: &mut self.contained,
-                        not_send_or_sync: PhantomData,
-                    },
-                }),
-            },
+            assembly: RetainedPublicationAssembly::from_loan(
+                super::RetainedPublicationAssemblyLoan {
+                    fields: fields.into(),
+                    operation: Some(RetainedOperationLoan {
+                        retained: retained.into(),
+                        assembly: None,
+                        terminal: TerminalPhysicalSlot::Dynamic(&mut self.terminal),
+                        common: InvocationLoan {
+                            common: InvocationSlot::Dynamic(&mut self.common),
+                            contained: &mut self.contained,
+                            not_send_or_sync: PhantomData,
+                        },
+                    }),
+                },
+            ),
             cause,
             activation_containment_required,
         })
@@ -969,28 +904,31 @@ where
         let retained = self.retained.as_mut()?;
         let fields = self.assembly.as_mut()?;
         if !matches!(
-            retained.deferred_stage,
+            retained.metadata.deferred_stage,
             Some(RetainedDeferredStage::Success { .. })
         ) {
             return None;
         }
-        let RetainedDeferredStage::Success { proof } = retained.deferred_stage.take()? else {
+        let RetainedDeferredStage::Success { proof } = retained.metadata.deferred_stage.take()?
+        else {
             return None;
         };
         Some(super::ValidatedRetainedSuccess {
-            assembly: RetainedPublicationAssembly {
-                fields,
-                operation: Some(RetainedOperation {
-                    retained,
-                    assembly: None,
-                    terminal: &mut self.terminal,
-                    common: InvocationLoan {
-                        common: &mut self.common,
-                        contained: &mut self.contained,
-                        not_send_or_sync: PhantomData,
-                    },
-                }),
-            },
+            assembly: RetainedPublicationAssembly::from_loan(
+                super::RetainedPublicationAssemblyLoan {
+                    fields: fields.into(),
+                    operation: Some(RetainedOperationLoan {
+                        retained: retained.into(),
+                        assembly: None,
+                        terminal: TerminalPhysicalSlot::Dynamic(&mut self.terminal),
+                        common: InvocationLoan {
+                            common: InvocationSlot::Dynamic(&mut self.common),
+                            contained: &mut self.contained,
+                            not_send_or_sync: PhantomData,
+                        },
+                    }),
+                },
+            ),
             proof,
         })
     }
@@ -1022,41 +960,9 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    common: &'inv mut Option<OperationInvocation<O, P, PP, U, D>>,
+    common: InvocationSlot<'inv, O, P, PP, U, D>,
     contained: &'inv mut bool,
     not_send_or_sync: PhantomData<Rc<()>>,
-}
-
-impl<O, P, PP, U, D> std::ops::Deref for InvocationLoan<'_, O, P, PP, U, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    type Target = OperationInvocation<O, P, PP, U, D>;
-
-    fn deref(&self) -> &Self::Target {
-        self.common
-            .as_ref()
-            .expect("a live stage borrows the outer invocation")
-    }
-}
-
-impl<O, P, PP, U, D> std::ops::DerefMut for InvocationLoan<'_, O, P, PP, U, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.common
-            .as_mut()
-            .expect("a live stage borrows the outer invocation")
-    }
 }
 
 impl<'inv, O, P, PP, U, D> InvocationLoan<'inv, O, P, PP, U, D>
@@ -1067,20 +973,104 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    pub(super) fn into_terminal(self) -> TerminalInvocationLoan<'inv, O, P, PP, U, D> {
-        self.common
-            .as_mut()
-            .expect("terminal borrows the original invocation")
-            .terminal_outstanding = true;
-        TerminalInvocationLoan {
-            common: self.common,
+    fn reborrow(&mut self) -> InvocationLoan<'_, O, P, PP, U, D> {
+        InvocationLoan {
+            common: self.common.reborrow(),
             contained: self.contained,
             not_send_or_sync: PhantomData,
         }
     }
 
+    fn close_abandoned_common(&mut self) -> bool {
+        if !self.common.is_installed() {
+            return false;
+        }
+        // The original control owner closes after physical disposal. The shared view
+        // preserves scoped outstanding authority if an owner-defined callback escapes.
+        self.view().close_terminal_owners();
+        let unresolved = self.as_read().terminal_residue_cause().is_some();
+        *self.contained |= unresolved;
+        unresolved
+    }
+
+    pub(super) fn view(&mut self) -> OperationInvocationView<'_, O, P, PP, U, D> {
+        self.common.reborrow().into_view()
+    }
+
+    pub(super) fn as_read(&self) -> crate::ledger::LedgerReadView<'_, O, P, D> {
+        self.common.as_read()
+    }
+
+    pub(super) fn lifecycle(&self) -> &InvocationLifecycle<P> {
+        self.common.lifecycle()
+    }
+
+    pub(super) fn lifecycle_mut(&mut self) -> &mut InvocationLifecycle<P> {
+        self.common.lifecycle_mut()
+    }
+
+    pub(super) fn recorded_control_cause(&self) -> Option<ControlCause> {
+        self.common.recorded_control_cause()
+    }
+
+    pub(super) fn preflight_exclusive(&self) -> Result<(), ExecutionError<D>> {
+        self.lifecycle()
+            .preflight_exclusive(|| self.recorded_control_cause(), self.as_read())
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_ledger(&self) -> &crate::ledger::Ledger<O, P, D> {
+        let InvocationSlot::Dynamic(common) = &self.common else {
+            panic!("the dynamic test hook requires its original dynamic slot");
+        };
+        common
+            .as_ref()
+            .expect("the test inspects the original installed ledger")
+            .coordinator
+            .retained_ledger()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_ledger_mut(&mut self) -> &mut crate::ledger::Ledger<O, P, D> {
+        let InvocationSlot::Dynamic(common) = &mut self.common else {
+            panic!("the dynamic test hook requires its original dynamic slot");
+        };
+        common
+            .as_mut()
+            .expect("the test mutates the original installed ledger")
+            .coordinator
+            .retained_ledger_mut()
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_shared_probe(&self) -> crate::ledger::LedgerTestProbe<P, D> {
+        match &self.common {
+            InvocationSlot::Dynamic(common) => common
+                .as_ref()
+                .expect("the dynamic fixture retains its original invocation")
+                .coordinator
+                .retained_ledger()
+                .test_shared_probe(),
+            InvocationSlot::Finite(common) => common
+                .as_ref()
+                .expect("the finite fixture retains its original invocation")
+                .coordinator
+                .retained_ledger()
+                .test_shared_probe()
+                .expect("the finite physical fixture has real promoted storage"),
+        }
+    }
+
+    pub(super) fn terminal_is_outstanding(&self) -> bool {
+        self.common.is_installed() && self.common.lifecycle().terminal_outstanding
+    }
+
+    pub(super) fn into_terminal(self) -> TerminalInvocationLoan<'inv, O, P, PP, U, D> {
+        self.common.into_terminal(self.contained)
+    }
+
     pub(crate) fn invocation_identity(&self) -> *const () {
-        std::ptr::from_ref(&*self.common).cast()
+        self.common.invocation_identity()
     }
 }
 
@@ -1092,45 +1082,9 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    common: &'inv mut Option<OperationInvocation<O, P, PP, U, D>>,
+    common: InvocationSlot<'inv, O, P, PP, U, D>,
     contained: &'inv mut bool,
     not_send_or_sync: PhantomData<Rc<()>>,
-}
-
-impl<O, P, PP, U, D> std::ops::Deref for TerminalInvocationLoan<'_, O, P, PP, U, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    type Target = crate::ledger::Ledger<O, P, D>;
-
-    fn deref(&self) -> &Self::Target {
-        self.common
-            .as_ref()
-            .expect("terminal state remains owned by its root")
-            .coordinator
-            .retained_ledger()
-    }
-}
-
-impl<O, P, PP, U, D> std::ops::DerefMut for TerminalInvocationLoan<'_, O, P, PP, U, D>
-where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.common
-            .as_mut()
-            .expect("terminal state remains owned by its root")
-            .coordinator
-            .retained_ledger_mut()
-    }
 }
 
 impl<'inv, O, P, PP, U, D> TerminalInvocationLoan<'inv, O, P, PP, U, D>
@@ -1141,30 +1095,26 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
+    pub(crate) fn is_finite(&self) -> bool {
+        matches!(self.common, InvocationSlot::Finite(_))
+    }
+
+    pub(crate) fn as_read(&self) -> crate::ledger::LedgerReadView<'_, O, P, D> {
+        self.common.as_read()
+    }
+
+    pub(crate) fn view(&mut self) -> crate::ledger::LedgerView<'_, O, P, D> {
+        self.common.ledger_view()
+    }
+
     pub(crate) fn known_administrative_bytes(&self) -> Option<u64> {
-        self.common
-            .as_ref()
-            .expect("terminal state remains in its armed slot")
-            .coordinator
-            .known_administrative_bytes()
+        self.common.known_administrative_bytes()
     }
 
-    pub(crate) fn into_owned(self) -> OperationInvocation<O, P, PP, U, D> {
-        // The concrete root keeps its actual domain until owned output consumes it. A later
-        // detach or publication failure must retain that domain beside the actual residue.
+    pub(crate) fn retain_fail_closed(mut self) {
         *self.contained = true;
-        self.common
-            .take()
-            .expect("detach consumes the armed state slot once")
-    }
-
-    pub(crate) fn retain_fail_closed(self) {
-        *self.contained = true;
-        let common = self
-            .common
-            .take()
-            .expect("containment consumes the armed state slot once");
-        std::mem::forget(common);
+        // The actual concrete root retains its original state until physical containment.
+        self.common.lifecycle_mut().terminal_outstanding = true;
     }
 }
 
@@ -1177,6 +1127,11 @@ where
     F: Send + Sync + 'static,
 {
     pub(super) baseline: FallbackPublicationBaseline<O, P, D, F>,
+    pub(super) metadata: RetainedOperationMetadata<P, D, CanonicalBlock, EvidenceBlock>,
+}
+
+/// Original plans, deferred permission and permit state, independent of baseline representation.
+pub(super) struct RetainedOperationMetadata<P, D, CanonicalBlock, EvidenceBlock> {
     pub(super) deferred_stage: Option<RetainedDeferredStage<CanonicalBlock, EvidenceBlock>>,
     terminal_writer: RetainedWriterPlan<P, D>,
     canonical_assembly_limits: RetainedBatchLimits,
@@ -1186,6 +1141,255 @@ where
     failure_work_permit_outstanding: bool,
     ordinary_work_permit_outstanding: bool,
     ordinary_work_permit_partially_resolved: bool,
+}
+
+impl<P: Copy, D: Copy, CB, EB> RetainedOperationMetadata<P, D, CB, EB> {
+    fn from_qualified_plan(
+        terminal_writer: RetainedWriterPlan<P, D>,
+        terminal_account_share_work: RetainedHandleSharePlan<D>,
+        canonical_assembly_limits: RetainedBatchLimits,
+        failure_work: super::operation_start::QualifiedFailureTerminalWork<D>,
+    ) -> Self {
+        Self {
+            deferred_stage: None,
+            terminal_writer,
+            canonical_assembly_limits,
+            terminal_account_share_work,
+            failure_terminal_work: failure_work
+                .map(|(plan, _)| FailureTerminalWorkCapability::from_qualified(plan)),
+            failure_terminal_work_dimension: failure_work.map(|(plan, _)| plan.dimension()),
+            failure_work_permit_outstanding: false,
+            ordinary_work_permit_outstanding: false,
+            ordinary_work_permit_partially_resolved: false,
+        }
+    }
+}
+
+fn checked_terminal_assembly_limits<D>(
+    limits: RetainedBatchLimits,
+) -> Result<(RetainedBatchLimits, RetainedBatchLimits), RetainedOperationStartError<D>> {
+    let evidence = RetainedBatchLimits::new(
+        limits
+            .attribution_slots
+            .checked_add(1)
+            .ok_or(RetainedOperationStartError::InvalidTerminalLimits)?
+            .max(2),
+        limits
+            .commitment_slots
+            .checked_add(1)
+            .ok_or(RetainedOperationStartError::InvalidTerminalLimits)?
+            .max(2),
+    );
+    Ok((limits, evidence))
+}
+
+fn check_retained_attachment_entry<O, P, PP, U, D>(
+    common: &OperationInvocationView<'_, O, P, PP, U, D>,
+    account: &PhysicalStorageAccount,
+) -> Result<(), RetainedOperationStartError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    check_execution_state(
+        &common.lifecycle.sticky_terminal_cause,
+        &common.lifecycle.execution_state,
+        || common.coordinator.recorded_control_cause(),
+    )
+    .map_err(|cause| match cause {
+        ExecutionError::Control(cause) => RetainedOperationStartError::Control(cause),
+        ExecutionError::Ledger(cause) => {
+            RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
+        }
+        ExecutionError::Stopped => {
+            RetainedOperationStartError::Writer(RetainedWriterError::OwnershipUnverified)
+        }
+    })?;
+    let health = account.try_begin_account_preflight().map_err(|cause| {
+        RetainedOperationStartError::Writer(RetainedWriterError::AccountPoisoned(cause))
+    })?;
+    drop(health);
+    Ok(())
+}
+
+fn preflight_retained_failure_work<O, P, D>(
+    ledger: crate::ledger::LedgerReadView<'_, O, P, D>,
+    failure_work: super::operation_start::QualifiedFailureTerminalWork<D>,
+) -> Result<(), RetainedOperationStartError<D>>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+{
+    if let Some((plan, requirement)) = failure_work {
+        ledger
+            .preflight_protected_work_attachment(
+                plan.dimension(),
+                &plan.share_work().charges(),
+                requirement.maximum_share_actions(),
+            )
+            .map_err(|cause| {
+                RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
+            })?;
+    }
+    Ok(())
+}
+
+/// The plans remain in their original owner while the baseline lends its concrete representation.
+pub(super) struct RetainedOperationFieldsLoan<'inv, O, P, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(super) baseline: FallbackPublicationBaselineLoan<'inv, O, P, D, F>,
+    pub(super) metadata: &'inv mut RetainedOperationMetadata<P, D, CB, EB>,
+}
+
+impl<'inv, O, P, D, F, CB, EB> RetainedOperationFieldsLoan<'inv, O, P, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn reborrow(&mut self) -> RetainedOperationFieldsLoan<'_, O, P, D, F, CB, EB> {
+        RetainedOperationFieldsLoan {
+            baseline: match &mut self.baseline {
+                FallbackPublicationBaselineLoan::Dynamic(baseline) => {
+                    FallbackPublicationBaselineLoan::Dynamic(baseline)
+                }
+                FallbackPublicationBaselineLoan::Finite(baseline) => {
+                    FallbackPublicationBaselineLoan::Finite(baseline)
+                }
+            },
+            metadata: self.metadata,
+        }
+    }
+
+    fn has_deferred_storage(&self) -> bool {
+        self.baseline.first_account().is_some() && self.baseline.has_batches()
+    }
+}
+
+fn reject_retained_attachment<O, P, PP, U, D>(
+    common: &mut OperationInvocationView<'_, O, P, PP, U, D>,
+    cause: PreparationFailureCode,
+) where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    StoreExecutionState::stop(
+        &common.lifecycle.execution_state,
+        StoreExecutionState::KnownError,
+    );
+    record_terminal_cause_with_precedence(&common.lifecycle.sticky_terminal_cause, cause);
+    if common
+        .coordinator
+        .ledger_mut()
+        .seal_ordinary_work()
+        .is_err()
+    {
+        record_terminal_cause_with_precedence(
+            &common.lifecycle.sticky_terminal_cause,
+            PreparationFailureCode::ledger(),
+        );
+    }
+}
+
+/// Disposes or quarantines the actual borrowed graph; only the concrete root takes owners.
+fn cleanup_retained_root_graph<O, P, PP, U, D, F, CB, EB>(
+    mut retained: Option<RetainedOperationFieldsLoan<'_, O, P, D, F, CB, EB>>,
+    assembly: &mut super::PublicationAssemblySlot<O, P, D, CB, EB>,
+    mut terminal: TerminalPhysicalSlot<'_, P, D, F, CB, EB>,
+    mut common: InvocationLoan<'_, O, P, PP, U, D>,
+) -> bool
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CB: Send + Sync + 'static,
+    EB: Send + Sync + 'static,
+{
+    let quarantine = *common.contained || common.terminal_is_outstanding();
+    if quarantine {
+        *common.contained = true;
+        if common.common.is_installed() {
+            let view = common.view();
+            StoreExecutionState::stop(
+                &view.lifecycle.execution_state,
+                StoreExecutionState::KnownError,
+            );
+            record_terminal_cause_with_precedence(
+                &view.lifecycle.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(StoreExecutionState::ABANDONED),
+            );
+        }
+    }
+    if let Some(fields) = assembly.as_mut()
+        && !fields.is_empty()
+        && (quarantine || (retained.is_some() && common.common.is_installed()))
+    {
+        let operation = if common.common.is_installed() {
+            retained.as_mut().map(|retained| RetainedOperationLoan {
+                retained: retained.reborrow(),
+                assembly: None,
+                terminal: match &mut terminal {
+                    TerminalPhysicalSlot::Dynamic(slot) => TerminalPhysicalSlot::Dynamic(slot),
+                    TerminalPhysicalSlot::Finite(slot) => TerminalPhysicalSlot::Finite(slot),
+                },
+                common: common.reborrow(),
+            })
+        } else {
+            None
+        };
+        let mut loan = super::RetainedPublicationAssemblyLoan {
+            fields: fields.into(),
+            operation,
+        };
+        if quarantine {
+            if loan.first_containment_account().is_some() {
+                let _ = loan.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            } else {
+                loan.fail_closed_after_recorded_poison();
+            }
+        }
+        // Healthy pre-Ready destruction uses the existing exact graph/destructor policy,
+        // including verified physical destruction on an already poisoned account.
+        drop(loan);
+    }
+    if quarantine && let Some(retained) = retained.as_mut() {
+        if let Some(account) = retained.baseline.first_account() {
+            let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        retained.baseline.record_forgotten_physical_edges();
+        retained.baseline.fail_closed_after_recorded_poison();
+    }
+    quarantine
+}
+
+impl<'inv, O, P, D, F, CB, EB> From<&'inv mut RetainedOperationFields<O, P, D, F, CB, EB>>
+    for RetainedOperationFieldsLoan<'inv, O, P, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug,
+    F: Send + Sync + 'static,
+{
+    fn from(fields: &'inv mut RetainedOperationFields<O, P, D, F, CB, EB>) -> Self {
+        Self {
+            baseline: FallbackPublicationBaselineLoan::Dynamic(&mut fields.baseline),
+            metadata: &mut fields.metadata,
+        }
+    }
 }
 
 impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
@@ -1201,11 +1405,7 @@ where
     }
 }
 
-/// Short permission over the invocation and its actual retained state.
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
+/// Concrete dynamic permission; consuming result types remain dynamic.
 #[must_use = "the operation permission must be resolved by its invocation"]
 pub(crate) struct RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
@@ -1216,13 +1416,527 @@ where
     D: Copy + Ord + fmt::Debug,
     F: Send + Sync + 'static,
 {
-    pub(super) terminal:
-        &'inv mut Option<super::TerminalPhysicalState<P, D, F, CanonicalBlock, EvidenceBlock>>,
+    pub(super) loan: RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+}
+
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+    F: Send + Sync + 'static,
+{
+    pub(super) fn from_loan(
+        loan: RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+    ) -> Self {
+        Self { loan }
+    }
+
+    pub(super) fn into_loan(
+        self,
+    ) -> RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        self.loan
+    }
+
+    pub(crate) fn loan(
+        &self,
+    ) -> &RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        &self.loan
+    }
+
+    pub(crate) fn loan_mut(
+        &mut self,
+    ) -> &mut RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        &mut self.loan
+    }
+}
+
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub fn try_start(
+        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        control: OperationControl<PP, U>,
+        ledger_limits: LedgerLimits<D>,
+        account: &PhysicalStorageAccount,
+        plan: RetainedOperationStartPlan<P, D>,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> Result<Self, RetainedOperationStartError<D>> {
+        let phase_catalog = [plan.terminal_writer.phase];
+        Self::try_start_inner(
+            root,
+            control,
+            (ledger_limits, &phase_catalog),
+            account,
+            plan,
+            CanonicalLineageAuthority::fresh(),
+            build_fallback,
+        )
+    }
+
+    pub fn try_start_with_phase_catalog(
+        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        control: OperationControl<PP, U>,
+        ledger: (LedgerLimits<D>, &[P]),
+        account: &PhysicalStorageAccount,
+        plan: RetainedOperationStartPlan<P, D>,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> Result<Self, RetainedOperationStartError<D>> {
+        Self::try_start_inner(
+            root,
+            control,
+            ledger,
+            account,
+            plan,
+            CanonicalLineageAuthority::fresh(),
+            build_fallback,
+        )
+    }
+
+    pub(crate) fn try_start_derived_with_phase_catalog<SourceBlock>(
+        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        control: OperationControl<PP, U>,
+        ledger: (LedgerLimits<D>, &[P]),
+        account: &PhysicalStorageAccount,
+        source: &PublishedCanonicalAggregate<SourceBlock>,
+        plan: RetainedOperationStartPlan<P, D>,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> Result<Self, RetainedOperationStartError<D>> {
+        let preflight = account.try_begin_account_preflight().map_err(|cause| {
+            RetainedOperationStartError::Writer(RetainedWriterError::AccountPoisoned(cause))
+        })?;
+        if !source.belongs_to(account) {
+            return Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::ForeignAccount,
+            ));
+        }
+        let canonical_lineage = CanonicalLineageAuthority::derived(source);
+        drop(preflight);
+        Self::try_start_inner(
+            root,
+            control,
+            ledger,
+            account,
+            plan,
+            canonical_lineage,
+            build_fallback,
+        )
+    }
+
+    fn try_start_inner(
+        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        control: OperationControl<PP, U>,
+        ledger: (LedgerLimits<D>, &[P]),
+        account: &PhysicalStorageAccount,
+        plan: RetainedOperationStartPlan<P, D>,
+        canonical_lineage: CanonicalLineageAuthority,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> Result<Self, RetainedOperationStartError<D>> {
+        Self::bind_inner(root, control, ledger, account, plan, canonical_lineage)?
+            .attach(build_fallback)
+    }
+
+    pub(crate) fn bind_with_phase_catalog<'account>(
+        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        control: OperationControl<PP, U>,
+        ledger: (LedgerLimits<D>, &[P]),
+        account: &'account PhysicalStorageAccount,
+        plan: RetainedOperationStartPlan<P, D>,
+    ) -> RetainedAttachmentResult<'inv, 'account, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    {
+        Self::bind_inner(
+            root,
+            control,
+            ledger,
+            account,
+            plan,
+            CanonicalLineageAuthority::fresh(),
+        )
+    }
+
+    pub(crate) fn bind_derived_with_phase_catalog<'account, SourceBlock>(
+        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        control: OperationControl<PP, U>,
+        ledger: (LedgerLimits<D>, &[P]),
+        account: &'account PhysicalStorageAccount,
+        source: &PublishedCanonicalAggregate<SourceBlock>,
+        plan: RetainedOperationStartPlan<P, D>,
+    ) -> RetainedAttachmentResult<'inv, 'account, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    {
+        let preflight = account.try_begin_account_preflight().map_err(|cause| {
+            RetainedOperationStartError::Writer(RetainedWriterError::AccountPoisoned(cause))
+        })?;
+        if !source.belongs_to(account) {
+            return Err(RetainedOperationStartError::Writer(
+                RetainedWriterError::ForeignAccount,
+            ));
+        }
+        let lineage = CanonicalLineageAuthority::derived(source);
+        drop(preflight);
+        Self::bind_inner(root, control, ledger, account, plan, lineage)
+    }
+
+    fn bind_inner<'account>(
+        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        control: OperationControl<PP, U>,
+        ledger: (LedgerLimits<D>, &[P]),
+        account: &'account PhysicalStorageAccount,
+        plan: RetainedOperationStartPlan<P, D>,
+        canonical_lineage: CanonicalLineageAuthority,
+    ) -> RetainedAttachmentResult<'inv, 'account, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    {
+        let (ledger_limits, phase_catalog) = ledger;
+        if root.started {
+            return Err(RetainedOperationStartError::InvocationAlreadyStarted);
+        }
+        root.started = true;
+        let failure_terminal_work = Self::qualify_terminal_plan(&plan)?;
+        let dimension_count = ledger_limits.dimension_count();
+        let phase_count = phase_catalog.len();
+        let admission = account.try_admit_operation_start().map_err(|cause| {
+            RetainedOperationStartError::Writer(match cause {
+                startup::OperationStartAdmissionError::AccountPoisoned(poisoned) => {
+                    RetainedWriterError::AccountPoisoned(poisoned)
+                }
+                startup::OperationStartAdmissionError::AccountingOverflow => {
+                    RetainedWriterError::Physical(RetainedAllocationError::AccountingOverflow)
+                }
+            })
+        })?;
+        let coordinator = OperationCoordinator::try_new(control, ledger_limits, phase_catalog)
+            .map_err(|cause| {
+                RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
+            })?;
+        root.common = Some(OperationInvocation {
+            coordinator,
+            lifecycle: InvocationLifecycle::new(canonical_lineage),
+        });
+        let common = root
+            .common
+            .as_mut()
+            .expect("binding installs its actual common");
+        if !super::terminal_evidence_catalog_is_qualified(
+            common.coordinator.retained_ledger(),
+            dimension_count,
+            phase_count,
+        ) {
+            root.record_payload_failure(0x4154_4341);
+            return Err(RetainedOperationStartError::TerminalEvidenceCatalogInvariant);
+        }
+        if let Some((failure_plan, _)) = failure_terminal_work {
+            common
+                .view()
+                .coordinator
+                .ledger_mut()
+                .configure_protected_work(failure_plan.dimension())
+                .map_err(|cause| {
+                    RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
+                })?;
+        }
+        Ok(PendingRetainedAttachment {
+            root,
+            admission,
+            plan,
+            failure_terminal_work,
+            dimension_count,
+            phase_count,
+            local: PhantomData,
+        })
+    }
+
+    fn qualify_terminal_plan(
+        plan: &RetainedOperationStartPlan<P, D>,
+    ) -> Result<
+        Option<(
+            RetainedFailureTerminalWorkPlan<D>,
+            RetainedFailureTerminalWorkRequirement,
+        )>,
+        RetainedOperationStartError<D>,
+    > {
+        super::operation_start::qualify_terminal_plan(
+            plan.terminal_writer,
+            plan.terminal_account_share_work,
+            &[plan.fallback_commitment, plan.snapshot_commitment],
+            plan.failure_terminal_work,
+        )
+    }
+
+    fn prepare_attachment(
+        common: &mut OperationInvocation<O, P, PP, U, D>,
+        admission: startup::PendingOperationStartAdmission<'_>,
+        plan: RetainedOperationStartPlan<P, D>,
+        failure_terminal_work: Option<(
+            RetainedFailureTerminalWorkPlan<D>,
+            RetainedFailureTerminalWorkRequirement,
+        )>,
+        dimension_count: usize,
+        phase_count: usize,
+        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
+    ) -> RetainedAttachmentFieldsResult<O, P, D, F, CanonicalBlock, EvidenceBlock> {
+        let account = admission.account();
+        check_retained_attachment_entry(&common.view(), account)?;
+        let ledger = common.coordinator.retained_ledger();
+        let (canonical_assembly, evidence_assembly) =
+            checked_terminal_assembly_limits(plan.terminal_writer.limits)?;
+        let terminal_slot_plan = RetainedWriterPlan::new(
+            plan.terminal_writer.phase,
+            plan.terminal_writer.capacity_dimension,
+            plan.terminal_writer.attribution_dimension,
+            RetainedBatchLimits::new(1, 1),
+        );
+        let fallback_batch_plan =
+            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
+                terminal_slot_plan.phase,
+                terminal_slot_plan.capacity_dimension,
+                terminal_slot_plan.limits.attribution_slots,
+                terminal_slot_plan.limits.commitment_slots,
+            )
+            .map_err(map_batch_error)?;
+        let evidence_batch_plan =
+            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
+                terminal_slot_plan.phase,
+                terminal_slot_plan.capacity_dimension,
+                terminal_slot_plan.limits.attribution_slots,
+                terminal_slot_plan.limits.commitment_slots,
+            )
+            .map_err(map_batch_error)?;
+        let canonical_assembly_plan = AttributionBatchPlan::<O, P, D, CanonicalOutput>::try_new(
+            plan.terminal_writer.phase,
+            plan.terminal_writer.capacity_dimension,
+            canonical_assembly.attribution_slots,
+            canonical_assembly.commitment_slots,
+        )
+        .map_err(map_batch_error)?;
+        let evidence_assembly_plan =
+            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
+                plan.terminal_writer.phase,
+                plan.terminal_writer.capacity_dimension,
+                evidence_assembly.attribution_slots,
+                evidence_assembly.commitment_slots,
+            )
+            .map_err(map_batch_error)?;
+        let terminal_evidence_backing =
+            TerminalEvidenceBackingPlan::<P, D>::try_new(dimension_count, phase_count).map_err(
+                |_| RetainedOperationStartError::Writer(RetainedWriterError::BatchCapacity),
+            )?;
+        let terminal_evidence_footprint = terminal_evidence_backing.footprint();
+        let evidence_plan = RetainedAllocationPlan::new(
+            terminal_evidence_footprint.bytes(),
+            terminal_evidence_footprint.allocations(),
+        )
+        .map_err(|_| RetainedOperationStartError::Writer(RetainedWriterError::BatchCapacity))?;
+        let fallback_charge = account
+            .checked_retained_charge::<F>(plan.fallback_plan)
+            .map_err(RetainedWriterError::Physical)?;
+        let evidence_charge = account
+            .checked_retained_charge::<TerminalLedgerEvidence<P, D>>(evidence_plan)
+            .map_err(RetainedWriterError::Physical)?;
+        let startup_parts = StartupLedgerPlanParts {
+            batches: StartupAttributionBatchPlans::new(
+                canonical_assembly_plan,
+                evidence_assembly_plan,
+                fallback_batch_plan,
+                evidence_batch_plan,
+            ),
+            retained_attributions: [
+                StartupRetainedAttribution::new(
+                    terminal_slot_plan.phase,
+                    terminal_slot_plan.attribution_dimension,
+                    fallback_charge.bytes,
+                ),
+                StartupRetainedAttribution::new(
+                    terminal_slot_plan.phase,
+                    terminal_slot_plan.attribution_dimension,
+                    evidence_charge.bytes,
+                ),
+            ],
+            account_shares: StartupAccountShareEnvelope::four_identical(
+                plan.terminal_account_share_work.charges(),
+            ),
+            commitments: [plan.fallback_commitment, plan.snapshot_commitment],
+        };
+        let physical_manifest = StartupPhysicalManifest::try_new(fallback_charge, evidence_charge)
+            .map_err(|_| {
+                RetainedOperationStartError::Writer(RetainedWriterError::Physical(
+                    RetainedAllocationError::AccountingOverflow,
+                ))
+            })?;
+        let cross_plane = StartupCrossPlanePlan::try_new(startup_parts, physical_manifest)
+            .map_err(|_| {
+                RetainedOperationStartError::Writer(RetainedWriterError::OwnershipUnverified)
+            })?;
+        preflight_retained_failure_work(ledger.as_read(), failure_terminal_work)?;
+        let ready = {
+            let (_, _, ledger) = common.coordinator.split_exclusive_progress_and_ledger();
+            admission.try_prepare_startup_cross_plane(ledger, cross_plane)
+        }
+        .map_err(map_startup_cross_plane_error)?;
+        #[cfg(test)]
+        STARTUP_READY_FINAL_OWNER_ALLOCATOR_ENTRIES.with(|entries| {
+            entries.set(Some(test_retained_final_owner_allocator_entries()));
+        });
+        let (baseline, start_guard) = ready.split();
+        let startup_guard =
+            StartupRetainedPartGuard::new(start_guard, baseline, plan.fallback_plan, evidence_plan);
+        // The protected dimension was qualified before graph effects. These four disjoint
+        // ordinary share steps cannot consume or change that dormant pool.
+        let ledger = common.coordinator.retained_ledger();
+        let startup_owner_result = startup_guard.try_build(build_fallback, || {
+            #[cfg(test)]
+            {
+                record_start_evidence_build_call();
+                if take_injected_start_evidence_build_panic() {
+                    panic!("inject startup evidence builder panic");
+                }
+                if let Some(cause) = take_injected_start_evidence_build_failure() {
+                    return Err(StartupTerminalEvidenceBuildError::Rejected(cause));
+                }
+                if take_injected_start_evidence_structural_failure() {
+                    return Err(StartupTerminalEvidenceBuildError::StructuralInvariant);
+                }
+            }
+            terminal_evidence_backing
+                .try_build_indexed(
+                    |index| ledger.dimension_at(index),
+                    |index| ledger.phase_at(index),
+                )
+                .map_err(StartupTerminalEvidenceBuildError::from)
+        });
+        #[cfg(test)]
+        let ledger = {
+            if startup_owner_result.is_err() {
+                let probe = common.coordinator.retained_ledger_mut().test_probe();
+                STARTUP_FAILURE_LEDGER_SNAPSHOT.with(|snapshot| {
+                    snapshot.set(Some((
+                        probe.active_reservations(),
+                        probe.current_live_bytes(),
+                    )));
+                });
+            }
+            common.coordinator.retained_ledger()
+        };
+        let startup_owner = startup_owner_result.map_err(RetainedOperationStartError::Writer)?;
+        let baseline = startup_owner
+            .try_into_baseline()
+            .map_err(RetainedOperationStartError::Writer)?;
+        let baseline = baseline
+            .try_attach(ledger)
+            .map_err(RetainedOperationStartError::Writer)?;
+        Ok(RetainedOperationFields {
+            baseline,
+            metadata: RetainedOperationMetadata::from_qualified_plan(
+                plan.terminal_writer,
+                plan.terminal_account_share_work,
+                canonical_assembly,
+                failure_terminal_work,
+            ),
+        })
+    }
+    pub(crate) fn defer_until_body_cleanup(self) -> Result<(), Self> {
+        self.loan
+            .defer_until_body_cleanup()
+            .map_err(Self::from_loan)
+    }
+
+    pub fn try_publication_assembly(
+        self,
+        plan: RetainedPublicationPlan<P, D>,
+    ) -> RetainedAssemblyOpenResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        match self.loan.try_publication_assembly(plan) {
+            Ok(loan) => Ok(RetainedPublicationAssembly::from_loan(loan)),
+            Err(RetainedPublicationOpenError {
+                operation,
+                cause,
+                disposition,
+            }) => Err(RetainedPublicationOpenError {
+                operation: Self::from_loan(operation),
+                cause,
+                disposition,
+            }),
+        }
+    }
+
+    /// Freezes a successful terminal ledger without publishing canonical or domain evidence tables.
+    #[must_use = "the prepared evidence-only outcome must be handed off or deliberately dropped"]
+    pub fn prepare_evidence_only_success(
+        self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<PreparedRetainedEvidenceOnlyOutcome<F, P, D>, RetainedPublicationPrepareError> {
+        DynamicTerminalRootFields::from_operation(self).finish_evidence_only(final_progress)
+    }
+
+    /// Freezes the pre-admitted terminal baseline without opening a block-table assembly.
+    ///
+    /// Recoverable assembly-open failures retain this baseline. Remaining control owners close
+    /// before physical transfer; terminal qualification still reports containment when ownership
+    /// cannot be verified. Fail-closed open errors do not return this operation permission.
+    #[must_use = "the prepared fallback must be handed off or deliberately dropped"]
+    pub fn prepare_minimal_fallback(
+        self,
+        cause: PreparationFailureCode,
+    ) -> Result<
+        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedPublicationPrepareError,
+    > {
+        DynamicTerminalRootFields::from_operation(self).finish_minimal(cause)
+    }
+}
+
+/// Short permission over the invocation and its actual retained state.
+#[allow(
+    dead_code,
+    reason = "crate-private until the U4 canonical consumers switch atomically"
+)]
+#[must_use = "the operation permission must be resolved by its invocation"]
+pub(crate) struct RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+    F: Send + Sync + 'static,
+{
+    pub(super) terminal: TerminalPhysicalSlot<'inv, P, D, F, CanonicalBlock, EvidenceBlock>,
     pub(super) retained:
-        &'inv mut RetainedOperationFields<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedOperationFieldsLoan<'inv, O, P, D, F, CanonicalBlock, EvidenceBlock>,
     assembly:
         Option<&'inv mut super::PublicationAssemblySlot<O, P, D, CanonicalBlock, EvidenceBlock>>,
     pub(super) common: InvocationLoan<'inv, O, P, PP, U, D>,
+}
+
+impl<O, P, PP, U, D, F, CB, EB> RetainedOperationLoan<'_, O, P, PP, U, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+    F: Send + Sync + 'static,
+{
+    pub(crate) fn reborrow(&mut self) -> RetainedOperationLoan<'_, O, P, PP, U, D, F, CB, EB> {
+        RetainedOperationLoan {
+            retained: self.retained.reborrow(),
+            terminal: match &mut self.terminal {
+                TerminalPhysicalSlot::Dynamic(slot) => TerminalPhysicalSlot::Dynamic(slot),
+                TerminalPhysicalSlot::Finite(slot) => TerminalPhysicalSlot::Finite(slot),
+            },
+            assembly: self.assembly.as_deref_mut(),
+            common: self.common.reborrow(),
+        }
+    }
 }
 
 /// Allocation-free operation ledger state used to prove scoped planning cleanup.
@@ -1359,7 +2073,7 @@ impl<D: Copy> FailureTerminalWorkCapability<D> {
 }
 
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -1370,19 +2084,36 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    pub(super) fn assert_backend(&self) {
+        let finite = matches!(&self.common.common, InvocationSlot::Finite(_));
+        assert_eq!(
+            self.retained.baseline.is_finite(),
+            finite,
+            "the original common and baseline backends must match"
+        );
+        assert_eq!(
+            self.terminal.is_finite(),
+            finite,
+            "the original common and terminal backends must match"
+        );
+    }
+
     pub(super) fn prepare_body_deferral(&mut self) -> Option<Result<(), LedgerCause<D>>> {
-        if self.retained.deferred_stage.is_some()
+        if self.retained.metadata.deferred_stage.is_some()
             || !self.retained.has_deferred_storage()
-            || self.retained.failure_work_permit_outstanding
-            || self.retained.ordinary_work_permit_outstanding
+            || self.retained.metadata.failure_work_permit_outstanding
+            || self.retained.metadata.ordinary_work_permit_outstanding
         {
             return None;
         }
-        let common = self.common.common.as_mut()?;
+        if !self.common.common.is_installed() {
+            return None;
+        }
         Some(
-            common
+            self.common
+                .view()
                 .coordinator
-                .retained_ledger_mut()
+                .ledger_mut()
                 .seal_ordinary_work(),
         )
     }
@@ -1393,7 +2124,7 @@ where
         {
             return Err(self);
         }
-        self.retained.deferred_stage = Some(RetainedDeferredStage::Operation);
+        self.retained.metadata.deferred_stage = Some(RetainedDeferredStage::Operation);
         Ok(())
     }
 
@@ -1411,42 +2142,52 @@ where
         let Self {
             retained, common, ..
         } = self;
-        let RetainedOperationFields {
+        let RetainedOperationFieldsLoan {
             baseline,
-            terminal_account_share_work,
+            metadata:
+                RetainedOperationMetadata {
+                    terminal_account_share_work,
+                    ..
+                },
             ..
-        } = &mut **retained;
-        common.borrow_exclusive_parts(baseline.account(), *terminal_account_share_work)
+        } = &mut *retained;
+        common
+            .view()
+            .into_exclusive_parts(baseline.account(), *terminal_account_share_work)
     }
 
     pub(crate) fn check_execution_running(&self) -> Result<(), ExecutionError<D>> {
         check_execution_state(
-            &self.common.sticky_terminal_cause,
-            &self.common.execution_state,
-            || self.common.coordinator.recorded_control_cause(),
+            &self.common.lifecycle().sticky_terminal_cause,
+            &self.common.lifecycle().execution_state,
+            || self.common.recorded_control_cause(),
         )
     }
 
     pub(crate) fn settle_importer_return(&self) {
         StoreExecutionState::settle_caught_unwind(
-            &self.common.execution_state,
-            &self.common.sticky_terminal_cause,
+            &self.common.lifecycle().execution_state,
+            &self.common.lifecycle().sticky_terminal_cause,
         );
     }
 
     pub(crate) fn record_terminal_cause(&mut self, cause: PreparationFailureCode) {
-        record_terminal_cause_with_precedence(&self.common.sticky_terminal_cause, cause);
+        record_terminal_cause_with_precedence(
+            &self.common.lifecycle().sticky_terminal_cause,
+            cause,
+        );
     }
 
     pub(super) fn stop_for_containment(&mut self) {
         StoreExecutionState::stop(
-            &self.common.execution_state,
+            &self.common.lifecycle().execution_state,
             StoreExecutionState::KnownError,
         );
         if self
             .common
+            .view()
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .seal_ordinary_work()
             .is_err()
         {
@@ -1457,6 +2198,7 @@ where
     pub(crate) fn poll_terminal_control(&mut self) {
         let cause = self
             .common
+            .view()
             .coordinator
             .poll()
             .err()
@@ -1467,7 +2209,7 @@ where
     }
 
     pub(crate) fn planning_baseline(&self) -> RetainedPlanningBaseline {
-        let state = self.common.coordinator.retained_ledger().planning_state();
+        let state = self.common.as_read().planning_state();
         RetainedPlanningBaseline {
             current_live_bytes: state.current_live_bytes(),
             active_reservations: state.active_reservations(),
@@ -1487,28 +2229,23 @@ where
     }
 
     fn planning_has_outstanding_work_permit(&self) -> bool {
-        self.retained.failure_work_permit_outstanding
-            || self.retained.ordinary_work_permit_outstanding
-            || self
-                .common
-                .coordinator
-                .retained_ledger()
-                .check_work_quiescent()
-                .is_err()
+        self.retained.metadata.failure_work_permit_outstanding
+            || self.retained.metadata.ordinary_work_permit_outstanding
+            || self.common.as_read().check_work_quiescent().is_err()
     }
 
     pub(crate) fn planning_matches_baseline(&self, baseline: RetainedPlanningBaseline) -> bool {
         if self.planning_has_outstanding_work_permit() {
             return false;
         }
-        let state = self.common.coordinator.retained_ledger().planning_state();
+        let state = self.common.as_read().planning_state();
         state.current_live_bytes() == baseline.current_live_bytes
             && state.active_reservations() == baseline.active_reservations
     }
 }
 
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    super::RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -1560,7 +2297,7 @@ where
     D: Copy + Ord + fmt::Debug,
 {
     poll: OperationPollCheckpoint<'a, PP, U>,
-    ledger: &'a mut crate::ledger::Ledger<O, P, D>,
+    ledger: crate::ledger::LedgerView<'a, O, P, D>,
     failure_terminal_work_dimension: Option<D>,
     sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
 }
@@ -1578,7 +2315,7 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    coordinator: &'a mut OperationCoordinator<O, P, PP, U, D>,
+    coordinator: CoordinatorView<'a, O, P, PP, U, D>,
     failure_terminal_work_dimension: Option<D>,
     permit_outstanding: &'a mut bool,
     sticky_terminal_cause: &'a Cell<Option<PreparationFailureCode>>,
@@ -1633,7 +2370,7 @@ where
         dimension: D,
     ) -> Result<DimensionSnapshot, LedgerCause<D>> {
         self.validate_dimension(dimension)?;
-        let result = self.coordinator.dimension_evidence(dimension);
+        let result = self.coordinator.ledger_read().dimension_evidence(dimension);
         if result.is_err() {
             self.record_ledger_failure();
         }
@@ -1648,6 +2385,7 @@ where
         self.validate_dimension(dimension)?;
         let result = self
             .coordinator
+            .ledger_mut()
             .tighten_dimension_policy(dimension, upper_bound);
         if result.is_err() {
             self.record_ledger_failure();
@@ -1661,10 +2399,11 @@ where
         amount: u64,
     ) -> Result<(), RetainedProducerWorkStartError<D>> {
         self.ensure_direct_accounting_available()?;
-        let result = self
-            .coordinator
-            .retained_ledger_mut()
-            .charge_producer_attempted(dimension, amount, self.failure_terminal_work_dimension);
+        let result = self.coordinator.ledger_mut().charge_producer_attempted(
+            dimension,
+            amount,
+            self.failure_terminal_work_dimension,
+        );
         if result.is_err() {
             self.record_ledger_failure();
         }
@@ -1681,7 +2420,7 @@ where
             .map_err(RetainedProducerWorkStartError::Ledger)?;
         let result = self
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .charge_consumed(dimension, amount);
         if result.is_err() {
             self.record_ledger_failure();
@@ -1698,10 +2437,7 @@ where
             self.validate_dimension(dimension)
                 .map_err(RetainedProducerWorkStartError::Ledger)?;
         }
-        let result = self
-            .coordinator
-            .retained_ledger_mut()
-            .charge_observed_batch(charges);
+        let result = self.coordinator.ledger_mut().charge_observed_batch(charges);
         if result.is_err() {
             self.record_ledger_failure();
         }
@@ -1715,7 +2451,7 @@ where
         self.ensure_direct_accounting_available()?;
         let result = self
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .charge_producer_consumed_batch(charges, self.failure_terminal_work_dimension);
         if result.is_err() {
             self.record_ledger_failure();
@@ -1746,10 +2482,7 @@ where
 
     fn validate_dimension(&mut self, dimension: D) -> Result<(), LedgerCause<D>> {
         if self.failure_terminal_work_dimension != Some(dimension)
-            && self
-                .coordinator
-                .retained_ledger()
-                .contains_dimension(dimension)
+            && self.coordinator.ledger_read().contains_dimension(dimension)
         {
             Ok(())
         } else {
@@ -1777,12 +2510,12 @@ where
     }
 
     pub(crate) fn contains_phase(&self, phase: P) -> bool {
-        self.ledger.contains_phase(phase)
+        self.ledger.as_read().contains_phase(phase)
     }
 
     pub(crate) fn contains_dimension(&self, dimension: D) -> bool {
         self.failure_terminal_work_dimension != Some(dimension)
-            && self.ledger.contains_dimension(dimension)
+            && self.ledger.as_read().contains_dimension(dimension)
     }
 
     pub(crate) fn charge_observed(
@@ -1885,7 +2618,7 @@ where
     reason = "operation startup preserves every admitted owner on rejection without allocating"
 )]
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: TerminalEvidenceKey,
@@ -1900,16 +2633,20 @@ where
         let Self {
             retained, common, ..
         } = self;
-        let RetainedOperationFields {
-            failure_terminal_work_dimension,
+        let RetainedOperationFieldsLoan {
+            metadata:
+                RetainedOperationMetadata {
+                    failure_terminal_work_dimension,
+                    ..
+                },
             ..
-        } = &mut **retained;
-        let OperationInvocation {
+        } = &mut *retained;
+        let OperationInvocationView {
             coordinator,
-            sticky_terminal_cause,
-            ..
-        } = &mut **common;
-        let (poll, ledger) = coordinator.split_poll_checkpoint_and_retained_ledger();
+            lifecycle,
+        } = common.view();
+        let sticky_terminal_cause = &lifecycle.sticky_terminal_cause;
+        let (poll, ledger) = coordinator.into_poll_and_ledger();
         RetainedControlCheckpoint {
             poll,
             ledger,
@@ -1922,16 +2659,20 @@ where
         let Self {
             retained, common, ..
         } = self;
-        let RetainedOperationFields {
-            failure_terminal_work_dimension,
-            ordinary_work_permit_outstanding,
+        let RetainedOperationFieldsLoan {
+            metadata:
+                RetainedOperationMetadata {
+                    failure_terminal_work_dimension,
+                    ordinary_work_permit_outstanding,
+                    ..
+                },
             ..
-        } = &mut **retained;
-        let OperationInvocation {
+        } = &mut *retained;
+        let OperationInvocationView {
             coordinator,
-            sticky_terminal_cause,
-            ..
-        } = &mut **common;
+            lifecycle,
+        } = common.view();
+        let sticky_terminal_cause = &lifecycle.sticky_terminal_cause;
         RetainedProducerHost {
             coordinator,
             failure_terminal_work_dimension: *failure_terminal_work_dimension,
@@ -1943,9 +2684,10 @@ where
     pub(crate) fn internal_work_root(&mut self) -> RetainedWorkRoot<'_, O, P, D> {
         let (_, _, ledger) = self
             .common
+            .view()
             .coordinator
-            .split_exclusive_progress_and_ledger();
-        let (work, storage) = ledger.split_internal();
+            .into_exclusive_progress_and_ledger();
+        let (work, storage) = ledger.into_internal();
         RetainedWorkRoot { work, storage }
     }
 
@@ -1970,19 +2712,23 @@ where
         let Self {
             retained, common, ..
         } = self;
-        let RetainedOperationFields {
-            failure_terminal_work_dimension,
-            ordinary_work_permit_outstanding,
-            ordinary_work_permit_partially_resolved,
+        let RetainedOperationFieldsLoan {
+            metadata:
+                RetainedOperationMetadata {
+                    failure_terminal_work_dimension,
+                    ordinary_work_permit_outstanding,
+                    ordinary_work_permit_partially_resolved,
+                    ..
+                },
             ..
-        } = &mut **retained;
-        let OperationInvocation {
+        } = &mut *retained;
+        let OperationInvocationView {
             coordinator,
-            sticky_terminal_cause,
-            ..
-        } = &mut **common;
-        let (poll, _, ledger) = coordinator.split_exclusive_progress_and_ledger();
-        let (work, storage) = ledger.split_internal();
+            lifecycle,
+        } = common.view();
+        let sticky_terminal_cause = &lifecycle.sticky_terminal_cause;
+        let (poll, _, ledger) = coordinator.into_exclusive_progress_and_ledger();
+        let (work, storage) = ledger.into_internal();
         let binding = if *failure_terminal_work_dimension == Some(work_dimension) {
             Err(LedgerCause::UnknownDimension {
                 dimension: work_dimension,
@@ -2005,19 +2751,12 @@ where
     }
 
     pub fn contains_dimension(&self, dimension: D) -> bool {
-        self.retained.failure_terminal_work_dimension != Some(dimension)
-            && self
-                .common
-                .coordinator
-                .retained_ledger()
-                .contains_dimension(dimension)
+        self.retained.metadata.failure_terminal_work_dimension != Some(dimension)
+            && self.common.as_read().contains_dimension(dimension)
     }
 
     pub fn contains_phase(&self, phase: P) -> bool {
-        self.common
-            .coordinator
-            .retained_ledger()
-            .contains_phase(phase)
+        self.common.as_read().contains_phase(phase)
     }
 
     pub(crate) fn require_canonical_source<SourceBlock>(
@@ -2025,6 +2764,7 @@ where
         source: &PublishedCanonicalAggregate<SourceBlock>,
     ) -> Result<(), super::RetainedPublicationError<D>> {
         self.common
+            .lifecycle()
             .canonical_lineage
             .require_source(self.account(), source)
     }
@@ -2032,468 +2772,10 @@ where
     /// Records semantic completion against the operation's frozen phase catalog.
     pub(crate) fn try_complete_phase(&mut self, phase: P) -> Result<(), PhaseCompletionError<P>> {
         self.common
+            .view()
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .try_complete_phase(phase)
-    }
-
-    pub fn try_start(
-        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        control: OperationControl<PP, U>,
-        ledger_limits: LedgerLimits<D>,
-        account: &PhysicalStorageAccount,
-        plan: RetainedOperationStartPlan<P, D>,
-        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
-    ) -> Result<Self, RetainedOperationStartError<D>> {
-        let phase_catalog = [plan.terminal_writer.phase];
-        Self::try_start_inner(
-            root,
-            control,
-            (ledger_limits, &phase_catalog),
-            account,
-            plan,
-            CanonicalLineageAuthority::fresh(),
-            build_fallback,
-        )
-    }
-
-    pub fn try_start_with_phase_catalog(
-        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        control: OperationControl<PP, U>,
-        ledger: (LedgerLimits<D>, &[P]),
-        account: &PhysicalStorageAccount,
-        plan: RetainedOperationStartPlan<P, D>,
-        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
-    ) -> Result<Self, RetainedOperationStartError<D>> {
-        Self::try_start_inner(
-            root,
-            control,
-            ledger,
-            account,
-            plan,
-            CanonicalLineageAuthority::fresh(),
-            build_fallback,
-        )
-    }
-
-    pub(crate) fn try_start_derived_with_phase_catalog<SourceBlock>(
-        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        control: OperationControl<PP, U>,
-        ledger: (LedgerLimits<D>, &[P]),
-        account: &PhysicalStorageAccount,
-        source: &PublishedCanonicalAggregate<SourceBlock>,
-        plan: RetainedOperationStartPlan<P, D>,
-        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
-    ) -> Result<Self, RetainedOperationStartError<D>> {
-        let preflight = account.try_begin_account_preflight().map_err(|cause| {
-            RetainedOperationStartError::Writer(RetainedWriterError::AccountPoisoned(cause))
-        })?;
-        if !source.belongs_to(account) {
-            return Err(RetainedOperationStartError::Writer(
-                RetainedWriterError::ForeignAccount,
-            ));
-        }
-        let canonical_lineage = CanonicalLineageAuthority::derived(source);
-        drop(preflight);
-        Self::try_start_inner(
-            root,
-            control,
-            ledger,
-            account,
-            plan,
-            canonical_lineage,
-            build_fallback,
-        )
-    }
-
-    fn try_start_inner(
-        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        control: OperationControl<PP, U>,
-        ledger: (LedgerLimits<D>, &[P]),
-        account: &PhysicalStorageAccount,
-        plan: RetainedOperationStartPlan<P, D>,
-        canonical_lineage: CanonicalLineageAuthority,
-        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
-    ) -> Result<Self, RetainedOperationStartError<D>> {
-        Self::bind_inner(root, control, ledger, account, plan, canonical_lineage)?
-            .attach(build_fallback)
-    }
-
-    pub(crate) fn bind_with_phase_catalog<'account>(
-        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        control: OperationControl<PP, U>,
-        ledger: (LedgerLimits<D>, &[P]),
-        account: &'account PhysicalStorageAccount,
-        plan: RetainedOperationStartPlan<P, D>,
-    ) -> Result<
-        PendingRetainedAttachment<'inv, 'account, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedOperationStartError<D>,
-    > {
-        Self::bind_inner(
-            root,
-            control,
-            ledger,
-            account,
-            plan,
-            CanonicalLineageAuthority::fresh(),
-        )
-    }
-
-    pub(crate) fn bind_derived_with_phase_catalog<'account, SourceBlock>(
-        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        control: OperationControl<PP, U>,
-        ledger: (LedgerLimits<D>, &[P]),
-        account: &'account PhysicalStorageAccount,
-        source: &PublishedCanonicalAggregate<SourceBlock>,
-        plan: RetainedOperationStartPlan<P, D>,
-    ) -> Result<
-        PendingRetainedAttachment<'inv, 'account, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedOperationStartError<D>,
-    > {
-        let preflight = account.try_begin_account_preflight().map_err(|cause| {
-            RetainedOperationStartError::Writer(RetainedWriterError::AccountPoisoned(cause))
-        })?;
-        if !source.belongs_to(account) {
-            return Err(RetainedOperationStartError::Writer(
-                RetainedWriterError::ForeignAccount,
-            ));
-        }
-        let lineage = CanonicalLineageAuthority::derived(source);
-        drop(preflight);
-        Self::bind_inner(root, control, ledger, account, plan, lineage)
-    }
-
-    fn bind_inner<'account>(
-        root: &'inv mut InvocationRoot<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        control: OperationControl<PP, U>,
-        ledger: (LedgerLimits<D>, &[P]),
-        account: &'account PhysicalStorageAccount,
-        plan: RetainedOperationStartPlan<P, D>,
-        canonical_lineage: CanonicalLineageAuthority,
-    ) -> Result<
-        PendingRetainedAttachment<'inv, 'account, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedOperationStartError<D>,
-    > {
-        let (ledger_limits, phase_catalog) = ledger;
-        if root.started {
-            return Err(RetainedOperationStartError::InvocationAlreadyStarted);
-        }
-        root.started = true;
-        let failure_terminal_work = Self::qualify_terminal_plan(&plan)?;
-        let dimension_count = ledger_limits.dimension_count();
-        let phase_count = phase_catalog.len();
-        let admission = account.try_admit_operation_start().map_err(|cause| {
-            RetainedOperationStartError::Writer(match cause {
-                startup::OperationStartAdmissionError::AccountPoisoned(poisoned) => {
-                    RetainedWriterError::AccountPoisoned(poisoned)
-                }
-                startup::OperationStartAdmissionError::AccountingOverflow => {
-                    RetainedWriterError::Physical(RetainedAllocationError::AccountingOverflow)
-                }
-            })
-        })?;
-        let coordinator = OperationCoordinator::try_new(control, ledger_limits, phase_catalog)
-            .map_err(|cause| {
-                RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
-            })?;
-        root.common = Some(OperationInvocation {
-            coordinator,
-            sticky_terminal_cause: Cell::new(None),
-            control_action_debt: Cell::new(0),
-            execution_state: Cell::new(StoreExecutionState::Running),
-            canonical_lineage,
-            terminal_outstanding: false,
-        });
-        let common = root
-            .common
-            .as_mut()
-            .expect("binding installs its actual common");
-        if !super::terminal_evidence_catalog_is_qualified(
-            common.coordinator.retained_ledger(),
-            dimension_count,
-            phase_count,
-        ) {
-            root.record_payload_failure(0x4154_4341);
-            return Err(RetainedOperationStartError::TerminalEvidenceCatalogInvariant);
-        }
-        if let Some((failure_plan, _)) = failure_terminal_work {
-            common
-                .coordinator
-                .retained_ledger_mut()
-                .configure_protected_work(failure_plan.dimension())
-                .map_err(|cause| {
-                    RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
-                })?;
-        }
-        Ok(PendingRetainedAttachment {
-            root,
-            admission,
-            plan,
-            failure_terminal_work,
-            dimension_count,
-            phase_count,
-            local: PhantomData,
-        })
-    }
-
-    fn qualify_terminal_plan(
-        plan: &RetainedOperationStartPlan<P, D>,
-    ) -> Result<
-        Option<(
-            RetainedFailureTerminalWorkPlan<D>,
-            RetainedFailureTerminalWorkRequirement,
-        )>,
-        RetainedOperationStartError<D>,
-    > {
-        if plan.terminal_writer.limits.attribution_slots == 0
-            || plan.terminal_writer.limits.commitment_slots == 0
-        {
-            return Err(RetainedOperationStartError::InvalidTerminalLimits);
-        }
-        match plan.failure_terminal_work {
-            Some(failure_plan) => {
-                let failure_dimension = failure_plan.dimension();
-                let ordinary_share_charges = plan.terminal_account_share_work.charges();
-                if plan.terminal_writer.capacity_dimension == failure_dimension
-                    || plan.terminal_writer.attribution_dimension == failure_dimension
-                    || ordinary_share_charges
-                        .iter()
-                        .any(|(dimension, _)| *dimension == failure_dimension)
-                    || plan.fallback_commitment.dimension() == failure_dimension
-                    || plan.snapshot_commitment.dimension() == failure_dimension
-                {
-                    return Err(RetainedOperationStartError::InvalidTerminalLimits);
-                }
-                let requirement = failure_plan
-                    .requirement()
-                    .map_err(|()| RetainedOperationStartError::InvalidTerminalLimits)?;
-                Ok(Some((failure_plan, requirement)))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn prepare_attachment(
-        common: &mut OperationInvocation<O, P, PP, U, D>,
-        admission: startup::PendingOperationStartAdmission<'_>,
-        plan: RetainedOperationStartPlan<P, D>,
-        failure_terminal_work: Option<(
-            RetainedFailureTerminalWorkPlan<D>,
-            RetainedFailureTerminalWorkRequirement,
-        )>,
-        dimension_count: usize,
-        phase_count: usize,
-        build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
-    ) -> Result<
-        RetainedOperationFields<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedOperationStartError<D>,
-    > {
-        check_execution_state(
-            &common.sticky_terminal_cause,
-            &common.execution_state,
-            || common.coordinator.recorded_control_cause(),
-        )
-        .map_err(|cause| match cause {
-            ExecutionError::Control(cause) => RetainedOperationStartError::Control(cause),
-            ExecutionError::Ledger(cause) => {
-                RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
-            }
-            ExecutionError::Stopped => {
-                RetainedOperationStartError::Writer(RetainedWriterError::OwnershipUnverified)
-            }
-        })?;
-        let account = admission.account();
-        let health = account.try_begin_account_preflight().map_err(|cause| {
-            RetainedOperationStartError::Writer(RetainedWriterError::AccountPoisoned(cause))
-        })?;
-        drop(health);
-        let ledger = common.coordinator.retained_ledger();
-        let failure_terminal_work_dimension = failure_terminal_work
-            .as_ref()
-            .map(|(plan, _)| plan.dimension());
-        let evidence_assembly = RetainedBatchLimits::new(
-            plan.terminal_writer
-                .limits
-                .attribution_slots
-                .checked_add(1)
-                .ok_or(RetainedOperationStartError::InvalidTerminalLimits)?
-                .max(2),
-            plan.terminal_writer
-                .limits
-                .commitment_slots
-                .checked_add(1)
-                .ok_or(RetainedOperationStartError::InvalidTerminalLimits)?
-                .max(2),
-        );
-        let canonical_assembly = plan.terminal_writer.limits;
-        let terminal_slot_plan = RetainedWriterPlan::new(
-            plan.terminal_writer.phase,
-            plan.terminal_writer.capacity_dimension,
-            plan.terminal_writer.attribution_dimension,
-            RetainedBatchLimits::new(1, 1),
-        );
-        let fallback_batch_plan =
-            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
-                terminal_slot_plan.phase,
-                terminal_slot_plan.capacity_dimension,
-                terminal_slot_plan.limits.attribution_slots,
-                terminal_slot_plan.limits.commitment_slots,
-            )
-            .map_err(map_batch_error)?;
-        let evidence_batch_plan =
-            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
-                terminal_slot_plan.phase,
-                terminal_slot_plan.capacity_dimension,
-                terminal_slot_plan.limits.attribution_slots,
-                terminal_slot_plan.limits.commitment_slots,
-            )
-            .map_err(map_batch_error)?;
-        let canonical_assembly_plan = AttributionBatchPlan::<O, P, D, CanonicalOutput>::try_new(
-            plan.terminal_writer.phase,
-            plan.terminal_writer.capacity_dimension,
-            canonical_assembly.attribution_slots,
-            canonical_assembly.commitment_slots,
-        )
-        .map_err(map_batch_error)?;
-        let evidence_assembly_plan =
-            AttributionBatchPlan::<O, P, D, OutcomeEvidenceDestination>::try_new(
-                plan.terminal_writer.phase,
-                plan.terminal_writer.capacity_dimension,
-                evidence_assembly.attribution_slots,
-                evidence_assembly.commitment_slots,
-            )
-            .map_err(map_batch_error)?;
-        let terminal_evidence_backing =
-            TerminalEvidenceBackingPlan::<P, D>::try_new(dimension_count, phase_count).map_err(
-                |_| RetainedOperationStartError::Writer(RetainedWriterError::BatchCapacity),
-            )?;
-        let terminal_evidence_footprint = terminal_evidence_backing.footprint();
-        let evidence_plan = RetainedAllocationPlan::new(
-            terminal_evidence_footprint.bytes(),
-            terminal_evidence_footprint.allocations(),
-        )
-        .map_err(|_| RetainedOperationStartError::Writer(RetainedWriterError::BatchCapacity))?;
-        let fallback_charge = account
-            .checked_retained_charge::<F>(plan.fallback_plan)
-            .map_err(RetainedWriterError::Physical)?;
-        let evidence_charge = account
-            .checked_retained_charge::<TerminalLedgerEvidence<P, D>>(evidence_plan)
-            .map_err(RetainedWriterError::Physical)?;
-        let startup_parts = StartupLedgerPlanParts {
-            batches: StartupAttributionBatchPlans::new(
-                canonical_assembly_plan,
-                evidence_assembly_plan,
-                fallback_batch_plan,
-                evidence_batch_plan,
-            ),
-            retained_attributions: [
-                StartupRetainedAttribution::new(
-                    terminal_slot_plan.phase,
-                    terminal_slot_plan.attribution_dimension,
-                    fallback_charge.bytes,
-                ),
-                StartupRetainedAttribution::new(
-                    terminal_slot_plan.phase,
-                    terminal_slot_plan.attribution_dimension,
-                    evidence_charge.bytes,
-                ),
-            ],
-            account_shares: StartupAccountShareEnvelope::four_identical(
-                plan.terminal_account_share_work.charges(),
-            ),
-            commitments: [plan.fallback_commitment, plan.snapshot_commitment],
-        };
-        let physical_manifest = StartupPhysicalManifest::try_new(fallback_charge, evidence_charge)
-            .map_err(|_| {
-                RetainedOperationStartError::Writer(RetainedWriterError::Physical(
-                    RetainedAllocationError::AccountingOverflow,
-                ))
-            })?;
-        let cross_plane = StartupCrossPlanePlan::try_new(startup_parts, physical_manifest)
-            .map_err(|_| {
-                RetainedOperationStartError::Writer(RetainedWriterError::OwnershipUnverified)
-            })?;
-        if let Some((failure_plan, requirement)) = failure_terminal_work {
-            ledger
-                .preflight_protected_work_attachment(
-                    failure_plan.dimension(),
-                    &failure_plan.share_work().charges(),
-                    requirement.maximum_share_actions(),
-                )
-                .map_err(|cause| {
-                    RetainedOperationStartError::Writer(RetainedWriterError::Ledger(cause))
-                })?;
-        }
-        let ready = {
-            let (_, _, ledger) = common.coordinator.split_exclusive_progress_and_ledger();
-            admission.try_prepare_startup_cross_plane(ledger, cross_plane)
-        }
-        .map_err(map_startup_cross_plane_error)?;
-        #[cfg(test)]
-        STARTUP_READY_FINAL_OWNER_ALLOCATOR_ENTRIES.with(|entries| {
-            entries.set(Some(test_retained_final_owner_allocator_entries()));
-        });
-        let (baseline, start_guard) = ready.split();
-        let startup_guard =
-            StartupRetainedPartGuard::new(start_guard, baseline, plan.fallback_plan, evidence_plan);
-        // The protected dimension was qualified before graph effects. These four disjoint
-        // ordinary share steps cannot consume or change that dormant pool.
-        let failure_terminal_work = failure_terminal_work
-            .map(|(failure_plan, _)| FailureTerminalWorkCapability::from_qualified(failure_plan));
-        let ledger = common.coordinator.retained_ledger();
-        let startup_owner_result = startup_guard.try_build(build_fallback, || {
-            #[cfg(test)]
-            {
-                record_start_evidence_build_call();
-                if take_injected_start_evidence_build_panic() {
-                    panic!("inject startup evidence builder panic");
-                }
-                if let Some(cause) = take_injected_start_evidence_build_failure() {
-                    return Err(StartupTerminalEvidenceBuildError::Rejected(cause));
-                }
-                if take_injected_start_evidence_structural_failure() {
-                    return Err(StartupTerminalEvidenceBuildError::StructuralInvariant);
-                }
-            }
-            terminal_evidence_backing
-                .try_build_indexed(
-                    |index| ledger.dimension_at(index),
-                    |index| ledger.phase_at(index),
-                )
-                .map_err(StartupTerminalEvidenceBuildError::from)
-        });
-        #[cfg(test)]
-        let ledger = {
-            if startup_owner_result.is_err() {
-                let probe = common.coordinator.retained_ledger_mut().test_probe();
-                STARTUP_FAILURE_LEDGER_SNAPSHOT.with(|snapshot| {
-                    snapshot.set(Some((
-                        probe.active_reservations(),
-                        probe.current_live_bytes(),
-                    )));
-                });
-            }
-            common.coordinator.retained_ledger()
-        };
-        let startup_owner = startup_owner_result.map_err(RetainedOperationStartError::Writer)?;
-        let baseline = startup_owner
-            .try_into_baseline()
-            .map_err(RetainedOperationStartError::Writer)?;
-        let baseline = baseline
-            .try_attach(ledger)
-            .map_err(RetainedOperationStartError::Writer)?;
-        Ok(RetainedOperationFields {
-            baseline,
-            deferred_stage: None,
-            terminal_writer: plan.terminal_writer,
-            canonical_assembly_limits: canonical_assembly,
-            terminal_account_share_work: plan.terminal_account_share_work,
-            failure_terminal_work,
-            failure_terminal_work_dimension,
-            failure_work_permit_outstanding: false,
-            ordinary_work_permit_outstanding: false,
-            ordinary_work_permit_partially_resolved: false,
-        })
     }
 
     pub fn account(&self) -> &PhysicalStorageAccount {
@@ -2512,21 +2794,25 @@ where
         let Self {
             retained, common, ..
         } = self;
-        let RetainedOperationFields {
+        let RetainedOperationFieldsLoan {
             baseline,
-            terminal_account_share_work,
+            metadata:
+                RetainedOperationMetadata {
+                    terminal_account_share_work,
+                    ..
+                },
             ..
-        } = &mut **retained;
-        let OperationInvocation {
+        } = &mut *retained;
+        let OperationInvocationView {
             coordinator,
-            sticky_terminal_cause,
-            ..
-        } = &mut **common;
-        let (_, _, ledger) = coordinator.split_exclusive_progress_and_ledger();
+            lifecycle,
+        } = common.view();
+        let sticky_terminal_cause = &lifecycle.sticky_terminal_cause;
+        let (_, _, ledger) = coordinator.into_exclusive_progress_and_ledger();
         ledger
             .ensure_work_open()
             .map_err(RetainedWriterError::Ledger)?;
-        let (mut work, mut storage) = ledger.split_internal();
+        let (mut work, mut storage) = ledger.into_internal();
         let share_plan = *terminal_account_share_work;
         let share_work = &mut work;
         let result = super::reserve_exclusive_backing(
@@ -2555,49 +2841,41 @@ where
         &mut self,
     ) -> Result<Option<RetainedHandleSharePlan<D>>, LedgerCause<D>> {
         self.common
+            .view()
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .seal_ordinary_work()?;
-        let Some(capability) = self.retained.failure_terminal_work.as_ref() else {
+        let Some(capability) = self.retained.metadata.failure_terminal_work.as_ref() else {
             return Ok(None);
         };
         let dimension = capability.handle_share_work.charges()[0].0;
         self.common
+            .view()
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .activate_protected_work(dimension)?;
         Ok(self
             .retained
+            .metadata
             .failure_terminal_work
             .take()
             .map(|capability| capability.handle_share_work))
-    }
-
-    fn record_terminal_gate(
-        &mut self,
-        result: Result<(), PublicationCause<D>>,
-    ) -> Option<ControlCause> {
-        self.common.record_terminal_gate(result)
     }
 
     pub(super) fn prepare_terminal_control(
         &mut self,
         final_progress: FinalProgress<PP, U>,
     ) -> Option<ControlCause> {
-        let result = self
-            .common
-            .coordinator
-            .try_prepare_typed_control(final_progress);
-        self.record_terminal_gate(result)
+        self.common.view().prepare_terminal_control(final_progress)
     }
 
     pub(super) fn close_terminal_owners(&mut self) -> Option<ControlCause> {
-        let result = self.common.coordinator.close_for_terminal_extraction();
-        self.record_terminal_gate(result)
+        self.common.view().close_terminal_owners()
     }
 
     pub(crate) fn failure_terminal_work_limits(&self) -> Option<(usize, u64, u64)> {
         self.retained
+            .metadata
             .failure_terminal_work
             .as_ref()
             .map(|capability| {
@@ -2634,26 +2912,20 @@ where
                 .try_begin_account_preflight()
                 .map_err(RetainedWriterError::AccountPoisoned)?;
             let capability = retained
+                .metadata
                 .failure_terminal_work
                 .as_ref()
                 .filter(|capability| !capability.validation_work_qualified)
                 .ok_or(RetainedWriterError::InvalidPublicationPlan)?;
-            if retained.failure_work_permit_outstanding
-                || retained.ordinary_work_permit_outstanding
-                || common
-                    .coordinator
-                    .retained_ledger()
-                    .check_work_quiescent()
-                    .is_err()
-                || common.sticky_terminal_cause.get().is_some()
+            if retained.metadata.failure_work_permit_outstanding
+                || retained.metadata.ordinary_work_permit_outstanding
+                || common.as_read().check_work_quiescent().is_err()
+                || common.lifecycle().sticky_terminal_cause.get().is_some()
             {
                 return Err(RetainedWriterError::InvalidPublicationPlan);
             }
-            if retained.failure_terminal_work_dimension == Some(ordinary_dimension)
-                || !common
-                    .coordinator
-                    .retained_ledger()
-                    .contains_dimension(ordinary_dimension)
+            if retained.metadata.failure_terminal_work_dimension == Some(ordinary_dimension)
+                || !common.as_read().contains_dimension(ordinary_dimension)
             {
                 return Err(RetainedWriterError::Ledger(LedgerCause::UnknownDimension {
                     dimension: ordinary_dimension,
@@ -2686,8 +2958,9 @@ where
                 .checked_sub(original.observed_work_limit())
                 .ok_or(RetainedWriterError::InvalidPublicationPlan)?;
             common
+                .view()
                 .coordinator
-                .retained_ledger_mut()
+                .ledger_mut()
                 .transfer_failure_terminal_work(
                     ordinary_dimension,
                     terminal_dimension,
@@ -2696,6 +2969,7 @@ where
                 .map_err(RetainedWriterError::Ledger)?;
             drop(preflight);
             let capability = retained
+                .metadata
                 .failure_terminal_work
                 .as_mut()
                 .expect("qualification retains the dormant failure capability");
@@ -2729,14 +3003,15 @@ where
         .map_err(map_batch_error)?;
         let replacement = self
             .common
+            .view()
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .try_attribution_batch_from_plan(replacement_plan)
             .map_err(map_batch_error)?;
         self.retained
             .baseline
             .try_replace_canonical_assembly(replacement)?;
-        self.retained.canonical_assembly_limits = writer.limits;
+        self.retained.metadata.canonical_assembly_limits = writer.limits;
         Ok(())
     }
 
@@ -2754,18 +3029,22 @@ where
         let Self {
             retained, common, ..
         } = self;
-        let RetainedOperationFields {
-            failure_work_permit_outstanding,
-            ordinary_work_permit_partially_resolved,
+        let RetainedOperationFieldsLoan {
+            metadata:
+                RetainedOperationMetadata {
+                    failure_work_permit_outstanding,
+                    ordinary_work_permit_partially_resolved,
+                    ..
+                },
             ..
-        } = &mut **retained;
-        let OperationInvocation {
+        } = &mut *retained;
+        let OperationInvocationView {
             coordinator,
-            sticky_terminal_cause,
-            ..
-        } = &mut **common;
-        let (poll, ledger) = coordinator.split_terminal_poll_checkpoint_and_retained_ledger();
-        let (work, storage) = ledger.split_internal();
+            lifecycle,
+        } = common.view();
+        let sticky_terminal_cause = &lifecycle.sticky_terminal_cause;
+        let (poll, ledger) = coordinator.into_terminal_poll_and_ledger();
+        let (work, storage) = ledger.into_internal();
         (
             RetainedWorkBinding::protected(
                 poll,
@@ -2780,12 +3059,15 @@ where
 
     pub(crate) fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
         let permit_outstanding = self.planning_has_outstanding_work_permit();
-        let abandoned_code = if self.retained.failure_work_permit_outstanding {
+        let abandoned_code = if self.retained.metadata.failure_work_permit_outstanding {
             FAILURE_WORK_PERMIT_ABANDONED_CODE
         } else {
             ORDINARY_WORK_PERMIT_ABANDONED_CODE
         };
-        match (self.common.sticky_terminal_cause.get(), permit_outstanding) {
+        match (
+            self.common.lifecycle().sticky_terminal_cause.get(),
+            permit_outstanding,
+        ) {
             (Some(cause), true) if matches!(cause.class(), PreparationFailureClass::Requested) => {
                 Some(PreparationFailureCode::product_graph(abandoned_code))
             }
@@ -2799,7 +3081,9 @@ where
     }
 
     pub(super) const fn has_partially_resolved_work_permit(&self) -> bool {
-        self.retained.ordinary_work_permit_partially_resolved
+        self.retained
+            .metadata
+            .ordinary_work_permit_partially_resolved
     }
 
     pub(super) fn record_ledger_failure(&mut self) {
@@ -2811,16 +3095,20 @@ where
     }
 
     pub(super) const fn has_failure_terminal_work_configuration(&self) -> bool {
-        self.retained.failure_terminal_work_dimension.is_some()
+        self.retained
+            .metadata
+            .failure_terminal_work_dimension
+            .is_some()
     }
 
     pub(crate) fn is_terminal_only(&self) -> bool {
-        self.common
-            .coordinator
-            .retained_ledger()
-            .ordinary_work_is_sealed()
-            || (self.retained.failure_terminal_work_dimension.is_some()
-                && self.retained.failure_terminal_work.is_none())
+        self.common.as_read().ordinary_work_is_sealed()
+            || (self
+                .retained
+                .metadata
+                .failure_terminal_work_dimension
+                .is_some()
+                && self.retained.metadata.failure_terminal_work.is_none())
     }
 
     pub(super) fn validate_ordinary_dimension(
@@ -2857,125 +3145,121 @@ where
         }
     }
 
-    /// Freezes a successful terminal ledger without publishing canonical or domain evidence tables.
-    ///
-    /// This is the exact terminal for a read-only operation whose admitted work completed but whose
-    /// compiled result requires no retained output. The pre-admitted fallback is discarded before
-    /// terminal freeze. A final control or ledger rejection instead publishes the minimal fallback.
-    #[must_use = "the prepared evidence-only outcome must be handed off or deliberately dropped"]
-    pub fn prepare_evidence_only_success(
+    pub(super) fn prepare_evidence_only_deferred(
+        self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<super::DeferredAttachedTerminal, RetainedPublicationPrepareError> {
+        match self.prepare_evidence_only_transition(final_progress)? {
+            EvidenceOnlySuccessPrimaryTransition::Success(success) => success
+                .into_deferred()
+                .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+            EvidenceOnlySuccessPrimaryTransition::Fallback(fallback, cause) => {
+                fallback.try_prepare_deferred(cause)
+            }
+        }
+    }
+
+    #[expect(
+        clippy::type_complexity,
+        reason = "the short transition lends the exact original graph without moving its owners"
+    )]
+    fn prepare_evidence_only_transition(
         mut self,
         final_progress: FinalProgress<PP, U>,
-    ) -> Result<PreparedRetainedEvidenceOnlyOutcome<F, P, D>, RetainedPublicationPrepareError> {
-        // Success cannot consume an unclassified stopped invocation. Real rejection adapters
-        // supply their owned requested cause before the terminal failure path instead.
-        if self.common.execution_state.get() != StoreExecutionState::Running {
+    ) -> Result<
+        EvidenceOnlySuccessPrimaryTransition<
+            'inv,
+            O,
+            P,
+            PP,
+            U,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
+        RetainedPublicationPrepareError,
+    > {
+        self.assert_backend();
+        if self.common.lifecycle().execution_state.get() != StoreExecutionState::Running {
             self.record_product_graph_failure(StoreExecutionState::ABANDONED);
         }
         self.prepare_terminal_control(final_progress);
         self.close_terminal_owners();
         let terminal_cause = self.sticky_terminal_cause();
-        let RetainedOperation {
+        let RetainedOperationLoan {
             retained,
             common,
             terminal,
             ..
         } = self;
         let ledger = common.into_terminal();
-        let (fallback, evidence, batches) = retained.baseline.take_parts();
-        let physical = super::BorrowedTerminalPhysicalOwnershipManifest::from_owned(
-            terminal, fallback, evidence, None, None, None,
-        );
+        let (physical, batches, primary) = terminal.install(retained.baseline, None);
         if let Some(cause) = terminal_cause {
-            let prepared = TerminalFallbackGuard::new(
-                TerminalFallbackAttribution::new(
-                    ledger,
-                    batches,
-                    PrimaryPublicationBatches::new(None, None),
+            return Ok(EvidenceOnlySuccessPrimaryTransition::Fallback(
+                TerminalFallbackGuard::new(
+                    TerminalFallbackAttribution::new(ledger, batches, primary),
+                    physical,
                 ),
-                physical,
-            )
-            .try_prepare(cause)?;
-            return Ok(match prepared.into_outcome() {
-                PreparedRetainedPublicationOutcome::MinimalFallback(fallback) => {
-                    PreparedRetainedEvidenceOnlyOutcome::MinimalFallback(fallback)
-                }
-                PreparedRetainedPublicationOutcome::Success(_)
-                | PreparedRetainedPublicationOutcome::RichFailure(_) => {
-                    unreachable_final_owner_state()
-                }
-            });
+                cause,
+            ));
         }
-
-        let primary = TerminalPrimaryGuard::new(
-            ledger,
-            batches,
-            PrimaryPublicationBatches::new(None, None),
-            physical,
-        );
-        match primary.try_advance_evidence_only_success()? {
-            EvidenceOnlySuccessPrimaryTransition::Success(success) => success
-                .into_prepared()
-                .map(PreparedRetainedEvidenceOnlyOutcome::Success)
-                .map_err(RetainedPublicationPrepareError::FinalizationContainment),
-            EvidenceOnlySuccessPrimaryTransition::Fallback(fallback, cause) => {
-                let prepared = fallback.try_prepare(cause)?;
-                Ok(match prepared.into_outcome() {
-                    PreparedRetainedPublicationOutcome::MinimalFallback(fallback) => {
-                        PreparedRetainedEvidenceOnlyOutcome::MinimalFallback(fallback)
-                    }
-                    PreparedRetainedPublicationOutcome::Success(_)
-                    | PreparedRetainedPublicationOutcome::RichFailure(_) => {
-                        unreachable_final_owner_state()
-                    }
-                })
-            }
-        }
+        TerminalPrimaryGuard::new(ledger, batches, primary, physical)
+            .try_advance_evidence_only_success()
     }
 
-    /// Freezes the pre-admitted terminal baseline without opening a block-table assembly.
-    ///
-    /// This path performs no allocation, table construction, root validation, control callback, or
-    /// other fallible action. It is therefore available after every recoverable assembly-open
-    /// failure. Fail-closed open errors deliberately do not return the operation and cannot reach
-    /// this method.
-    #[must_use = "the prepared fallback must be handed off or deliberately dropped"]
-    pub fn prepare_minimal_fallback(
+    pub(super) fn prepare_minimal_fallback_deferred(
+        self,
+        cause: PreparationFailureCode,
+    ) -> Result<super::DeferredAttachedTerminal, RetainedPublicationPrepareError> {
+        let (guard, cause) = self.minimal_fallback_guard(cause);
+        guard.try_prepare_deferred(cause)
+    }
+
+    #[expect(
+        clippy::type_complexity,
+        reason = "the short guard lends the exact original physical and numerical fields"
+    )]
+    fn minimal_fallback_guard(
         mut self,
         cause: PreparationFailureCode,
-    ) -> Result<
-        PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
-        RetainedPublicationPrepareError,
-    > {
+    ) -> (
+        TerminalFallbackGuard<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        PreparationFailureCode,
+    ) {
+        self.assert_backend();
         self.close_terminal_owners();
         let cause = self.sticky_terminal_cause().unwrap_or(cause);
-        let RetainedOperation {
+        let RetainedOperationLoan {
             retained,
             common,
             terminal,
             ..
         } = self;
         let ledger = common.into_terminal();
-        let (fallback, evidence, batches) = retained.baseline.take_parts();
-        let physical = super::BorrowedTerminalPhysicalOwnershipManifest::from_owned(
-            terminal, fallback, evidence, None, None, None,
-        );
-        TerminalFallbackGuard::new(
-            TerminalFallbackAttribution::new(
-                ledger,
-                batches,
-                PrimaryPublicationBatches::new(None, None),
-            ),
+        let (physical, batches, primary) = terminal.install(retained.baseline, None);
+        let guard = TerminalFallbackGuard::new(
+            TerminalFallbackAttribution::new(ledger, batches, primary),
             physical,
-        )
-        .try_prepare(cause)
+        );
+        (guard, cause)
     }
 
     pub fn try_publication_assembly(
         mut self,
         mut plan: RetainedPublicationPlan<P, D>,
     ) -> Result<
-        RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        super::RetainedPublicationAssemblyLoan<
+            'inv,
+            O,
+            P,
+            PP,
+            U,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
         RetainedPublicationOpenError<Self, D>,
     >
     where
@@ -2999,7 +3283,7 @@ where
         }
         let terminal_failure_open = failure_only
             && matches!(
-                self.retained.deferred_stage,
+                self.retained.metadata.deferred_stage,
                 Some(RetainedDeferredStage::TerminalOperation)
             );
         if self.is_terminal_only() && !terminal_failure_open {
@@ -3007,13 +3291,17 @@ where
                 self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
             );
         }
-        if let Some(capacity) = self.common.canonical_lineage.source_mapping_capacity()
+        if let Some(capacity) = self
+            .common
+            .lifecycle()
+            .canonical_lineage
+            .source_mapping_capacity()
             && let Some(canonical) = plan.canonical.as_mut()
         {
             *canonical = canonical.with_canonical_source_mapping_capacity(capacity);
         }
-        let terminal_limits = self.retained.terminal_writer.limits;
-        let canonical_assembly_limits = self.retained.canonical_assembly_limits;
+        let terminal_limits = self.retained.metadata.terminal_writer.limits;
+        let canonical_assembly_limits = self.retained.metadata.canonical_assembly_limits;
         let evidence_qualified = match try_qualify_retained_block_table_plan::<
             O,
             P,
@@ -3051,14 +3339,14 @@ where
             },
             None => None,
         };
-        if let Some(capability) = self.retained.failure_terminal_work.as_ref()
+        if let Some(capability) = self.retained.metadata.failure_terminal_work.as_ref()
             && plan.outcome_evidence.total_blocks() > capability.max_evidence_members
         {
             return Err(
                 self.into_publication_open_error(RetainedWriterError::InvalidPublicationPlan, true)
             );
         }
-        let ordinary_handle_share_work = self.retained.terminal_account_share_work;
+        let ordinary_handle_share_work = self.retained.metadata.terminal_account_share_work;
         let (
             open_handle_share_work,
             failure_evidence_handle_share_work,
@@ -3091,8 +3379,11 @@ where
             let Self {
                 common, retained, ..
             } = &mut self;
-            let (_, _, ledger) = common.coordinator.split_exclusive_progress_and_ledger();
-            let (mut work, _) = ledger.split_internal();
+            let (_, _, ledger) = common
+                .view()
+                .coordinator
+                .into_exclusive_progress_and_ledger();
+            let (mut work, _) = ledger.into_internal();
             try_open_publication_account(
                 &mut work,
                 retained.baseline.account(),
@@ -3123,8 +3414,9 @@ where
                 } = qualified;
                 let batch = match self
                     .common
+                    .view()
                     .coordinator
-                    .retained_ledger_mut()
+                    .ledger_mut()
                     .try_attribution_batch_from_plan(batch_plan)
                 {
                     Ok(batch) => batch,
@@ -3144,8 +3436,9 @@ where
         } = evidence_qualified;
         let mut evidence_batch = match self
             .common
+            .view()
             .coordinator
-            .retained_ledger_mut()
+            .ledger_mut()
             .try_attribution_batch_from_plan(evidence_batch_plan)
         {
             Ok(batch) => batch,
@@ -3205,7 +3498,7 @@ where
                 return Err(self.into_publication_open_error(cause, rollback_safe));
             }
         };
-        let canonical_lineage = self.common.canonical_lineage;
+        let canonical_lineage = self.common.lifecycle().canonical_lineage;
         let fields = self
             .assembly
             .take()
@@ -3232,8 +3525,8 @@ where
                 containment: AssemblyContainmentProvenance::Healthy,
                 last_validation_epoch: 0,
             });
-        Ok(RetainedPublicationAssembly {
-            fields,
+        Ok(super::RetainedPublicationAssemblyLoan {
+            fields: fields.into(),
             operation: Some(self),
         })
     }
@@ -3250,26 +3543,9 @@ where
     let writer = match error {
         StartupCrossPlaneAdmissionFailure::LedgerAdmission(cause) => map_batch_error(cause),
         StartupCrossPlaneAdmissionFailure::OwnerShare(cause) => cause,
-        StartupCrossPlaneAdmissionFailure::PhysicalNoMutation(cause) => match cause {
-            StartupPhysicalNoMutation::ForeignStartAdmission
-            | StartupPhysicalNoMutation::ForeignOwner(_) => RetainedWriterError::ForeignAccount,
-            StartupPhysicalNoMutation::RetainedOwnerOverflow
-            | StartupPhysicalNoMutation::AccountingOverflow => {
-                RetainedWriterError::Physical(RetainedAllocationError::AccountingOverflow)
-            }
-            StartupPhysicalNoMutation::ByteLimitExceeded { requested, limit } => {
-                RetainedWriterError::Physical(RetainedAllocationError::ByteLimitExceeded {
-                    requested,
-                    limit,
-                })
-            }
-            StartupPhysicalNoMutation::AllocationLimitExceeded { requested, limit } => {
-                RetainedWriterError::Physical(RetainedAllocationError::AllocationLimitExceeded {
-                    requested,
-                    limit,
-                })
-            }
-        },
+        StartupCrossPlaneAdmissionFailure::PhysicalNoMutation(cause) => {
+            map_startup_physical_no_mutation(cause)
+        }
         StartupCrossPlaneAdmissionFailure::Uncertain(containment) => {
             let error = containment.poisoned().map_or(
                 RetainedWriterError::OwnershipUnverified,
@@ -3280,4 +3556,27 @@ where
         }
     };
     RetainedOperationStartError::Writer(writer)
+}
+
+fn map_startup_physical_no_mutation<D>(cause: StartupPhysicalNoMutation) -> RetainedWriterError<D> {
+    match cause {
+        StartupPhysicalNoMutation::ForeignStartAdmission
+        | StartupPhysicalNoMutation::ForeignOwner(_) => RetainedWriterError::ForeignAccount,
+        StartupPhysicalNoMutation::RetainedOwnerOverflow
+        | StartupPhysicalNoMutation::AccountingOverflow => {
+            RetainedWriterError::Physical(RetainedAllocationError::AccountingOverflow)
+        }
+        StartupPhysicalNoMutation::ByteLimitExceeded { requested, limit } => {
+            RetainedWriterError::Physical(RetainedAllocationError::ByteLimitExceeded {
+                requested,
+                limit,
+            })
+        }
+        StartupPhysicalNoMutation::AllocationLimitExceeded { requested, limit } => {
+            RetainedWriterError::Physical(RetainedAllocationError::AllocationLimitExceeded {
+                requested,
+                limit,
+            })
+        }
+    }
 }

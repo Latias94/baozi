@@ -83,74 +83,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn requested(
-        mut operation: RetainedStoreOperation<'inv, O, PP, U, L>,
-        cause_slot: CanonicalCauseSlot<'inv, StoreNeverActivatedCause<E>>,
-        failure: &BoundScopedFailureRequest,
-        failure_work: FailureEvidenceWorkBudget,
-        rejection: VerifiedRejection<E>,
-    ) -> Result<Self, StoreActivationContainment> {
-        if !cause_slot.is_vacant_for(operation.raw.invocation_identity()) {
-            let _ = drop_scoped_value(rejection.cause);
-            return Err(contain_operation(operation));
-        }
-        let cause = match cause_slot.place(StoreNeverActivatedCause::Requested(rejection.cause)) {
-            Ok(cause) => cause,
-            Err(cause) => {
-                let _ = drop_scoped_value(cause);
-                return Err(contain_operation(operation));
-            }
-        };
-        operation.latch_activation_terminal_cause(rejection.failure_code);
-        Ok(Self {
-            owner: NeverActivatedOwner {
-                cause: Some(cause),
-                authority: Some(NeverActivatedAuthority::Operation(operation)),
-            },
-            failure_code: rejection.failure_code,
-            outcome_evidence_plan: failure.outcome_evidence_plan,
-            failure_work,
-            outcome_evidence_destination_dimension: failure.outcome_evidence_destination_dimension,
-        })
-    }
-
-    pub(super) fn runtime(
-        mut operation: RetainedStoreOperation<'inv, O, PP, U, L>,
-        cause_slot: CanonicalCauseSlot<'inv, StoreNeverActivatedCause<E>>,
-        failure: &BoundScopedFailureRequest,
-        failure_work: FailureEvidenceWorkBudget,
-        cause: StoreRuntimeError,
-        failure_code: PreparationFailureCode,
-        fallback_only: bool,
-    ) -> Result<Self, StoreActivationContainment> {
-        if !cause_slot.is_vacant_for(operation.raw.invocation_identity()) {
-            let _ = drop_scoped_value(cause);
-            return Err(contain_operation(operation));
-        }
-        let cause = match cause_slot.place(StoreNeverActivatedCause::Runtime(cause)) {
-            Ok(cause) => cause,
-            Err(cause) => {
-                let _ = drop_scoped_value(cause);
-                return Err(contain_operation(operation));
-            }
-        };
-        operation.latch_activation_terminal_cause(failure_code);
-        Ok(Self {
-            owner: NeverActivatedOwner {
-                cause: Some(cause),
-                authority: Some(if fallback_only {
-                    NeverActivatedAuthority::FallbackOnly(operation)
-                } else {
-                    NeverActivatedAuthority::Operation(operation)
-                }),
-            },
-            failure_code,
-            outcome_evidence_plan: failure.outcome_evidence_plan,
-            failure_work,
-            outcome_evidence_destination_dimension: failure.outcome_evidence_destination_dimension,
-        })
-    }
-
     pub fn cause(&self) -> &StoreNeverActivatedCause<E> {
         self.owner
             .cause
@@ -172,9 +104,10 @@ where
     #[allow(clippy::type_complexity, clippy::result_large_err)]
     pub fn build_failure_evidence<EvidenceKind, EvidenceTag>(
         self,
-        build: impl for<'lane> FnMut(
-            &mut FailureEvidenceLane<'inv, 'lane, O, PP, U>,
-        ) -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
+        build: impl for<'evidence, 'lane> FnMut(
+            &mut FailureEvidenceLane<'evidence, 'lane, O, PP, U>,
+        )
+            -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
         FailureEvidenceOutcome<
             'inv,
@@ -214,12 +147,11 @@ where
                     Ok(assembly) => {
                         let RetainedStorePublicationAssembly {
                             raw,
-                            fallback_cause,
-                            success_rejection,
+                            state,
                             domain,
                             lineage,
                         } = assembly;
-                        if fallback_cause.is_some() || success_rejection.is_some() {
+                        if state.fallback_cause.is_some() || state.success_rejection.is_some() {
                             let _ = drop_optional_callback(build);
                             let _ = drop_scoped_value(cause);
                             return Err(StoreActivationContainment {
@@ -245,6 +177,7 @@ where
                         UnrootedFailureEvidence {
                             owner: PayloadOwner::new(cause, raw),
                             domain,
+                            state,
                             failure_code,
                             failure_work,
                             outcome_evidence_destination_dimension,
@@ -259,12 +192,7 @@ where
                         let _ = drop_scoped_value(cause);
                         Err(contain_operation(operation))
                     }
-                    Err(ActivationOpenFailure::Recoverable {
-                        operation,
-                        cause: _,
-                        failure_code: _,
-                        fallback_only: _,
-                    }) => {
+                    Err(ActivationOpenFailure::Recoverable { operation }) => {
                         if drop_optional_callback(build).is_err() {
                             let _ = drop_scoped_value(cause);
                             return Err(contain_operation(operation));

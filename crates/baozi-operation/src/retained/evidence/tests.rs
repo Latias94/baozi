@@ -76,6 +76,7 @@ fn terminal_snapshot() -> LedgerSnapshot<TestPhase, TestDimension> {
     drop(decode);
     drop(read);
     ledger
+        .view()
         .try_complete_phase(TestPhase::Decode)
         .expect("decode phase completes explicitly");
     ledger.finish().expect("released reservations finalize")
@@ -190,6 +191,7 @@ fn terminal_evidence_does_not_infer_completion_from_the_last_accounting_phase() 
         .expect("decode writer reservation fits");
     drop(decode_writer);
     ledger
+        .view()
         .try_complete_phase(TestPhase::Read)
         .expect("read completes explicitly");
     let snapshot = ledger.finish().expect("writer reservation is released");
@@ -223,9 +225,11 @@ fn terminal_evidence_rejects_a_lifecycle_order_outside_its_canonical_key_catalog
     )
     .expect("reverse-order terminal phase catalog is frozen");
     ledger
+        .view()
         .try_complete_phase(TestPhase::Decode)
         .expect("first catalog position completes");
     ledger
+        .view()
         .try_complete_phase(TestPhase::Read)
         .expect("second catalog position completes despite its earlier key order");
     let snapshot = ledger.finish().expect("terminal ledger finishes");

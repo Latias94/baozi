@@ -2133,7 +2133,8 @@ fn scoped_activation_permit_and_semantic_completion_are_linear() {
 
     type Permit<'inv> = CanonicalActivationPermit<
         'inv,
-        'static,
+        'inv,
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,
@@ -2146,7 +2147,8 @@ fn scoped_activation_permit_and_semantic_completion_are_linear() {
     type SealedPlan = CanonicalSealedActivationPlan<'static, ()>;
     type SealFailure<'inv> = CanonicalActivationSealFailure<
         'inv,
-        'static,
+        'inv,
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,

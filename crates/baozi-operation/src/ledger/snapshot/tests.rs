@@ -204,17 +204,17 @@ fn allocation_failure_precedes_work_fault_and_both_release_admission() {
 fn terminal_checks_reject_pending_and_completed_unfinished_channels() {
     let (storage, _catalog, mut work) = fixture(0_u8);
     let mut state = lock(&storage);
-    assert!(!typed_terminal_snapshot_positions_are_valid(&state, &work));
+    assert!(validate_final_snapshot_shape(&state, &work).is_err());
     work.rows[0].state.pending_consumed = 0;
     work.header.parser_parent_open = true;
-    assert!(!typed_terminal_snapshot_positions_are_valid(&state, &work));
+    assert!(validate_final_snapshot_shape(&state, &work).is_err());
     assert_eq!(
         validate_final_snapshot_shape(&state, &work),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     );
     work.header.parser_parent_open = false;
-    assert!(typed_terminal_snapshot_positions_are_valid(&state, &work));
-    let snapshot = take_typed_final_snapshot(&mut state, &work, None);
+    assert!(validate_final_snapshot_shape(&state, &work).is_ok());
+    let snapshot = take_final_snapshot(&mut state, &work);
     drop(state);
     assert_eq!(snapshot.dimensions[0].1.consumed(), 5);
     assert_eq!(snapshot.current_administrative_bytes(), FROZEN_EVIDENCE);

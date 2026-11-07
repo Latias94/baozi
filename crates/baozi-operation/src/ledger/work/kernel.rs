@@ -15,6 +15,81 @@ pub(crate) struct WorkView<'a, D> {
     pub(in crate::ledger) header: &'a mut WorkHeader,
 }
 
+pub(crate) struct WorkReadView<'a, D> {
+    pub(in crate::ledger) catalog: &'a [D],
+    pub(in crate::ledger) rows: &'a [WorkEntry<D>],
+    pub(in crate::ledger) header: &'a WorkHeader,
+}
+
+impl<D> WorkReadView<'_, D> {
+    pub(in crate::ledger) fn check_integrity(&self) -> Result<(), LedgerCause<D>> {
+        check_row_shape(self.rows, self.header, self.catalog.len())
+    }
+
+    pub(in crate::ledger) fn ensure_active(&self, grant: WorkGrant) -> Result<(), LedgerCause<D>> {
+        self.check_integrity()?;
+        check_active_mode(self.header, grant)
+    }
+
+    pub(in crate::ledger) fn ensure_ordinary_open(&self) -> Result<(), LedgerCause<D>> {
+        self.check_integrity()?;
+        match self.header.mode {
+            super::WorkMode::Ordinary => Ok(()),
+            super::WorkMode::OrdinarySealed => Err(LedgerCause::PublicationAlreadyPending),
+            super::WorkMode::Protected | super::WorkMode::Closed => {
+                Err(LedgerCause::PublicationAlreadyCompleted)
+            }
+        }
+    }
+
+    pub(in crate::ledger) fn check_quiescent(&self) -> Result<(), LedgerCause<D>> {
+        self.check_integrity()?;
+        check_quiescent(self.rows, self.header)
+    }
+}
+
+impl<D: Copy + Ord> WorkReadView<'_, D> {
+    pub(in crate::ledger) fn bind_layout<const N: usize>(
+        &self,
+        dimensions: [D; N],
+        grant: WorkGrant,
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        let layout = WorkLayout::bind(self.catalog, &dimensions, grant)?;
+        self.ensure_active(grant)?;
+        layout.validate_binding(self.header, &dimensions)?;
+        Ok(layout)
+    }
+}
+
+impl<D> WorkView<'_, D> {
+    pub(in crate::ledger) fn as_read(&self) -> WorkReadView<'_, D> {
+        WorkReadView {
+            catalog: self.catalog,
+            rows: self.rows,
+            header: self.header,
+        }
+    }
+
+    pub(in crate::ledger) fn reborrow(&mut self) -> WorkView<'_, D> {
+        WorkView {
+            catalog: self.catalog,
+            rows: self.rows,
+            header: self.header,
+        }
+    }
+}
+
+pub(in crate::ledger) fn check_row_shape<D>(
+    rows: &[WorkEntry<D>],
+    header: &WorkHeader,
+    catalog_len: usize,
+) -> Result<(), LedgerCause<D>> {
+    if header.integrity_fault || rows.len() != catalog_len {
+        return Err(LedgerCause::FinalSnapshotShapeMismatch);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct WorkLayout<const N: usize> {
     pub(super) positions: [usize; N],
@@ -88,9 +163,7 @@ impl<const N: usize> WorkLayout<N> {
         &self,
         state: &WorkView<'_, D>,
     ) -> Result<(), LedgerCause<D>> {
-        if state.header.integrity_fault || state.rows.len() != state.catalog.len() {
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
-        }
+        state.as_read().check_integrity()?;
         check_active_mode(state.header, self.grant)?;
         self.validate_role_header(state.catalog, state.header)
     }

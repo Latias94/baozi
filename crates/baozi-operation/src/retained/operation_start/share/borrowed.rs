@@ -1,7 +1,7 @@
 //! Internal retained shares borrow the numeric owner only through the physical clone and handle.
 
 use super::*;
-use crate::ledger::{ExclusiveWork, InternalWork, Ledger, WorkFrame, WorkLane, WorkLayout};
+use crate::ledger::{ExclusiveWork, InternalWork, LedgerView, WorkFrame, WorkLane, WorkLayout};
 use crate::owner::OperationOwner;
 
 pub(in crate::retained) fn admit_internal_share<'op, D: Copy + Ord + fmt::Debug>(
@@ -56,10 +56,10 @@ pub(in crate::retained) struct BorrowedRetainedShareWork<'op, D: Copy> {
     amounts: [u64; 2],
 }
 
-pub(in crate::retained) fn try_admit_borrowed_retained_share_work<O, P, D>(
-    ledger: &mut Ledger<O, P, D>,
+pub(in crate::retained) fn try_admit_borrowed_retained_share_work<'op, O, P, D>(
+    ledger: LedgerView<'op, O, P, D>,
     plan: RetainedHandleSharePlan<D>,
-) -> Result<BorrowedRetainedShareWork<'_, D>, RetainedWriterError<D>>
+) -> Result<BorrowedRetainedShareWork<'op, D>, RetainedWriterError<D>>
 where
     O: OperationOwner,
     P: Copy + Ord,

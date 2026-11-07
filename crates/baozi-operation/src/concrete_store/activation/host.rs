@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::payload_owner::{PayloadLoan, PayloadOrder};
 use super::{
@@ -10,6 +9,12 @@ use super::{
 use crate::concrete_store::{StoreInvocationRoot, StoreRuntimeError};
 
 mod body;
+pub(in crate::concrete_store) mod finite;
+pub use finite::{
+    FiniteCanonicalBoundBodyParts, FiniteCanonicalBoundBodyStart,
+    FiniteCanonicalBoundInvocationFinish, FiniteCanonicalDispositionSlot,
+    FiniteCanonicalInvocationHost, FiniteCanonicalOperationPublication,
+};
 pub(super) mod driver;
 mod requests;
 pub use body::{CanonicalBodyOperation, CanonicalBodyStart, CanonicalBoundBodyStart};
@@ -219,6 +224,11 @@ where
             order: Cell::new(PayloadOrder::ProofBeforeOutput),
             store: StoreInvocationRoot::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn store_for_test(&mut self) -> &mut StoreInvocationRoot<O, PP, U> {
+        &mut self.store
     }
 
     #[allow(
@@ -448,12 +458,7 @@ fn drop_host_value<T, O, PP, U>(
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(value.take()))) {
+    super::payload_owner::drop_captured_value(value, first_panic, || {
         store.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
-        if first_panic.is_some() {
-            discard_untrusted_panic_payload(payload);
-        } else {
-            *first_panic = Some(payload);
-        }
-    }
+    });
 }

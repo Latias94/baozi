@@ -72,10 +72,11 @@ where
 
 pub(super) struct DeferredUnrootedStoreFailure {
     pub(super) domain: StoreDomainStamp,
+    pub(super) state: StorePublicationState,
 }
 
 pub(super) struct DeferredStoreFailure<EvidenceKind, EvidenceTag> {
-    fallback_only: bool,
+    state: StorePublicationState,
     forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
     domain: StoreDomainStamp,
@@ -101,21 +102,21 @@ where
     pub(super) fn defer_until_body_cleanup(self) -> Result<DeferredStoreFailure<EK, ET>, Self> {
         let Self {
             raw,
-            fallback_only,
+            state,
             forced_cause,
             evidence_root,
             domain,
         } = self;
         match raw.defer_until_body_cleanup() {
             Ok(()) => Ok(DeferredStoreFailure {
-                fallback_only,
+                state,
                 forced_cause,
                 evidence_root,
                 domain: domain.defer(),
             }),
             Err(raw) => Err(Self {
                 raw,
-                fallback_only,
+                state,
                 forced_cause,
                 evidence_root,
                 domain,
@@ -174,6 +175,69 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(super) fn finish_deferred_evidence_only_operation(
+        &mut self,
+        pending: DeferredStoreOperation,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<PreparedStoreEvidenceOnlyOutcome, StorePrepareError> {
+        let domain = StoreDomainLoan::resume(&mut self.domain, pending.domain)
+            .expect("terminal completion keeps the original domain slot");
+        let stamp = self
+            .raw
+            .prepare_evidence_only_terminal(final_progress)
+            .map_err(StorePrepareError::from_raw)?
+            .expect("terminal completion retains its deferred operation");
+        let prepared = match self.raw.try_finish_evidence_only_terminal(stamp) {
+            Ok(result) => result.map_err(StorePrepareError::FinalizationContainment)?,
+            Err(_) => {
+                let cause = self
+                    .raw
+                    .contain_payload_failure()
+                    .expect("the original terminal graph provides its containment anchor");
+                return Err(StorePrepareError::FinalizationContainment(cause));
+            }
+        };
+        Ok(classify_prepared_evidence_only(
+            prepared,
+            domain.into_owned(),
+        ))
+    }
+
+    pub(super) fn finish_deferred_minimal_operation(
+        &mut self,
+        pending: DeferredStoreOperation,
+        code: u32,
+    ) -> Result<PreparedStoreFallback, StorePrepareError> {
+        let domain = StoreDomainLoan::resume(&mut self.domain, pending.domain)
+            .expect("terminal completion keeps the original domain slot");
+        let stamp = self
+            .raw
+            .prepare_minimal_terminal(PreparationFailureCode::domain(code))
+            .map_err(StorePrepareError::from_raw)?
+            .expect("terminal completion retains its deferred operation");
+        let prepared = match self.raw.try_finish_minimal_terminal(stamp) {
+            Ok(result) => result.map_err(|cause| {
+                StorePrepareError::from_raw(
+                    crate::retained::RetainedPublicationPrepareError::FinalizationContainment(
+                        cause,
+                    ),
+                )
+            })?,
+            Err(_) => {
+                let cause = self
+                    .raw
+                    .contain_payload_failure()
+                    .expect("the original terminal graph provides its containment anchor");
+                return Err(StorePrepareError::from_raw(
+                    crate::retained::RetainedPublicationPrepareError::FinalizationContainment(
+                        cause,
+                    ),
+                ));
+            }
+        };
+        Ok(classify_prepared_fallback(prepared, domain.into_owned()))
+    }
+
     pub(super) fn prepare_deferred_unattached(
         &mut self,
         pending: DeferredUnattachedStore<'_>,
@@ -211,10 +275,15 @@ where
     pub(super) fn resume_deferred_unrooted_failure(
         &mut self,
         pending: DeferredUnrootedStoreFailure,
-    ) -> Option<(RawStoreFailureAssembly<'_, O, PP, U>, StoreDomainLoan<'_>)> {
+    ) -> Option<(
+        RawStoreFailureAssembly<'_, O, PP, U>,
+        StoreDomainLoan<'_>,
+        StorePublicationState,
+    )> {
         Some((
             self.raw.resume_deferred_failure()?,
             StoreDomainLoan::resume(&mut self.domain, pending.domain)?,
+            pending.state,
         ))
     }
 
@@ -224,7 +293,7 @@ where
     ) -> Option<StoreFailureAssembly<'_, O, PP, U, EK, ET>> {
         Some(StoreFailureAssembly {
             raw: self.raw.resume_deferred_failure()?,
-            fallback_only: pending.fallback_only,
+            state: pending.state,
             forced_cause: pending.forced_cause,
             evidence_root: pending.evidence_root,
             domain: StoreDomainLoan::resume(&mut self.domain, pending.domain)?,

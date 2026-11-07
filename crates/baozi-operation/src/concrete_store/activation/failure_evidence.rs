@@ -984,9 +984,10 @@ where
 
     pub fn build_failure_evidence<EvidenceKind, EvidenceTag>(
         self,
-        build: impl for<'lane> FnMut(
-            &mut FailureEvidenceLane<'inv, 'lane, O, PP, U>,
-        ) -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
+        build: impl for<'evidence, 'lane> FnMut(
+            &mut FailureEvidenceLane<'evidence, 'lane, O, PP, U>,
+        )
+            -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
         CanonicalRejectionEvidenceOutcome<'inv, O, PP, U, E, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
@@ -1028,7 +1029,7 @@ fn recover_failure_member_build<T>(
     }
 }
 
-impl<'inv, 'lane, O, PP, U> FailureEvidenceLane<'inv, 'lane, O, PP, U>
+impl<'evidence, 'lane, O, PP, U> FailureEvidenceLane<'evidence, 'lane, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1058,8 +1059,8 @@ where
         } = member;
         let mut controlled_failure = None;
         let result = self
-            .raw
-            .try_retain_outcome_evidence_controlled(allocation, |emplacer, raw_control| {
+            .evidence
+            .try_retain_protected(allocation, |emplacer, raw_control| {
                 let mut control = recover_failure_member_build(
                     OutcomeEvidenceBuildControl::try_start_protected(
                         raw_control,
@@ -1075,12 +1076,7 @@ where
                     &mut controlled_failure,
                 )?;
                 Ok(emplacer.place(block, tag))
-            })
-            .map(|raw| OutcomeEvidenceStoreRef {
-                raw,
-                marker: PhantomData,
-            })
-            .map_err(|cause| map_publication_error(&cause));
+            });
         controlled_failure.map_or(result, Err)
     }
 
@@ -1131,7 +1127,8 @@ where
             .failure_work
             .reserve_construction_member(construction_work)
         {
-            self.raw
+            self.evidence
+                .publication_impl()
                 .reject_failure_terminal_work_envelope(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
             return preserve_first_fault(
                 self.first_fault,
@@ -1206,7 +1203,8 @@ where
             .failure_work
             .reserve_construction_member(construction_work)
         {
-            self.raw
+            self.evidence
+                .publication_impl()
                 .reject_failure_terminal_work_envelope(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
             return preserve_first_fault(
                 self.first_fault,
@@ -1275,7 +1273,8 @@ where
             .failure_work
             .reserve_construction_member(construction_work)
         {
-            self.raw
+            self.evidence
+                .publication_impl()
                 .reject_failure_terminal_work_envelope(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
             return preserve_first_fault(
                 self.first_fault,
@@ -1365,7 +1364,8 @@ where
             .failure_work
             .reserve_construction_member(construction_work)
         {
-            self.raw
+            self.evidence
+                .publication_impl()
                 .reject_failure_terminal_work_envelope(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
             return preserve_first_fault(
                 self.first_fault,
@@ -1397,6 +1397,84 @@ where
 
     pub const fn abort<Kind, Tag>(&mut self) -> FailureEvidenceDecision<Kind, Tag> {
         FailureEvidenceDecision::Abort
+    }
+}
+
+pub(in crate::concrete_store) fn failure_evidence_validator<
+    'callback,
+    O,
+    PP,
+    U,
+    EvidenceKind,
+    EvidenceTag,
+    Validate,
+>(
+    failure_work: &'callback FailureEvidenceWorkBudget,
+    controlled_failure: &'callback mut Option<StoreRuntimeError>,
+    validate: &'callback mut ManuallyDrop<Option<Validate>>,
+) -> impl for<'session, 'storage, 'control> FnOnce(
+    StoreEvidenceValidationSession<'session, 'storage>,
+    OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    RawFailureEvidenceWorkControl<'control, O, PP, U>,
+) -> bool
++ 'callback
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    EvidenceTag: Copy + Send + Sync + 'static,
+    Validate: for<'session, 'storage, 'control> FnMut(
+        &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
+        FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
+    ) -> bool,
+{
+    move |raw, root, raw_control| {
+        let validation_work = match failure_work.planned_validation_work() {
+            Ok(work) => work,
+            Err(cause) => {
+                controlled_failure.get_or_insert(cause);
+                return false;
+            }
+        };
+        let permit = match raw_control.try_begin(validation_work) {
+            Ok(permit) => permit,
+            Err(cause) => {
+                let cause = match cause {
+                    RetainedFailureWorkStartError::Control(cause) => {
+                        StoreRuntimeError::Control(cause)
+                    }
+                    RetainedFailureWorkStartError::Ledger(cause) => {
+                        StoreRuntimeError::Ledger(cause)
+                    }
+                    RetainedFailureWorkStartError::Outstanding => failure_work_envelope_exhausted(),
+                };
+                controlled_failure.get_or_insert(cause);
+                return false;
+            }
+        };
+        let mut session = FailureEvidenceValidationSession {
+            raw,
+            permit: Some(permit),
+            sticky: controlled_failure,
+            completed_units: 0,
+            rejected: false,
+            work_batch: CompletionPrefixBatch::new(),
+        };
+        let validate = validate
+            .as_mut()
+            .expect("the rich-failure validation callback is executed at most once");
+        let root = FailureEvidenceMember {
+            raw: root,
+            validation: PhantomData,
+        };
+        let accepted = validate(&mut session, root);
+        match session.finish(accepted) {
+            Ok(accepted) => accepted,
+            Err(cause) => {
+                controlled_failure.get_or_insert(cause);
+                false
+            }
+        }
     }
 }
 
@@ -1456,57 +1534,14 @@ where
         let cause = ManuallyDrop::new(cause);
         let evidence_root = failure.evidence_root();
         let mut controlled_failure = None;
-        let validation =
-            failure.validate_rich_failure_controlled(evidence_root, |raw, root, raw_control| {
-                let validation_work = match failure_work.planned_validation_work() {
-                    Ok(work) => work,
-                    Err(cause) => {
-                        controlled_failure.get_or_insert(cause);
-                        return false;
-                    }
-                };
-                let permit = match raw_control.try_begin(validation_work) {
-                    Ok(permit) => permit,
-                    Err(cause) => {
-                        let cause = match cause {
-                            RetainedFailureWorkStartError::Control(cause) => {
-                                StoreRuntimeError::Control(cause)
-                            }
-                            RetainedFailureWorkStartError::Ledger(cause) => {
-                                StoreRuntimeError::Ledger(cause)
-                            }
-                            RetainedFailureWorkStartError::Outstanding => {
-                                failure_work_envelope_exhausted()
-                            }
-                        };
-                        controlled_failure.get_or_insert(cause);
-                        return false;
-                    }
-                };
-                let mut session = FailureEvidenceValidationSession {
-                    raw,
-                    permit: Some(permit),
-                    sticky: &mut controlled_failure,
-                    completed_units: 0,
-                    rejected: false,
-                    work_batch: CompletionPrefixBatch::new(),
-                };
-                let validate = validate
-                    .as_mut()
-                    .expect("the rich-failure validation callback is executed at most once");
-                let root = FailureEvidenceMember {
-                    raw: root,
-                    validation: PhantomData,
-                };
-                let accepted = validate(&mut session, root);
-                match session.finish(accepted) {
-                    Ok(accepted) => accepted,
-                    Err(cause) => {
-                        controlled_failure.get_or_insert(cause);
-                        false
-                    }
-                }
-            });
+        let validation = failure.validate_rich_failure_controlled(
+            evidence_root,
+            super::failure_evidence_validator(
+                &failure_work,
+                &mut controlled_failure,
+                &mut validate,
+            ),
+        );
         if drop_optional_callback(validate).is_err() {
             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
             let cause = match validation {
@@ -1916,6 +1951,57 @@ impl<Cause> Drop for VerifiedMinimalFallback<Cause> {
     }
 }
 
+pub(in crate::concrete_store) fn run_failure_evidence_build<O, PP, U, EvidenceKind, EvidenceTag>(
+    mut evidence: StoreFailureEvidenceLoan<'_, O, PP, U>,
+    failure_work: &mut FailureEvidenceWorkBudget,
+    build: impl for<'evidence, 'lane> FnMut(
+        &mut FailureEvidenceLane<'evidence, 'lane, O, PP, U>,
+    ) -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
+) -> Result<OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>, Option<PreparationFailureCode>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    EvidenceTag: Copy + Send + Sync + 'static,
+{
+    let mut build = ManuallyDrop::new(Some(build));
+    let mut first_fault = None;
+    let decision = catch_unwind(AssertUnwindSafe(|| {
+        let mut lane = FailureEvidenceLane {
+            evidence: &mut evidence,
+            first_fault: &mut first_fault,
+            failure_work,
+        };
+        let build = build
+            .as_mut()
+            .expect("the failure-evidence callback is executed at most once");
+        build(&mut lane)
+    }));
+    drop(evidence);
+    let build_drop_failed = drop_optional_callback(build).is_err();
+    let decision = match decision {
+        Ok(decision) if !build_drop_failed => decision,
+        Ok(decision) => {
+            let _ = drop_scoped_value(decision);
+            return Err(None);
+        }
+        Err(payload) => {
+            discard_untrusted_panic_payload(payload);
+            return Err(None);
+        }
+    };
+    if let Some(fault) = first_fault {
+        return match decision {
+            FailureEvidenceDecision::Abort if !fault.contract_seen => Err(fault.recoverable_code()),
+            FailureEvidenceDecision::Complete(_) | FailureEvidenceDecision::Abort => Err(None),
+        };
+    }
+    match decision {
+        FailureEvidenceDecision::Complete(root) => Ok(root),
+        FailureEvidenceDecision::Abort => Err(None),
+    }
+}
+
 impl<'inv, O, PP, U, Cause> UnrootedFailureEvidence<'inv, O, PP, U, Cause>
 where
     O: OperationOwner,
@@ -1926,6 +2012,7 @@ where
         let Self {
             owner,
             domain,
+            state: _,
             failure_code: _,
             failure_work: _,
             outcome_evidence_destination_dimension: _,
@@ -1951,9 +2038,10 @@ where
     #[allow(clippy::type_complexity, clippy::result_large_err)]
     pub fn build<EvidenceKind, EvidenceTag>(
         self,
-        build: impl for<'lane> FnMut(
-            &mut FailureEvidenceLane<'inv, 'lane, O, PP, U>,
-        ) -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
+        build: impl for<'evidence, 'lane> FnMut(
+            &mut FailureEvidenceLane<'evidence, 'lane, O, PP, U>,
+        )
+            -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
         FailureEvidenceOutcome<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
@@ -1964,53 +2052,18 @@ where
         let Self {
             owner,
             domain,
+            mut state,
             failure_code,
             mut failure_work,
             outcome_evidence_destination_dimension,
         } = self;
-        let (cause, raw) = owner.into_parts();
+        let (cause, mut raw) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
-        let mut raw = raw;
-        let mut build = ManuallyDrop::new(Some(build));
-        let mut first_fault = None;
-        let decision = catch_unwind(AssertUnwindSafe(|| {
-            let mut lane = FailureEvidenceLane {
-                raw: &mut raw,
-                first_fault: &mut first_fault,
-                failure_work: &mut failure_work,
-            };
-            let build = build
-                .as_mut()
-                .expect("the failure-evidence callback is executed at most once");
-            build(&mut lane)
-        }));
-        let build_drop_failed = drop_optional_callback(build).is_err();
-        let decision = match decision {
-            Ok(decision) if !build_drop_failed => decision,
-            Ok(decision) => {
-                let _ = drop_scoped_value(decision);
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-                return Err(StoreActivationContainment {
-                    cause: raw.contain_activation_fault(),
-                });
-            }
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-                return Err(StoreActivationContainment {
-                    cause: raw.contain_activation_fault(),
-                });
-            }
-        };
-        if let Some(fault) = first_fault {
-            match decision {
-                FailureEvidenceDecision::Abort if !fault.contract_seen => {
-                    let Some(runtime_failure_code) = fault.recoverable_code() else {
-                        let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-                        return Err(StoreActivationContainment {
-                            cause: raw.contain_activation_fault(),
-                        });
-                    };
+        let evidence = StoreFailureEvidenceLoan::new(raw.borrow_ordinary(), &domain, &mut state);
+        let evidence_root =
+            match super::run_failure_evidence_build(evidence, &mut failure_work, build) {
+                Ok(root) => root,
+                Err(Some(runtime_failure_code)) => {
                     let prepared = raw
                         .with_fallback_cause(runtime_failure_code)
                         .prepare_minimal_fallback()
@@ -2030,29 +2083,19 @@ where
                         }
                     };
                 }
-                FailureEvidenceDecision::Complete(_) | FailureEvidenceDecision::Abort => {
+                Err(None) => {
                     let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                     return Err(StoreActivationContainment {
                         cause: raw.contain_activation_fault(),
                     });
                 }
-            }
-        }
-        let evidence_root = match decision {
-            FailureEvidenceDecision::Complete(root) => root,
-            FailureEvidenceDecision::Abort => {
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-                return Err(StoreActivationContainment {
-                    cause: raw.contain_activation_fault(),
-                });
-            }
-        };
+            };
         Ok(FailureEvidenceOutcome::Rooted(RootedFailureEvidence {
             owner: PayloadOwner::new(
                 ManuallyDrop::into_inner(cause),
                 StoreFailureAssembly {
                     raw,
-                    fallback_only: false,
+                    state,
                     forced_cause: Some(failure_code),
                     evidence_root,
                     domain,

@@ -672,6 +672,48 @@ impl<T> Drop for PublishedPart<T> {
     }
 }
 
+mod borrowed;
+pub(super) use borrowed::FallbackPublicationBaselineLoan;
+mod finite;
+pub(super) use finite::FiniteFallbackPublicationBaseline;
+
+struct BaselinePartsCleanupFailure {
+    cause: RetainedPartCleanupError,
+    released_account: Option<PhysicalStorageAccount>,
+}
+
+/// The same physical-before-batch cleanup serves both real startup graph shapes.
+fn discard_baseline_physical_parts<F, P, D>(
+    fallback: &mut Option<DetachedRetainedPart<F>>,
+    evidence: Option<&mut Option<DetachedRetainedPart<TerminalLedgerEvidence<P, D>>>>,
+) -> Result<(PhysicalStorageAccount, Option<PhysicalStorageAccount>), BaselinePartsCleanupFailure> {
+    let fallback_account = fallback
+        .as_mut()
+        .ok_or(RetainedPartCleanupError::MissingFaultAnchor)
+        .and_then(DetachedRetainedPart::try_discard_allocation)
+        .map_err(|cause| BaselinePartsCleanupFailure {
+            cause,
+            released_account: None,
+        })?;
+    let evidence_account = match evidence {
+        Some(evidence) => match evidence
+            .as_mut()
+            .ok_or(RetainedPartCleanupError::MissingFaultAnchor)
+            .and_then(DetachedRetainedPart::try_discard_allocation)
+        {
+            Ok(account) => Some(account),
+            Err(cause) => {
+                return Err(BaselinePartsCleanupFailure {
+                    cause,
+                    released_account: Some(fallback_account),
+                });
+            }
+        },
+        None => None,
+    };
+    Ok((fallback_account, evidence_account))
+}
+
 #[allow(
     dead_code,
     clippy::type_complexity,
@@ -713,6 +755,20 @@ where
         self.batches.as_ref().map(inspect)
     }
 
+    pub(super) fn batch_read(&self) -> Option<crate::ledger::FallbackBatchReadView<'_, O, P, D>> {
+        self.batches.as_ref().map(FallbackBatchBaseline::as_read)
+    }
+
+    pub(super) fn terminal_batches(
+        &mut self,
+    ) -> Option<crate::ledger::FallbackBatchView<'_, O, P, D>> {
+        self.batches.as_mut().map(FallbackBatchBaseline::view)
+    }
+
+    pub(super) fn physical_parts_are_installed(&self) -> bool {
+        self.fallback.is_some() && self.evidence.is_some() && self.batches.is_some()
+    }
+
     pub(super) fn take_parts(
         &mut self,
     ) -> (
@@ -733,6 +789,29 @@ where
             None => unreachable_final_owner_state(),
         };
         (fallback, evidence, batches)
+    }
+
+    /// Moves physical owners while lending the batch owner that stays in the root.
+    pub(super) fn take_physical_and_lend_batches(
+        &mut self,
+    ) -> (
+        DetachedRetainedPart<F>,
+        DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
+        &mut Option<FallbackBatchBaseline<O, P, D>>,
+    ) {
+        let fallback = self
+            .fallback
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let evidence = self
+            .evidence
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        assert!(
+            self.batches.is_some(),
+            "terminal classification retains its admitted batches"
+        );
+        (fallback, evidence, &mut self.batches)
     }
 
     pub(super) fn try_replace_canonical_assembly(
@@ -847,39 +926,24 @@ where
             return Err(());
         }
 
-        let fallback_result = match self.fallback.as_mut() {
-            Some(fallback) => fallback.try_discard_allocation(),
-            None => Err(RetainedPartCleanupError::MissingFaultAnchor),
-        };
-        let fallback_account = match fallback_result {
-            Ok(account) => account,
-            Err(cause) => {
-                if cause == RetainedPartCleanupError::MissingFaultAnchor
-                    && let Some(account) = self.first_account()
-                {
-                    let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        let (fallback_account, evidence_account) =
+            match discard_baseline_physical_parts(&mut self.fallback, Some(&mut self.evidence)) {
+                Ok(accounts) => accounts,
+                Err(failure) => {
+                    if failure.cause == RetainedPartCleanupError::MissingFaultAnchor
+                        && let Some(account) = failure
+                            .released_account
+                            .as_ref()
+                            .or_else(|| self.first_account())
+                    {
+                        let _ =
+                            account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+                    }
+                    drop(failure.released_account);
+                    self.contain_after_recorded_poison();
+                    return Err(());
                 }
-                self.contain_after_recorded_poison();
-                return Err(());
-            }
-        };
-
-        let evidence_result = match self.evidence.as_mut() {
-            Some(evidence) => evidence.try_discard_allocation(),
-            None => Err(RetainedPartCleanupError::MissingFaultAnchor),
-        };
-        let evidence_account = match evidence_result {
-            Ok(account) => account,
-            Err(cause) => {
-                if cause == RetainedPartCleanupError::MissingFaultAnchor {
-                    let _ = fallback_account
-                        .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
-                }
-                drop(fallback_account);
-                self.contain_after_recorded_poison();
-                return Err(());
-            }
-        };
+            };
 
         drop(self.batches.take());
         drop(fallback_account);

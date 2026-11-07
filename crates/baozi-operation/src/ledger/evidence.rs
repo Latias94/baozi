@@ -1,9 +1,9 @@
-use super::storage::DynamicStorage;
+use super::storage::StorageOwner;
 use super::{LedgerEvidenceError, LedgerEvidencePurpose, capacity_bytes, release_evidence};
 use crate::{CapacityPlan, CapacityPlanError, ReplacementCapacityPlan};
 
 pub(super) fn try_grow_selected_evidence_vec<P, D, T>(
-    storage: &mut DynamicStorage<P, D>,
+    storage: StorageOwner<'_, P, D>,
     values: &mut Vec<T>,
     desired_capacity: usize,
     retained_bytes: &mut u64,
@@ -56,13 +56,13 @@ pub(super) fn try_grow_selected_evidence_vec<P, D, T>(
 }
 
 struct StorageAdmission<'a, P, D> {
-    storage: &'a mut DynamicStorage<P, D>,
+    storage: StorageOwner<'a, P, D>,
     bytes: u64,
 }
 
 impl<'a, P, D> StorageAdmission<'a, P, D> {
     fn new(
-        storage: &'a mut DynamicStorage<P, D>,
+        mut storage: StorageOwner<'a, P, D>,
         bytes: u64,
         purpose: LedgerEvidencePurpose,
     ) -> Result<Self, LedgerEvidenceError> {
@@ -117,7 +117,7 @@ pub(super) struct StorageCandidate<'a, P, D, T> {
 
 impl<'a, P, D, T> StorageCandidate<'a, P, D, T> {
     pub(super) fn try_with_capacity(
-        storage: &'a mut DynamicStorage<P, D>,
+        storage: StorageOwner<'a, P, D>,
         desired_capacity: usize,
         purpose: LedgerEvidencePurpose,
     ) -> Result<Self, LedgerEvidenceError> {
@@ -127,7 +127,7 @@ impl<'a, P, D, T> StorageCandidate<'a, P, D, T> {
     }
 
     fn admit(
-        storage: &'a mut DynamicStorage<P, D>,
+        storage: StorageOwner<'a, P, D>,
         desired_capacity: usize,
         purpose: LedgerEvidencePurpose,
     ) -> Result<(Self, CapacityPlan), LedgerEvidenceError> {
@@ -196,6 +196,7 @@ impl<'a, P, D, T> StorageCandidate<'a, P, D, T> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::storage::DynamicStorage;
     use super::super::{LedgerState, lock};
     use super::super::{
         PublicationState, test_evidence_allocation_guard, test_fail_next_evidence_allocation,
@@ -256,7 +257,7 @@ mod tests {
         let observed_bytes = Arc::new(AtomicU64::new(0));
         let mut selected = DynamicStorage::Shared(Arc::clone(&storage));
         let mut evidence = StorageCandidate::try_with_capacity(
-            &mut selected,
+            StorageOwner::Dynamic(&mut selected),
             1,
             LedgerEvidencePurpose::Publication,
         )
@@ -297,7 +298,7 @@ mod tests {
             let storage = storage();
             let mut selected = DynamicStorage::Shared(Arc::clone(&storage));
             let (mut evidence, plan) = StorageCandidate::<(), (), u64>::admit(
-                &mut selected,
+                StorageOwner::Dynamic(&mut selected),
                 3,
                 LedgerEvidencePurpose::Publication,
             )
@@ -355,7 +356,7 @@ mod tests {
             let baseline = storage.read().current_administrative_bytes;
             let (mut values, mut retained_bytes) =
                 StorageCandidate::<_, _, u64>::try_with_capacity(
-                    &mut storage,
+                    StorageOwner::Dynamic(&mut storage),
                     4,
                     LedgerEvidencePurpose::Progress,
                 )
@@ -378,7 +379,7 @@ mod tests {
                     retained_bytes = 0;
                 }
                 let result = try_grow_selected_evidence_vec(
-                    &mut storage,
+                    StorageOwner::Dynamic(&mut storage),
                     &mut values,
                     3,
                     &mut retained_bytes,
@@ -451,7 +452,7 @@ mod tests {
                 }
                 assert!(
                     try_grow_selected_evidence_vec(
-                        &mut storage,
+                        StorageOwner::Dynamic(&mut storage),
                         &mut values,
                         desired_capacity,
                         &mut retained_bytes,
@@ -474,7 +475,7 @@ mod tests {
                 );
             }
             try_grow_selected_evidence_vec(
-                &mut storage,
+                StorageOwner::Dynamic(&mut storage),
                 &mut values,
                 desired_capacity,
                 &mut retained_bytes,

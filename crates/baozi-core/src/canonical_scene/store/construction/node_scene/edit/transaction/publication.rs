@@ -9,8 +9,9 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
 use baozi_operation::{
-    OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore,
-    PublishedStoreFallbackParts, RecordBlock, StoreLedgerEvidence, StorePrepareError,
+    OperationOwner, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
+    PublishedOutcomeEvidenceStore, PublishedStoreFallbackParts, RecordBlock, StoreLedgerEvidence,
+    StorePrepareError,
 };
 use thiserror::Error;
 
@@ -312,6 +313,20 @@ impl SceneEditHandoffToken {
         >,
     ) -> SceneEditPublishedSuccess {
         let published = store.handoff();
+        let (scene, evidence) =
+            self.handoff_physical(published.canonical, published.outcome_evidence);
+        SceneEditPublishedSuccess {
+            scene,
+            evidence,
+            ledger_evidence: published.ledger_evidence,
+        }
+    }
+
+    fn handoff_physical(
+        self,
+        canonical: PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>,
+        outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, SceneEditEvidenceTag>,
+    ) -> (SceneStorage, SceneEditEvidence) {
         let evidence = match self.proof.handoff {
             SceneEditHandoffFacts::Selection {
                 input_generation,
@@ -322,7 +337,7 @@ impl SceneEditHandoffToken {
                 removed_metadata,
                 origins,
             } => SceneEditEvidence::Selection(SceneGeometrySelectionEvidence {
-                store: published.outcome_evidence,
+                store: outcome_evidence,
                 input_generation,
                 output_generation: self.generation.id(),
                 targets,
@@ -340,7 +355,7 @@ impl SceneEditHandoffToken {
                 assumed_mask,
                 reverse_winding,
             } => SceneEditEvidence::SpaceConversion(SceneSpaceConversionEvidence {
-                _store: published.outcome_evidence,
+                _store: outcome_evidence,
                 input_generation,
                 output_generation: self.generation.id(),
                 source,
@@ -358,7 +373,7 @@ impl SceneEditHandoffToken {
                 owner: GeometryEvidenceOwner {
                     input_target,
                     output_target: input_target.rebind(self.generation.id()),
-                    store: published.outcome_evidence,
+                    store: outcome_evidence,
                 },
                 corner_origins: origins.corners,
                 face_offsets: origins.faces,
@@ -375,7 +390,7 @@ impl SceneEditHandoffToken {
                 owner: GeometryEvidenceOwner {
                     input_target,
                     output_target: input_target.rebind(self.generation.id()),
-                    store: published.outcome_evidence,
+                    store: outcome_evidence,
                 },
                 effects,
                 removed_metadata,
@@ -394,7 +409,7 @@ impl SceneEditHandoffToken {
                 owner: GeometryEvidenceOwner {
                     input_target,
                     output_target: input_target.rebind(self.generation.id()),
-                    store: published.outcome_evidence,
+                    store: outcome_evidence,
                 },
                 replaced,
                 tangent_attribute,
@@ -405,18 +420,17 @@ impl SceneEditHandoffToken {
             }),
         };
 
-        SceneEditPublishedSuccess {
-            scene: SceneStorage {
+        (
+            SceneStorage {
                 generation: self.generation.into_id(),
                 tables: self.tables,
-                canonical: published.canonical,
+                canonical,
                 proof: self.proof.scene,
                 #[cfg(test)]
                 semantic_read_fault: None,
             },
             evidence,
-            ledger_evidence: published.ledger_evidence,
-        }
+        )
     }
 }
 
@@ -685,6 +699,142 @@ mod tests {
             assert!(!snapshot.poisoned());
             assert!(snapshot.live_retained_bytes() > self.retained_before);
             self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[test]
+    fn finite_scene_edit_entry_keeps_original_facts_after_source_and_host_end() {
+        use baozi_operation::__retained_store_integration::activation::{
+            FiniteCanonicalInvocationHost, FiniteCanonicalOperationPublication,
+        };
+        use baozi_operation::__retained_store_integration::authority::{
+            FiniteRetainedStoreStartPlan, FiniteStoreLedgerPlan,
+            PreparedFiniteStoreEvidenceOnlyOutcome, RetainedStoreSharePlan,
+            RetainedStoreWriterPlan,
+        };
+        use baozi_operation::{
+            DimensionPolicy, RetainedStoreBatchLimits, RetainedStoreFailureTerminalWorkPlan,
+            StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StorePhaseSemanticId,
+            StoreRuntimeError, StoreSemanticCatalogId,
+        };
+        use std::num::{NonZeroU32, NonZeroU64};
+
+        for attached in [false, true] {
+            let (facts, work_dimension) = {
+                let factory = test_factory();
+                let account = test_account(&factory, 1_024);
+                let generations = AtomicU64::new(0);
+                let source = try_build_single_trs_scene(&account, || {
+                    SceneGenerationId::reserve_from(&generations)
+                })
+                .unwrap();
+                let scene = crate::ValidatedScene::from_node_scene(source.scene);
+                let catalog = StoreSemanticCatalogId::new(*b"baozi-unit-store", NonZeroU32::MIN);
+                let domain = StoreKeyDomain::try_new(catalog).unwrap();
+                let dimensions = [1, 2, 3, 4, 5, 6].map(|local| {
+                    domain
+                        .try_admit_dimension(StoreDimensionSemanticId::new(
+                            catalog,
+                            NonZeroU64::new(local).unwrap(),
+                        ))
+                        .unwrap()
+                });
+                let phases = [1, 2, 3].map(|local| {
+                    domain
+                        .try_admit_phase(StorePhaseSemanticId::new(
+                            catalog,
+                            NonZeroU64::new(local).unwrap(),
+                        ))
+                        .unwrap()
+                });
+                let requirement =
+                    RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_members(1)
+                        .unwrap();
+                let failure = RetainedStoreFailureTerminalWorkPlan::new(
+                    dimensions[5],
+                    1,
+                    1280 + requirement.attempted_work_limit(),
+                    1280 + requirement.consumed_work_limit(),
+                )
+                .unwrap();
+                let mut policies = dimensions.map(|dimension| {
+                    (
+                        dimension,
+                        DimensionPolicy::reservable_bytes(256, 256, 256, 1 << 20)
+                            .with_published_outcome_evidence_limit(256),
+                    )
+                });
+                policies[5].1 = requirement.dimension_policy();
+                let ledger =
+                    FiniteStoreLedgerPlan::try_new(domain, 8 << 20, 8 << 20, policies, phases)
+                        .unwrap();
+                let plan = FiniteRetainedStoreStartPlan::new(
+                    RetainedStoreWriterPlan::new(
+                        phases[2],
+                        dimensions[0],
+                        dimensions[1],
+                        RetainedStoreBatchLimits::new(4, 2).unwrap(),
+                    ),
+                    RetainedStoreSharePlan::new(dimensions[2], dimensions[3]),
+                    StoreFallbackEnvelope::new(23),
+                    dimensions[4],
+                    1,
+                    failure,
+                );
+                let mut host = FiniteCanonicalInvocationHost::<
+                    crate::canonical_scene::store::construction::SceneConstructionOwner,
+                    SceneConstructionPhase,
+                    SceneConstructionUnit,
+                    (),
+                    (),
+                >::new();
+                let finish = super::super::run_finite_scene_edit_body(
+                    &mut host,
+                    &scene,
+                    OperationControl::default(),
+                    ledger,
+                    plan,
+                    |mut parts, disposition| {
+                        parts
+                            .startup
+                            .with_action_execution(dimensions[2], |actions| {
+                                actions.begin_action(1)?;
+                                actions.complete_action()?;
+                                Ok::<_, StoreRuntimeError>(())
+                            })
+                            .unwrap();
+                        if attached {
+                            parts
+                                .startup
+                                .attach()
+                                .unwrap()
+                                .request_unchanged(disposition)
+                                .unwrap();
+                        } else {
+                            parts.startup.request_unchanged(disposition).unwrap();
+                        }
+                    },
+                )
+                .unwrap();
+                let facts = if attached {
+                    match finish.finish_attached(final_progress()).unwrap() {
+                        FiniteCanonicalOperationPublication::EvidenceOnly(
+                            PreparedFiniteStoreEvidenceOnlyOutcome::Success(prepared),
+                        ) => prepared.handoff().facts,
+                        _ => panic!("an unchanged finite Scene edit must publish its fixed facts"),
+                    }
+                } else {
+                    finish.finish_unattached(final_progress()).unwrap()
+                };
+                assert!(!account.snapshot().poisoned());
+                (facts, dimensions[2])
+            };
+            assert_eq!(facts.header().dimension_count(), 6);
+            assert_eq!(facts.header().phase_count(), 3);
+            assert_eq!(facts.header().terminal_cause(), StoreTerminalCause::Success);
+            let work = facts.dimension(work_dimension).unwrap();
+            assert!(work.consumed() >= 1);
+            assert_eq!(work.attempted(), work.consumed());
         }
     }
 

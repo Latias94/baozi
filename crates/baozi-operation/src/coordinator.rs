@@ -6,12 +6,17 @@ use crate::control::{
 };
 use crate::ledger::{
     Commitment, ExclusiveStorage, Ledger, LedgerCause, LedgerEvidenceError, LedgerLimits,
-    LedgerSnapshot, LiveReservation, PendingPublication, PublicationReservationBatch,
+    LedgerSnapshot, LedgerView, LiveReservation, PendingPublication, PublicationReservationBatch,
 };
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Instant;
+
+mod borrowed;
+pub(crate) mod finite;
+pub(crate) use OperationCoordinator as DynamicOperationCoordinator;
+pub(crate) use borrowed::CoordinatorView;
 
 /// The one final progress event delivered immediately before durable publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +139,130 @@ enum ProgressDelivery {
     Final,
 }
 
+pub(crate) struct FiniteProgress4<PP, U> {
+    rows: [Option<((PP, U), ProgressState)>; 4],
+    len: usize,
+}
+
+impl<PP, U> FiniteProgress4<PP, U> {
+    const fn new() -> Self {
+        Self {
+            rows: [const { None }; 4],
+            len: 0,
+        }
+    }
+}
+
+enum ProgressRows<'a, PP, U> {
+    Dynamic {
+        rows: &'a mut Vec<((PP, U), ProgressState)>,
+        retained_bytes: &'a mut u64,
+    },
+    Finite(&'a mut FiniteProgress4<PP, U>),
+}
+
+impl<PP, U> ProgressRows<'_, PP, U> {
+    fn reborrow(&mut self) -> ProgressRows<'_, PP, U> {
+        match self {
+            Self::Dynamic {
+                rows,
+                retained_bytes,
+            } => ProgressRows::Dynamic {
+                rows,
+                retained_bytes,
+            },
+            Self::Finite(progress) => ProgressRows::Finite(progress),
+        }
+    }
+}
+
+impl<PP: Copy + Ord, U: Copy + Ord> ProgressRows<'_, PP, U> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Dynamic { rows, .. } => rows.len(),
+            Self::Finite(progress) => progress.len,
+        }
+    }
+
+    fn find(&self, key: (PP, U)) -> Result<usize, usize> {
+        match self {
+            Self::Dynamic { rows, .. } => {
+                rows.binary_search_by_key(&key, |(stored_key, _)| *stored_key)
+            }
+            Self::Finite(progress) => progress.rows[..progress.len]
+                .binary_search_by_key(&Some(key), |row| {
+                    row.as_ref().map(|(stored_key, _)| *stored_key)
+                }),
+        }
+    }
+
+    fn get(&self, position: usize) -> Option<&ProgressState> {
+        match self {
+            Self::Dynamic { rows, .. } => rows.get(position).map(|(_, state)| state),
+            Self::Finite(progress) => progress
+                .rows
+                .get(position)
+                .and_then(Option::as_ref)
+                .map(|(_, state)| state),
+        }
+    }
+
+    fn set(&mut self, position: usize, key: (PP, U), state: ProgressState) {
+        match self {
+            Self::Dynamic { rows, .. } => rows[position] = (key, state),
+            Self::Finite(progress) => progress.rows[position] = Some((key, state)),
+        }
+    }
+
+    fn insert<O: OperationOwner, LP: Copy + Ord, D: Copy + Ord + fmt::Debug>(
+        &mut self,
+        storage: &mut ExclusiveStorage<'_, O, LP, D>,
+        position: usize,
+        key: (PP, U),
+        state: ProgressState,
+        limit: usize,
+    ) -> Result<(), ProgressStorageError> {
+        let desired_capacity = self.len().saturating_add(1);
+        let limit = match self {
+            Self::Dynamic { .. } => limit,
+            Self::Finite(progress) => limit.min(progress.rows.len()),
+        };
+        if desired_capacity > limit {
+            return Err(ProgressStorageError::StateLimitExceeded {
+                value: desired_capacity,
+                limit,
+            });
+        }
+        match self {
+            Self::Dynamic {
+                rows,
+                retained_bytes,
+            } => {
+                storage
+                    .try_grow_progress(rows, desired_capacity, retained_bytes)
+                    .map_err(|cause| ProgressStorageError::Evidence { cause })?;
+                rows.insert(position, (key, state));
+            }
+            Self::Finite(progress) => {
+                for source in (position..progress.len).rev() {
+                    progress.rows[source + 1] = progress.rows[source].take();
+                }
+                progress.rows[position] = Some((key, state));
+                progress.len = desired_capacity;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ProgressDeliveryState {
+    last_phase_order: Option<u32>,
+    delivered_events: usize,
+    delivered_bytes: usize,
+    next_sequence: u64,
+}
+
 /// Poll-only control authority whose borrow is disjoint from the operation ledger.
 ///
 /// Retained construction uses this private checkpoint while the same coordinator's ledger is
@@ -172,12 +301,8 @@ impl<PP, U> OperationPollCheckpoint<'_, PP, U> {
 /// A producer can retain a borrowed work envelope while polling or reporting progress.
 /// No callback runs while either accounting state is borrowed.
 pub(crate) struct OperationProgressFields<'a, PP, U> {
-    progress: &'a mut Vec<((PP, U), ProgressState)>,
-    progress_evidence_bytes: &'a mut u64,
-    last_phase_order: &'a mut Option<u32>,
-    delivered_events: &'a mut usize,
-    delivered_bytes: &'a mut usize,
-    next_sequence: &'a mut u64,
+    progress: ProgressRows<'a, PP, U>,
+    delivery: &'a mut ProgressDeliveryState,
 }
 
 type SplitExclusiveProgress<'a, O, LP, PP, U, D> = (
@@ -239,6 +364,7 @@ where
             );
         }
         if self
+            .delivery
             .last_phase_order
             .is_some_and(|last| phase.order() < last)
         {
@@ -251,12 +377,11 @@ where
         }
 
         let key = (phase, unit);
-        let progress_position = self
-            .progress
-            .binary_search_by_key(&key, |(stored_key, _)| *stored_key);
+        let progress_position = self.progress.find(key);
         let previous = progress_position
             .ok()
-            .map(|position| self.progress[position].1);
+            .and_then(|position| self.progress.get(position))
+            .copied();
         let unchanged = previous
             .is_some_and(|previous| previous.completed == completed && previous.total == total);
         if let Some(previous) = previous {
@@ -299,11 +424,11 @@ where
         };
         let progress_position = match progress_position {
             Ok(position) => {
-                self.progress[position].1 = progress_state;
+                self.progress.set(position, key, progress_state);
                 position
             }
             Err(position) => {
-                if let Err(cause) = self.try_insert_progress(
+                if let Err(cause) = self.progress.insert(
                     storage,
                     position,
                     key,
@@ -315,18 +440,18 @@ where
                 position
             }
         };
-        *self.last_phase_order = Some(phase.order());
+        self.delivery.last_phase_order = Some(phase.order());
 
         if !should_deliver || poll.control.observer.is_none() {
             return Ok(());
         }
         let encoded_bytes = match delivery {
             ProgressDelivery::Transient => {
-                if *self.delivered_events >= poll.control.progress_limits.max_events() {
+                if self.delivery.delivered_events >= poll.control.progress_limits.max_events() {
                     return Ok(());
                 }
                 let encoded_bytes = estimated_event_bytes(phase, unit);
-                if self.delivered_bytes.saturating_add(encoded_bytes)
+                if self.delivery.delivered_bytes.saturating_add(encoded_bytes)
                     > poll.control.progress_limits.max_encoded_bytes()
                 {
                     return Ok(());
@@ -336,7 +461,7 @@ where
             ProgressDelivery::Final => None,
         };
 
-        let event = ProgressEvent::new(phase, unit, completed, total, *self.next_sequence);
+        let event = ProgressEvent::new(phase, unit, completed, total, self.delivery.next_sequence);
         let Some(mut observer) = poll.control.observer.take() else {
             return Ok(());
         };
@@ -354,11 +479,19 @@ where
         };
 
         if let Some(encoded_bytes) = encoded_bytes {
-            *self.delivered_events = self.delivered_events.saturating_add(1);
-            *self.delivered_bytes = self.delivered_bytes.saturating_add(encoded_bytes);
+            self.delivery.delivered_events = self.delivery.delivered_events.saturating_add(1);
+            self.delivery.delivered_bytes =
+                self.delivery.delivered_bytes.saturating_add(encoded_bytes);
         }
-        *self.next_sequence = self.next_sequence.saturating_add(1);
-        self.progress[progress_position].1.last_delivered = Some(completed);
+        self.delivery.next_sequence = self.delivery.next_sequence.saturating_add(1);
+        self.progress.set(
+            progress_position,
+            key,
+            ProgressState {
+                last_delivered: Some(completed),
+                ..progress_state
+            },
+        );
         if decision == ProgressDecision::Cancel {
             return self.fail(
                 poll,
@@ -378,30 +511,150 @@ where
         *poll.terminal = Some(cause.clone());
         Err(cause)
     }
+}
 
-    fn try_insert_progress<O: OperationOwner, LP: Copy + Ord, D: Copy + Ord + fmt::Debug>(
-        &mut self,
-        storage: &mut ExclusiveStorage<'_, O, LP, D>,
-        position: usize,
-        key: (PP, U),
-        state: ProgressState,
-        limit: usize,
-    ) -> Result<(), ProgressStorageError> {
-        let desired_capacity = self.progress.len().saturating_add(1);
-        if desired_capacity > limit {
-            return Err(ProgressStorageError::StateLimitExceeded {
-                value: desired_capacity,
-                limit,
-            });
+pub(crate) struct CoordinatorControlState<PP, U, D> {
+    control: OperationControl<PP, U>,
+    terminal: Option<ControlCause>,
+    delivery: ProgressDeliveryState,
+    terminal_control_gate: Option<Result<(), PublicationCause<D>>>,
+}
+
+impl<PP: ProgressPhase, U: ProgressUnit, D: Copy + Ord + fmt::Debug>
+    CoordinatorControlState<PP, U, D>
+{
+    fn new(control: OperationControl<PP, U>) -> Self {
+        Self {
+            control,
+            terminal: None,
+            delivery: ProgressDeliveryState::default(),
+            terminal_control_gate: None,
         }
-        storage
-            .try_grow_progress(
-                self.progress,
-                desired_capacity,
-                self.progress_evidence_bytes,
-            )
-            .map_err(|cause| ProgressStorageError::Evidence { cause })?;
-        self.progress.insert(position, (key, state));
+    }
+
+    fn recorded_control_cause(&self) -> Option<ControlCause> {
+        self.terminal.clone()
+    }
+
+    fn poll(&mut self) -> Result<(), ControlCause> {
+        poll_operation_control(&mut self.control, &mut self.terminal)
+    }
+
+    fn poll_checkpoint(
+        &mut self,
+        allow_preexisting_terminal: bool,
+    ) -> OperationPollCheckpoint<'_, PP, U> {
+        OperationPollCheckpoint {
+            control: &mut self.control,
+            terminal: &mut self.terminal,
+            allow_preexisting_terminal,
+        }
+    }
+
+    fn terminal_poll_checkpoint(&mut self) -> OperationPollCheckpoint<'_, PP, U> {
+        let allow_preexisting_terminal = self.terminal.is_some();
+        self.poll_checkpoint(allow_preexisting_terminal)
+    }
+
+    fn split_progress<'a>(
+        &'a mut self,
+        progress: ProgressRows<'a, PP, U>,
+    ) -> (
+        OperationPollCheckpoint<'a, PP, U>,
+        OperationProgressFields<'a, PP, U>,
+    ) {
+        (
+            OperationPollCheckpoint {
+                control: &mut self.control,
+                terminal: &mut self.terminal,
+                allow_preexisting_terminal: false,
+            },
+            OperationProgressFields {
+                progress,
+                delivery: &mut self.delivery,
+            },
+        )
+    }
+
+    fn report_progress<O: OperationOwner, LP: Copy + Ord>(
+        &mut self,
+        ledger: &mut LedgerView<'_, O, LP, D>,
+        rows: ProgressRows<'_, PP, U>,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), ControlCause> {
+        let (mut poll, mut progress) = self.split_progress(rows);
+        progress.report_progress(
+            &mut poll,
+            &mut ledger.storage_view(),
+            phase,
+            unit,
+            completed,
+            total,
+        )
+    }
+
+    fn try_prepare_typed_control<O: OperationOwner, LP: Copy + Ord>(
+        &mut self,
+        ledger: &mut LedgerView<'_, O, LP, D>,
+        rows: ProgressRows<'_, PP, U>,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<(), PublicationCause<D>> {
+        if let Some(result) = &self.terminal_control_gate {
+            return result.clone();
+        }
+        let delivery = match ledger.seal_ordinary_work() {
+            Ok(()) => {
+                let (mut poll, mut progress) = self.split_progress(rows);
+                progress
+                    .report_progress_with_delivery(
+                        &mut poll,
+                        &mut ledger.storage_view(),
+                        final_progress.phase,
+                        final_progress.unit,
+                        final_progress.total,
+                        Some(final_progress.total),
+                        ProgressDelivery::Final,
+                    )
+                    .and_then(|()| poll.poll())
+                    .map_err(PublicationCause::Control)
+            }
+            Err(cause) => Err(PublicationCause::Ledger(cause)),
+        };
+        let disposal = self
+            .dispose_control_owners()
+            .map_err(PublicationCause::Control);
+        let result = delivery.and(disposal);
+        self.terminal_control_gate = Some(result.clone());
+        result
+    }
+
+    fn dispose_control_owners(&mut self) -> Result<(), ControlCause> {
+        if let Err(cause) = self.control.dispose_extensions() {
+            if self.terminal.is_none() {
+                self.terminal = Some(cause.clone());
+            }
+            return Err(cause);
+        }
+        Ok(())
+    }
+
+    fn close_for_terminal_extraction<O: OperationOwner, LP: Copy + Ord>(
+        &mut self,
+        ledger: &mut LedgerView<'_, O, LP, D>,
+    ) -> Result<(), PublicationCause<D>> {
+        let seal = ledger.seal_ordinary_work();
+        let disposal = self.dispose_control_owners();
+        let close = if seal.is_ok() {
+            ledger.close_work()
+        } else {
+            Ok(())
+        };
+        seal?;
+        disposal?;
+        close?;
         Ok(())
     }
 }
@@ -455,19 +708,13 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    control: OperationControl<PP, U>,
+    control_state: CoordinatorControlState<PP, U, D>,
     ledger: Ledger<O, LP, D>,
-    terminal: Option<ControlCause>,
     progress: Vec<((PP, U), ProgressState)>,
     progress_evidence_bytes: u64,
-    last_phase_order: Option<u32>,
-    delivered_events: usize,
-    delivered_bytes: usize,
-    next_sequence: u64,
-    terminal_control_gate: Option<Result<(), PublicationCause<D>>>,
 }
 
-impl<O, LP, PP, U, D> OperationCoordinator<O, LP, PP, U, D>
+impl<O, LP, PP, U, D> DynamicOperationCoordinator<O, LP, PP, U, D>
 where
     O: OperationOwner,
     LP: Copy + Ord,
@@ -483,43 +730,42 @@ where
     ) -> Result<Self, LedgerCause<D>> {
         let ledger = Ledger::try_new(ledger_limits, phases)?;
         Ok(Self {
-            control,
+            control_state: CoordinatorControlState::new(control),
             ledger,
-            terminal: None,
             progress: Vec::new(),
             progress_evidence_bytes: 0,
-            last_phase_order: None,
-            delivered_events: 0,
-            delivered_bytes: 0,
-            next_sequence: 0,
-            terminal_control_gate: None,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn from_ledger_for_test(ledger: Ledger<O, LP, D>) -> Self {
         Self {
-            control: OperationControl::default(),
+            control_state: CoordinatorControlState::new(OperationControl::default()),
             ledger,
-            terminal: None,
             progress: Vec::new(),
             progress_evidence_bytes: 0,
-            last_phase_order: None,
-            delivered_events: 0,
-            delivered_bytes: 0,
-            next_sequence: 0,
-            terminal_control_gate: None,
         }
+    }
+
+    pub(crate) fn view(&mut self) -> CoordinatorView<'_, O, LP, PP, U, D> {
+        CoordinatorView::new(
+            &mut self.control_state,
+            self.ledger.view(),
+            ProgressRows::Dynamic {
+                rows: &mut self.progress,
+                retained_bytes: &mut self.progress_evidence_bytes,
+            },
+        )
     }
 
     /// Reads the original cold control cause without polling or changing control state.
     pub(crate) fn recorded_control_cause(&self) -> Option<ControlCause> {
-        self.terminal.clone()
+        self.control_state.recorded_control_cause()
     }
 
     /// Polls cancellation and deadline state.
     pub fn poll(&mut self) -> Result<(), ControlCause> {
-        poll_operation_control(&mut self.control, &mut self.terminal)
+        self.control_state.poll()
     }
 
     /// Validates, coalesces, and serially delivers owner-defined progress.
@@ -530,42 +776,7 @@ where
         completed: u64,
         total: Option<u64>,
     ) -> Result<(), ControlCause> {
-        self.report_progress_with_delivery(
-            phase,
-            unit,
-            completed,
-            total,
-            ProgressDelivery::Transient,
-        )
-    }
-
-    fn report_final_progress(
-        &mut self,
-        phase: PP,
-        unit: U,
-        total: u64,
-    ) -> Result<(), ControlCause> {
-        self.report_progress_with_delivery(phase, unit, total, Some(total), ProgressDelivery::Final)
-    }
-
-    fn report_progress_with_delivery(
-        &mut self,
-        phase: PP,
-        unit: U,
-        completed: u64,
-        total: Option<u64>,
-        delivery: ProgressDelivery,
-    ) -> Result<(), ControlCause> {
-        let (mut poll, mut progress, ledger) = self.split_exclusive_progress_and_ledger();
-        progress.report_progress_with_delivery(
-            &mut poll,
-            &mut ledger.storage_view(),
-            phase,
-            unit,
-            completed,
-            total,
-            delivery,
-        )
+        self.view().report_progress(phase, unit, completed, total)
     }
 
     /// Returns the latest semantic progress report, including reports not delivered to an observer.
@@ -712,133 +923,27 @@ where
         &mut self.ledger
     }
 
-    pub(crate) fn split_poll_checkpoint_and_retained_ledger(
-        &mut self,
-    ) -> (OperationPollCheckpoint<'_, PP, U>, &mut Ledger<O, LP, D>) {
-        let Self {
-            control,
-            ledger,
-            terminal,
-            ..
-        } = self;
-        (
-            OperationPollCheckpoint {
-                control,
-                terminal,
-                allow_preexisting_terminal: false,
-            },
-            ledger,
-        )
-    }
-
     pub(crate) fn split_exclusive_progress_and_ledger(
         &mut self,
     ) -> SplitExclusiveProgress<'_, O, LP, PP, U, D> {
         let Self {
-            control,
+            control_state,
             ledger,
-            terminal,
             progress,
             progress_evidence_bytes,
-            last_phase_order,
-            delivered_events,
-            delivered_bytes,
-            next_sequence,
-            ..
         } = self;
-        (
-            OperationPollCheckpoint {
-                control,
-                terminal,
-                allow_preexisting_terminal: false,
-            },
-            OperationProgressFields {
-                progress,
-                progress_evidence_bytes,
-                last_phase_order,
-                delivered_events,
-                delivered_bytes,
-                next_sequence,
-            },
-            ledger,
-        )
-    }
-
-    /// Splits the bounded terminal-work poll from the retained ledger.
-    ///
-    /// A control failure already accepted before this split cannot cancel the finite evidence
-    /// cleanup it selected. If control was still live at the split, later cancellation and
-    /// deadline failures remain observable at every protected-work poll.
-    pub(crate) fn split_terminal_poll_checkpoint_and_retained_ledger(
-        &mut self,
-    ) -> (OperationPollCheckpoint<'_, PP, U>, &mut Ledger<O, LP, D>) {
-        let Self {
-            control,
-            terminal,
-            ledger,
-            ..
-        } = self;
-        let allow_preexisting_terminal = terminal.is_some();
-        (
-            OperationPollCheckpoint {
-                control,
-                terminal,
-                allow_preexisting_terminal,
-            },
-            ledger,
-        )
+        let (poll, progress) = control_state.split_progress(ProgressRows::Dynamic {
+            rows: progress,
+            retained_bytes: progress_evidence_bytes,
+        });
+        (poll, progress, ledger)
     }
 
     pub(crate) fn try_prepare_typed_control(
         &mut self,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<(), PublicationCause<D>> {
-        if let Some(result) = &self.terminal_control_gate {
-            return result.clone();
-        }
-        let delivery = match self.ledger.seal_ordinary_work() {
-            Ok(()) => self
-                .report_final_progress(
-                    final_progress.phase,
-                    final_progress.unit,
-                    final_progress.total,
-                )
-                .and_then(|()| self.poll())
-                .map_err(PublicationCause::Control),
-            Err(cause) => Err(PublicationCause::Ledger(cause)),
-        };
-        // A rejected gate leaves ordinary work sealed and the finite failure grant dormant.
-        // Dispose both extension owners even if sealing or final delivery failed.
-        let disposal = self
-            .dispose_control_owners()
-            .map_err(PublicationCause::Control);
-        let result = delivery.and(disposal);
-        self.terminal_control_gate = Some(result.clone());
-        result
-    }
-
-    fn dispose_control_owners(&mut self) -> Result<(), ControlCause> {
-        if let Err(cause) = self.control.dispose_extensions() {
-            if self.terminal.is_none() {
-                self.terminal = Some(cause.clone());
-            }
-            return Err(cause);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn close_for_terminal_extraction(&mut self) -> Result<(), PublicationCause<D>> {
-        let seal = self.ledger.seal_ordinary_work();
-        let disposal = self.dispose_control_owners();
-        let close = if seal.is_ok() {
-            self.ledger.close_work()
-        } else {
-            Ok(())
-        };
-        seal?;
-        disposal?;
-        close?;
-        Ok(())
+        self.view().try_prepare_typed_control(final_progress)
     }
 
     pub(crate) fn take_terminal_snapshot(
@@ -869,16 +974,15 @@ where
 
     pub(crate) fn retire_after_detach(self, state: &mut crate::ledger::LedgerState<LP, D>) {
         let Self {
-            control,
+            control_state,
             ledger,
             progress,
             progress_evidence_bytes,
-            ..
         } = self;
         drop(progress);
         Ledger::<O, LP, D>::release_detached_administration(state, progress_evidence_bytes);
         ledger.retire_detached_indexes(state);
-        drop(control);
+        drop(control_state);
     }
 
     /// Finalizes the generic ledger after operation-owned live storage reaches zero.
@@ -890,8 +994,8 @@ where
         reason = "boxing final evidence would allocate on the invariant-failure path"
     )]
     pub fn finish(mut self) -> Result<LedgerSnapshot<LP, D>, OperationFinishError<LP, D>> {
-        let disposal = self.dispose_control_owners();
-        let control_cause = self.terminal.clone().or_else(|| disposal.err());
+        let disposal = self.control_state.dispose_control_owners();
+        let control_cause = self.recorded_control_cause().or_else(|| disposal.err());
         let (snapshot, ledger_cause) = self.take_terminal_snapshot();
         if let Some(cause) = ledger_cause {
             std::mem::forget(self);

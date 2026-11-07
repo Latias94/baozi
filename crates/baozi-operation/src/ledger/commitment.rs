@@ -1,8 +1,8 @@
 use super::evidence::StorageCandidate;
-use super::storage::DynamicStorage;
+use super::storage::{DynamicStorage, StorageOwner, StorageView};
 use super::{
     AttributionReservationBatch, Commitment, CounterClass, DestinationKind, DestinationState,
-    DimensionEntry, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose, LedgerState,
+    DimensionEntry, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose,
     PublicationDestination, release_evidence,
 };
 use crate::OperationOwner;
@@ -64,7 +64,7 @@ where
         (Vec::new(), 0)
     } else {
         StorageCandidate::<P, D, AggregatedCommitment<D>>::try_with_capacity(
-            storage,
+            StorageOwner::Dynamic(&mut *storage),
             commitments.len(),
             LedgerEvidencePurpose::Publication,
         )
@@ -143,10 +143,6 @@ pub(super) fn validate_commitments<D: Copy>(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn validate_typed_commitments<O, P, D, Destination>(
     dimensions: &[DimensionEntry<D>],
     batch: &AttributionReservationBatch<O, P, D, Destination>,
@@ -160,10 +156,6 @@ where
     validate_typed_commitment_batches(dimensions, [Some(batch)])
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn validate_typed_commitment_pair<O, P, D, Destination>(
     dimensions: &[DimensionEntry<D>],
     first: &AttributionReservationBatch<O, P, D, Destination>,
@@ -178,10 +170,6 @@ where
     validate_typed_commitment_batches(dimensions, [Some(first), Some(second)])
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn validate_typed_commitment_batches<O, P, D, Destination, const N: usize>(
     dimensions: &[DimensionEntry<D>],
     batches: [Option<&AttributionReservationBatch<O, P, D, Destination>>; N],
@@ -250,12 +238,8 @@ where
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn preflight_typed_publication_batch<O, P, D, Destination>(
-    state: &LedgerState<P, D>,
+    state: &StorageView<'_, P, D>,
     batch: &AttributionReservationBatch<O, P, D, Destination>,
 ) -> Result<(), LedgerCause<D>>
 where
@@ -271,7 +255,7 @@ where
 }
 
 pub(super) fn preflight_typed_discard_batch<O, P, D, Destination>(
-    state: &LedgerState<P, D>,
+    state: &StorageView<'_, P, D>,
     batch: &AttributionReservationBatch<O, P, D, Destination>,
 ) -> Result<(), LedgerCause<D>>
 where

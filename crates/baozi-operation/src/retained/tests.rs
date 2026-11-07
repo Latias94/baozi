@@ -674,11 +674,13 @@ fn retain_scalar_success(
     OutcomeEvidenceRetainedSlot<u64, EvidenceRootTag>,
 ) {
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(11, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical scalar must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })

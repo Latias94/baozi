@@ -48,7 +48,8 @@ fn channels(view: &WorkView<'_, u8>) -> (bool, bool, u64) {
 fn entry_checks_each_item_after_its_attempt_and_before_later_lanes() {
     let (catalog, mut work) = owner([(1, 40, 40), (2, 5, 5)]);
     let roles = work
-        .bind_layout(&catalog, [2, 1, 2, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     assert!(matches!(
@@ -73,7 +74,8 @@ fn entry_checks_each_item_after_its_attempt_and_before_later_lanes() {
 fn attempted_limit_precedes_the_same_items_limit_and_retains_rejected_attempt() {
     let (catalog, mut work) = owner([(1, 40, 40), (2, 5, 5)]);
     let roles = work
-        .bind_layout(&catalog, [2, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     assert!(matches!(
@@ -93,10 +95,12 @@ fn attempted_limit_precedes_the_same_items_limit_and_retains_rejected_attempt() 
 fn later_child_entry_failure_retains_attempted_prefix_and_the_existing_parent() {
     let (catalog, mut work) = owner([(1, 20, 20), (2, 5, 5)]);
     let parent_layout = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let child_layout = work
-        .bind_layout(&catalog, [2, 1, 2, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut parent = parent_layout
@@ -121,7 +125,8 @@ fn later_child_entry_failure_retains_attempted_prefix_and_the_existing_parent() 
 fn attempted_overflow_preserves_the_last_valid_row_and_earlier_lanes() {
     let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX), (2, u64::MAX, u64::MAX)]);
     let roles = work
-        .bind_layout(&catalog, [1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 2], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     view.rows[1].state.attempted = u64::MAX - 1;
@@ -140,7 +145,8 @@ fn attempted_overflow_preserves_the_last_valid_row_and_earlier_lanes() {
 fn item_limits_apply_to_each_original_lane_even_for_duplicate_rows() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -162,7 +168,8 @@ fn item_limits_apply_to_each_original_lane_even_for_duplicate_rows() {
 fn failing_direct_group_preserves_every_counter_and_remaining_lane() {
     let (catalog, mut work) = owner([(1, 20, 1), (2, 20, 0)]);
     let roles = work
-        .bind_layout(&catalog, [2, 1, 2], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1, 2], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -187,7 +194,8 @@ fn failing_direct_group_preserves_every_counter_and_remaining_lane() {
 fn completion_overrun_cannot_use_a_different_lanes_attempted_authority() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -209,7 +217,8 @@ fn completion_overrun_cannot_use_a_different_lanes_attempted_authority() {
 fn consumed_overflow_in_a_later_row_does_not_commit_an_earlier_row() {
     let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX), (2, u64::MAX, u64::MAX)]);
     let roles = work
-        .bind_layout(&catalog, [2, 1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([2, 1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -233,7 +242,8 @@ fn consumed_overflow_in_a_later_row_does_not_commit_an_earlier_row() {
 fn direct_completion_accounts_for_internal_pending_after_policy_tightening() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -265,7 +275,8 @@ fn direct_completion_accounts_for_internal_pending_after_policy_tightening() {
 fn read_row_completion_preserves_pending_competition_on_failure() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -300,7 +311,8 @@ fn read_row_completion_preserves_pending_competition_on_failure() {
 fn read_row_completion_checks_each_unit_and_preserves_zero_and_overrun_behavior() {
     let (catalog, mut work) = owner([(1, 20, 2)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -341,7 +353,8 @@ fn read_row_completion_checks_each_unit_and_preserves_zero_and_overrun_behavior(
 fn read_row_entry_rejects_invalid_layout_role_mode_and_frame_channel() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -391,7 +404,8 @@ fn read_row_entry_rejects_invalid_layout_role_mode_and_frame_channel() {
 fn parent_sequential_children_and_internal_shares_use_the_same_rows() {
     let (catalog, mut work) = owner([(1, 40, 40)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut parent = roles
@@ -442,7 +456,8 @@ fn parent_sequential_children_and_internal_shares_use_the_same_rows() {
 fn parser_entry_rejects_an_active_producer_before_charging() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut producer = roles
@@ -466,7 +481,8 @@ fn parser_entry_rejects_an_active_producer_before_charging() {
 fn standalone_unused_child_cannot_be_adopted_by_a_later_parent() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut child = roles
@@ -496,7 +512,8 @@ fn standalone_unused_child_cannot_be_adopted_by_a_later_parent() {
 fn parent_cannot_complete_or_replenish_while_even_an_unused_zero_child_is_open() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut parent = roles
@@ -528,7 +545,8 @@ fn parent_cannot_complete_or_replenish_while_even_an_unused_zero_child_is_open()
 fn parent_resolution_with_an_open_child_faults_and_closes_only_the_parent() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut parent = roles
@@ -560,7 +578,8 @@ fn a_fully_completed_unresolved_child_still_blocks_its_parent() {
     for amount in [0, 2] {
         let (catalog, mut work) = owner([(1, 20, 20)]);
         let roles = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut parent = roles
@@ -601,7 +620,8 @@ fn partial_resolution_preserves_prefixes_without_an_abandoned_producer_fault() {
     for channel in [ParserChannel::Parent, ParserChannel::Child] {
         let (catalog, mut work) = owner([(1, 20, 20)]);
         let roles = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = roles.begin_parser(&mut view, [4], [None], channel).unwrap();
@@ -620,7 +640,8 @@ fn partial_resolution_preserves_prefixes_without_an_abandoned_producer_fault() {
 fn partial_child_resolution_does_not_close_its_parent_or_lose_completed_prefixes() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut parent = roles
@@ -643,7 +664,8 @@ fn full_or_zero_unresolved_parser_frames_preserve_persistent_ownership() {
         for amount in [0, 2] {
             let (catalog, mut work) = owner([(1, 20, 20)]);
             let roles = work
-                .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+                .as_read(&catalog)
+                .bind_layout([1], WorkGrant::Ordinary)
                 .unwrap();
             let mut view = work.view(&catalog);
             {
@@ -672,7 +694,10 @@ fn full_or_zero_unresolved_parser_frames_preserve_persistent_ownership() {
 fn empty_parser_groups_also_require_explicit_channel_resolution() {
     for channel in [ParserChannel::Parent, ParserChannel::Child] {
         let (catalog, mut work) = owner([(1, 0, 0)]);
-        let roles = work.bind_layout(&catalog, [], WorkGrant::Ordinary).unwrap();
+        let roles = work
+            .as_read(&catalog)
+            .bind_layout([], WorkGrant::Ordinary)
+            .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = roles.begin_parser(&mut view, [], [], channel).unwrap();
         assert_eq!(frame.remaining, []);
@@ -692,7 +717,8 @@ fn empty_parser_groups_also_require_explicit_channel_resolution() {
 fn replenish_requires_the_prior_chunk_complete_and_preserves_exact_prefixes() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -720,7 +746,8 @@ fn any_original_item_limit_disallows_replenish_even_for_a_zero_next_chunk() {
     for (amount, limit) in [(0, 0), (2, 10)] {
         let (catalog, mut work) = owner([(1, 20, 20)]);
         let roles = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = roles
@@ -742,7 +769,8 @@ fn any_original_item_limit_disallows_replenish_even_for_a_zero_next_chunk() {
 fn rejected_replenish_keeps_representable_attempts_without_installing_a_new_chunk() {
     let (catalog, mut work) = owner([(1, 4, 4)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -768,7 +796,8 @@ fn rejected_replenish_keeps_representable_attempts_without_installing_a_new_chun
 fn replenish_overflow_leaves_the_last_representable_counter_unchanged() {
     let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX)]);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles
@@ -797,7 +826,8 @@ fn layout_validation_rejects_nonordinary_modes_before_zero_work() {
     ] {
         let (catalog, mut work) = owner([(1, 20, 20)]);
         let roles = work
-            .bind_layout(&catalog, [1], WorkGrant::Ordinary)
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
             .unwrap();
         let mut view = work.view(&catalog);
         let mut frame = roles
@@ -823,7 +853,8 @@ fn protected_grant_cannot_open_parser_channels() {
     work.header.mode = WorkMode::Protected;
     work.header.protected_dimension = Some(0);
     let roles = work
-        .bind_layout(&catalog, [1], WorkGrant::Protected)
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Protected)
         .unwrap();
     let mut view = work.view(&catalog);
     roles.validate_active(&view).unwrap();
@@ -843,7 +874,8 @@ fn protected_grant_cannot_open_parser_channels() {
 fn layout_validation_rechecks_the_bound_role_before_zero_work() {
     let (catalog, mut work) = owner([(10, 20, 20), (30, 20, 20), (90, 20, 20)]);
     let roles = work
-        .bind_layout(&catalog, [90], WorkGrant::Ordinary)
+        .as_read(&catalog)
+        .bind_layout([90], WorkGrant::Ordinary)
         .unwrap();
     let mut view = work.view(&catalog);
     let mut frame = roles

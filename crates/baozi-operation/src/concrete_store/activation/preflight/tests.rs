@@ -229,6 +229,7 @@ fn exact_transfer_preserves_work_and_qualifies_four_real_evidence_members() {
     {
         let mut parts = operation
             .raw
+            .loan_mut()
             .exclusive_parts()
             .unwrap_or_else(|_| panic!("the original operation lends its numeric work"));
         let layout = parts.work.bind([keys.work]).unwrap();
@@ -249,7 +250,7 @@ fn exact_transfer_preserves_work_and_qualifies_four_real_evidence_members() {
         .unwrap();
     assert_eq!(counters(&mut operation, keys), before);
     assert_eq!(
-        operation.raw.failure_terminal_work_limits(),
+        operation.raw.loan().failure_terminal_work_limits(),
         Some((4, 5, 31))
     );
     let RetainedStoreSessionOutcomeOwner {
@@ -335,7 +336,7 @@ fn insufficient_unused_work_preserves_startup_guarantee_and_fallback() {
     ));
     assert_eq!(counters(&mut operation, keys), before);
     assert_eq!(
-        operation.raw.failure_terminal_work_limits(),
+        operation.raw.loan().failure_terminal_work_limits(),
         Some((2, 5, 5))
     );
     let published = operation.prepare_minimal_fallback(7).unwrap().handoff();
@@ -357,7 +358,7 @@ fn qualification_is_one_time_and_cannot_reduce_startup_guarantees() {
         .qualify_failure_validation_work(keys.work, 1, 1)
         .unwrap();
     assert_eq!(
-        operation.raw.failure_terminal_work_limits(),
+        operation.raw.loan().failure_terminal_work_limits(),
         Some((2, 5, 5))
     );
     let before = counters(&mut operation, keys);
@@ -367,7 +368,7 @@ fn qualification_is_one_time_and_cannot_reduce_startup_guarantees() {
     ));
     assert_eq!(counters(&mut operation, keys), before);
     assert_eq!(
-        operation.raw.failure_terminal_work_limits(),
+        operation.raw.loan().failure_terminal_work_limits(),
         Some((2, 5, 5))
     );
     drop(operation.prepare_minimal_fallback(7).unwrap());
@@ -387,7 +388,7 @@ fn unrepresentable_qualification_preserves_counters_and_fallback() {
         ));
         assert_eq!(counters(&mut operation, keys), before);
         assert_eq!(
-            operation.raw.failure_terminal_work_limits(),
+            operation.raw.loan().failure_terminal_work_limits(),
             Some((2, 5, 5))
         );
         drop(operation.prepare_minimal_fallback(7).unwrap());
@@ -423,7 +424,7 @@ fn cancellation_before_qualification_retains_startup_fallback() {
     ));
     assert_eq!(counters(&mut operation, keys), before);
     assert_eq!(
-        operation.raw.failure_terminal_work_limits(),
+        operation.raw.loan().failure_terminal_work_limits(),
         Some((2, 5, 5))
     );
     let published = operation.prepare_minimal_fallback(7).unwrap().handoff();
@@ -455,7 +456,7 @@ fn poison_is_checked_before_qualification_poll_or_policy_changes() {
     assert_eq!(account.snapshot(), before);
     assert_eq!(polls.load(Ordering::Relaxed), before_polls);
     assert_eq!(
-        operation.raw.failure_terminal_work_limits(),
+        operation.raw.loan().failure_terminal_work_limits(),
         Some((2, 5, 5))
     );
 }
@@ -1420,13 +1421,15 @@ fn semantic_callback_body_and_capture_panics_preserve_the_actual_completed_prefi
                         _ => panic!("unexpected semantic callback result"),
                     }
                     assert!(dropped.get());
-                    let ScopedActivationState::Dormant(dormant) = &mut planning.driver.state else {
+                    let ScopedActivationState::Dormant { operation, .. } =
+                        &mut planning.driver.state
+                    else {
                         panic!("semantic callback must retain the actual dormant owner");
                     };
-                    let state = dormant
-                        .operation_mut()
+                    let state = operation
+                        .raw
                         .producer_host()
-                        .dimension_state(keys.work)
+                        .dimension_evidence(keys.work)
                         .unwrap();
                     assert_eq!(
                         (state.attempted(), state.consumed()),
@@ -1528,13 +1531,14 @@ fn semantic_success_finish_failure_contains_panicking_returned_value() {
                     planning.driver.semantic_state,
                     ScopedSemanticState::Rejected
                 ));
-                let ScopedActivationState::Dormant(dormant) = &mut planning.driver.state else {
+                let ScopedActivationState::Dormant { operation, .. } = &mut planning.driver.state
+                else {
                     panic!("semantic finish failure must retain its dormant owner");
                 };
-                let state = dormant
-                    .operation_mut()
+                let state = operation
+                    .raw
                     .producer_host()
-                    .dimension_state(keys.work)
+                    .dimension_evidence(keys.work)
                     .unwrap();
                 assert_eq!(
                     (state.attempted(), state.consumed()),
@@ -1623,13 +1627,15 @@ fn semantic_domain_owner_survives_rejection_finish_control_failure() {
                         planning.driver.semantic_state,
                         ScopedSemanticState::Rejected
                     ));
-                    let ScopedActivationState::Dormant(dormant) = &mut planning.driver.state else {
+                    let ScopedActivationState::Dormant { operation, .. } =
+                        &mut planning.driver.state
+                    else {
                         panic!("domain rejection must retain its dormant owner");
                     };
-                    let state = dormant
-                        .operation_mut()
+                    let state = operation
+                        .raw
                         .producer_host()
-                        .dimension_state(keys.work)
+                        .dimension_evidence(keys.work)
                         .unwrap();
                     assert_eq!(
                         (state.attempted(), state.consumed()),
@@ -1777,13 +1783,15 @@ fn semantic_capture_drop_failure_disposes_returned_rejection_once() {
                         planning.driver.semantic_state,
                         ScopedSemanticState::Rejected
                     ));
-                    let ScopedActivationState::Dormant(dormant) = &mut planning.driver.state else {
+                    let ScopedActivationState::Dormant { operation, .. } =
+                        &mut planning.driver.state
+                    else {
                         panic!("capture cleanup failure must retain its dormant owner");
                     };
-                    let state = dormant
-                        .operation_mut()
+                    let state = operation
+                        .raw
                         .producer_host()
-                        .dimension_state(keys.work)
+                        .dimension_evidence(keys.work)
                         .unwrap();
                     assert_eq!(
                         (state.attempted(), state.consumed()),

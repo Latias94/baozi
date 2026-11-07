@@ -19,6 +19,9 @@ use crate::retained::{
     PublishedFallbackOutput, PublishedLedgerEvidence, PublishedOutcomeEvidenceOutput,
     PublishedRichFailureOutput, RetainedLookupMember, TerminalEvidenceCause,
 };
+
+pub(super) mod finite;
+
 pub(super) type RawPreparedStore = PreparedRetainedPublication<
     StoredBlock,
     StoredBlock,

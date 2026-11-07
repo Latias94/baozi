@@ -20,6 +20,9 @@ pub(crate) use terminal::panic_next_canonical_primary_bind;
 mod final_owner;
 pub(crate) mod operation;
 mod operation_start;
+mod ordinary;
+pub(crate) use operation::{RetainedAssemblyOpened, RetainedPublicationBorrowFailure};
+pub(crate) use ordinary::{RetainedAssemblyDecision, RetainedPublicationAssemblyBorrow};
 mod ownership;
 mod physical;
 mod publication_contract;
@@ -27,10 +30,19 @@ mod range;
 mod startup;
 mod terminal;
 mod terminal_failure;
+mod terminal_finite;
+pub(crate) use terminal_finite::{
+    FiniteRetainedOutput, FiniteRetainedOutputPayload, PreparedFiniteRetainedPublication,
+};
 mod terminal_loan;
 mod terminal_output;
+mod terminal_owned;
+mod terminal_physical;
+pub(crate) use terminal_owned::DeferredAttachedTerminal;
+use terminal_owned::{DynamicTerminalCapsule, TerminalDisposition};
 
 use operation::TerminalInvocationLoan;
+pub(crate) use operation::{AttachedTerminalDecision, AttachedTerminalStamp};
 pub(crate) use operation::{DeferredUnattachedBinding, InvocationRoot, PendingRetainedAttachment};
 
 #[cfg(test)]
@@ -42,9 +54,9 @@ use crate::ledger::CommitmentPairPushError;
 use crate::ledger::{AttributionBatchCreateError, LedgerLimits};
 use crate::ledger::{
     AttributionReservationBatch, CanonicalOutput, CommitmentPushError, DimensionSnapshot,
-    FallbackBatchBaseline, FreezeReadyTypedProof, Ledger, LedgerCause, OutcomeEvidenceDestination,
-    OutputCommitment, PhaseSnapshot, QualifiedBothDiscardFreezeProof,
-    QualifiedEvidenceDiscardFreezeProof, QualifiedTypedDiscardFreezeProof,
+    FreezeReadyTypedProof, Ledger, LedgerCause, OutcomeEvidenceDestination, OutputCommitment,
+    PhaseSnapshot, QualifiedBothDiscardFreezeProof, QualifiedEvidenceDiscardFreezeProof,
+    QualifiedTypedDiscardFreezeProof,
 };
 use crate::{ControlCause, OperationOwner, ProgressPhase, ProgressUnit};
 pub use account::{
@@ -210,14 +222,13 @@ use terminal::{
     BorrowedDetachedTerminalEvidenceQualification, BorrowedFreezeReadyDetachedTerminalEvidence,
     BorrowedQualifiedDetachedTerminalEvidence, EvidenceOnlySuccessPrimaryTransition,
     FreezeReadyDetachedTerminalEvidence, PrimaryPublicationBatches, TerminalFallbackAttribution,
-    TerminalFallbackGuard, TerminalPhysicalOwnershipManifest, TerminalPreFreezeTransition,
-    TerminalPrimaryGuard, drop_retained_table_with_account_anchor,
-    terminal_evidence_catalog_is_qualified,
+    TerminalFallbackGuard, TerminalPreFreezeTransition, TerminalPrimaryGuard,
+    drop_retained_table_with_account_anchor, terminal_evidence_catalog_is_qualified,
 };
 use terminal_failure::{TerminalMinimalFreezeGuard, TerminalRichFreezeGuard};
 use terminal_loan::{
     BorrowedExactPreDiscardSuccess, BorrowedTerminalPhysicalOwnershipManifest, TerminalAccountLoan,
-    TerminalPartLoan, TerminalPhysicalState, TerminalTableLoan,
+    TerminalPartLoan, TerminalTableLoan,
 };
 use terminal_output::RetainedPublicationPayload;
 #[allow(
@@ -232,6 +243,7 @@ pub(crate) use terminal_output::{
     PublishedRetainedEvidenceOnlySuccessParts, PublishedRetainedFallbackParts,
     PublishedRetainedRichFailureParts, PublishedRetainedSuccessParts, PublishedRichFailureOutput,
 };
+use terminal_physical::{FiniteTerminalPhysicalState, TerminalPhysicalState};
 use triomphe::{Arc, UniqueArc};
 
 #[cfg(test)]
@@ -246,16 +258,16 @@ pub(crate) use operation::{
     checked_action_debt, poll_execution, record_terminal_cause_with_precedence,
 };
 pub(crate) use operation::{
-    RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkBinding,
-    RetainedWorkControl, RetainedWorkRoot,
+    RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation,
+    RetainedOperationLoan, RetainedWorkBinding, RetainedWorkControl, RetainedWorkRoot,
 };
 pub(crate) use operation_start::AdmittedShareWork;
 #[cfg(test)]
 use operation_start::map_qualified_startup_batch_error;
 pub(crate) use operation_start::{
-    RetainedBatchLimits, RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan,
-    RetainedOperationStartError, RetainedOperationStartPlan, RetainedWriterError,
-    RetainedWriterPlan,
+    FiniteRetainedOperationStartPlan, RetainedBatchLimits, RetainedFailureTerminalWorkPlan,
+    RetainedHandleSharePlan, RetainedOperationStartError, RetainedOperationStartPlan,
+    RetainedWriterError, RetainedWriterPlan,
 };
 use operation_start::{
     StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
@@ -266,13 +278,13 @@ use publication_contract::RetainedPublicationOpenDisposition;
 pub(super) use publication_contract::retained_publication_error_requires_containment;
 use publication_contract::{
     AssemblyContainmentProvenance, RetainedClosureValidationError, RetainedDeferredStage,
-    RetainedEvidenceClosureProof, RetainedOutcomeMode, RetainedSuccessClosureProof,
-    RetainedTerminalMode, RetainedTerminalRequest, map_commitment_push_error,
+    RetainedOutcomeMode, RetainedTerminalMode, map_commitment_push_error,
     retained_publication_error_containment,
 };
 pub(crate) use publication_contract::{
-    RetainedPublicationError, RetainedPublicationOpenError, RetainedPublicationOpenRecovery,
-    RetainedPublicationPlan,
+    RetainedEvidenceClosureProof, RetainedPublicationError, RetainedPublicationOpenError,
+    RetainedPublicationOpenRecovery, RetainedPublicationPlan, RetainedSuccessClosureProof,
+    RetainedTerminalRequest,
 };
 use range::{CanonicalBatchPreflightContext, try_preflight_canonical_batch};
 pub(crate) use range::{
@@ -369,8 +381,65 @@ where
 pub(super) type PublicationAssemblySlot<O, P, D, CanonicalBlock, EvidenceBlock> =
     Option<PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock>>;
 
+/// A movable short loan, drained when the terminal classifier lends the original batch slots.
+struct PublicationAssemblyLoan<'inv, O, P, D, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fields: Option<&'inv mut PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock>>,
+}
+
+impl<'inv, O: OperationOwner, P: Copy + Ord, D: Copy + Ord, CanonicalBlock, EvidenceBlock>
+    PublicationAssemblyLoan<'inv, O, P, D, CanonicalBlock, EvidenceBlock>
+{
+    fn take(
+        &mut self,
+    ) -> &'inv mut PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock> {
+        self.fields
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+    }
+}
+
+impl<'inv, O: OperationOwner, P: Copy + Ord, D: Copy + Ord, CanonicalBlock, EvidenceBlock>
+    From<&'inv mut PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock>>
+    for PublicationAssemblyLoan<'inv, O, P, D, CanonicalBlock, EvidenceBlock>
+{
+    fn from(
+        fields: &'inv mut PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock>,
+    ) -> Self {
+        Self {
+            fields: Some(fields),
+        }
+    }
+}
+
+impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord, CanonicalBlock, EvidenceBlock> std::ops::Deref
+    for PublicationAssemblyLoan<'_, O, P, D, CanonicalBlock, EvidenceBlock>
+{
+    type Target = PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock>;
+
+    fn deref(&self) -> &Self::Target {
+        self.fields
+            .as_deref()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+    }
+}
+
+impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord, CanonicalBlock, EvidenceBlock>
+    std::ops::DerefMut for PublicationAssemblyLoan<'_, O, P, D, CanonicalBlock, EvidenceBlock>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.fields
+            .as_deref_mut()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+    }
+}
+
 type RetainedOperationSlot<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> =
-    Option<RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>>;
+    Option<RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>>;
 
 impl<O, P, D, CanonicalBlock, EvidenceBlock>
     PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock>
@@ -385,6 +454,11 @@ where
             && self.canonical_batch.is_none()
             && self.evidence_batch.is_none()
             && self.account.is_none()
+    }
+
+    fn retain_batches_fail_closed(&mut self) {
+        std::mem::forget(self.canonical_batch.take());
+        std::mem::forget(self.evidence_batch.take());
     }
 
     fn has_deferred_storage(&self) -> bool {
@@ -428,13 +502,93 @@ pub(crate) struct RetainedPublicationAssembly<
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    fields: &'inv mut PublicationAssemblyFields<O, P, D, CanonicalBlock, EvidenceBlock>,
+    pub(super) loan:
+        RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+}
+
+pub(crate) struct RetainedPublicationAssemblyLoan<
+    'inv,
+    O,
+    P,
+    PP,
+    U,
+    D,
+    F,
+    CanonicalBlock,
+    EvidenceBlock,
+> where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    fields: PublicationAssemblyLoan<'inv, O, P, D, CanonicalBlock, EvidenceBlock>,
     // Only a short permission; all physical state is retained in the outer root.
     operation: RetainedOperationSlot<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
 }
 
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
     RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub(crate) fn loan(
+        &self,
+    ) -> &RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    {
+        &self.loan
+    }
+
+    pub(crate) fn loan_mut(
+        &mut self,
+    ) -> &mut RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    {
+        &mut self.loan
+    }
+
+    pub(in crate::retained) fn into_loan(
+        self,
+    ) -> RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    {
+        self.loan
+    }
+
+    pub(in crate::retained) fn from_loan(
+        loan: RetainedPublicationAssemblyLoan<
+            'inv,
+            O,
+            P,
+            PP,
+            U,
+            D,
+            F,
+            CanonicalBlock,
+            EvidenceBlock,
+        >,
+    ) -> Self {
+        Self { loan }
+    }
+
+    pub(crate) fn defer_until_body_cleanup(self) -> Result<(), Self> {
+        self.loan
+            .defer_until_body_cleanup()
+            .map_err(Self::from_loan)
+    }
+}
+
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -466,7 +620,7 @@ where
             .operation
             .as_mut()
             .expect("a prepared body deferral retains its operation loan");
-        operation.retained.deferred_stage = Some(stage);
+        operation.retained.metadata.deferred_stage = Some(stage);
         self.operation = None;
         std::mem::forget(self);
     }
@@ -486,7 +640,7 @@ where
     pub(crate) fn storage_operation(
         &mut self,
     ) -> Result<
-        &mut RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
+        &mut RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationError<D>,
     >
     where
@@ -541,8 +695,9 @@ where
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .common
+            .view()
             .coordinator
-            .split_exclusive_progress_and_ledger();
+            .into_exclusive_progress_and_ledger();
         let admitted = operation_start::try_admit_borrowed_retained_share_work(
             ledger,
             self.fields.ordinary_handle_share_work,
@@ -604,28 +759,51 @@ where
         }
     }
 
-    fn into_fallback_only(
-        mut self,
+    fn fallback_only<Proof>(
+        &mut self,
         cause: PreparationFailureCode,
-    ) -> RetainedFallbackOnly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> RetainedClosureValidation<Proof> {
         self.record_terminal_cause(cause);
-        RetainedFallbackOnly {
-            assembly: self,
+        RetainedClosureValidation::FallbackOnly {
             cause,
             activation_containment_required: false,
         }
     }
 
-    fn into_closure_validation_fallback(
-        self,
+    fn closure_validation_fallback<Proof>(
+        &mut self,
         cause: RetainedClosureValidationError,
-    ) -> RetainedFallbackOnly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> RetainedClosureValidation<Proof> {
         let activation_containment_required = cause != RetainedClosureValidationError::Panicked;
-        let mut fallback =
-            self.into_fallback_only(PreparationFailureCode::from_closure_validation(cause));
-        fallback.activation_containment_required = activation_containment_required;
-        fallback
+        let cause = PreparationFailureCode::from_closure_validation(cause);
+        self.record_terminal_cause(cause);
+        RetainedClosureValidation::FallbackOnly {
+            cause,
+            activation_containment_required,
+        }
     }
+}
+
+pub(crate) enum RetainedClosureValidation<Proof> {
+    Valid(Proof),
+    Rejected {
+        cause: PreparationFailureCode,
+    },
+    FallbackOnly {
+        cause: PreparationFailureCode,
+        activation_containment_required: bool,
+    },
+}
+
+pub(crate) enum RetainedSuccessFreezeDecision {
+    Ready,
+    RichFailure {
+        cause: PreparationFailureCode,
+        control_cause: Option<ControlCause>,
+    },
+    DestinationRejected {
+        cause: PreparationFailureCode,
+    },
 }
 
 const FAILURE_TERMINAL_WORK_SEALED_CODE: u32 = 0x4654_5753;
@@ -829,22 +1007,21 @@ where
         self.state.contain_activation_fault()
     }
 
-    pub(crate) fn finish_success(
-        self,
-    ) -> Result<
-        RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedPublicationPrepareError,
-    > {
-        self.state.finish_success(self.set_id)
+    pub(crate) fn require_success(self) -> Result<Self, RetainedPublicationPrepareError> {
+        if matches!(&self.state, TerminalPreFreezeTransition::Success { .. }) {
+            Ok(self)
+        } else {
+            Err(RetainedPublicationPrepareError::FinalizationContainment(
+                self.contain_activation_fault(),
+            ))
+        }
     }
 
-    pub(crate) fn finish(
+    pub(crate) fn finish_deferred(
         self,
-    ) -> Result<
-        RetainedJointCommitFormationWithControl<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedPublicationPrepareError,
-    > {
-        Ok((self.state.finish(self.set_id)?, self.control_cause))
+    ) -> Result<(DeferredAttachedTerminal, Option<ControlCause>), RetainedPublicationPrepareError>
+    {
+        Ok((self.state.finish_deferred(self.set_id)?, self.control_cause))
     }
 }
 
@@ -890,25 +1067,29 @@ where
     EvidenceBlock: Send + Sync + 'static,
 {
     pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
-        if !matches!(self.assembly.prepare_body_deferral(), Some(Ok(()))) {
+        if !matches!(self.assembly.loan.prepare_body_deferral(), Some(Ok(()))) {
             return Err(self);
         }
         let Self {
             assembly,
             fallback_cause,
         } = self;
-        assembly.install_deferred_stage(RetainedDeferredStage::Failure { fallback_cause });
+        assembly
+            .loan
+            .install_deferred_stage(RetainedDeferredStage::Failure { fallback_cause });
         Ok(())
     }
 
     pub(crate) fn with_fallback_cause(mut self, cause: PreparationFailureCode) -> Self {
-        self.assembly.record_terminal_cause(cause);
+        self.assembly.loan.record_terminal_cause(cause);
         self.fallback_cause = cause;
         self
     }
 
     pub(crate) fn reject_failure_terminal_work_envelope(&mut self, code: u32) {
-        self.assembly.reject_failure_terminal_work_envelope(code);
+        self.assembly
+            .loan
+            .reject_failure_terminal_work_envelope(code);
     }
 }
 
@@ -986,6 +1167,23 @@ where
 #[allow(clippy::result_large_err)]
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
     RetainedOperation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
+        self.into_loan().contain_activation_fault()
+    }
+}
+
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedOperationLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: TerminalEvidenceKey,
@@ -1079,7 +1277,7 @@ type RetainedFailureAssemblyResult<'inv, O, P, PP, U, D, F, CanonicalBlock, Evid
 
 #[allow(clippy::result_large_err)]
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: TerminalEvidenceKey,
@@ -1090,7 +1288,7 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    pub(crate) fn contain_activation_fault(mut self) -> FinalizationContainmentError {
+    pub(crate) fn contain_activation_fault(&mut self) -> FinalizationContainmentError {
         let recorded = self
             .first_containment_account()
             .map(PhysicalStorageAccount::snapshot)
@@ -1106,15 +1304,10 @@ where
         }
     }
 
-    /// Consumes a success-capable assembly and eagerly removes every canonical physical owner.
-    ///
-    /// Storage is released before its attribution batch. Only a verified evidence-only graph can
-    /// be returned; any uncertain release poisons the account and retains all remaining authority
-    /// fail-closed.
     pub(crate) fn try_discard_canonical_for_rejection(
-        mut self,
+        &mut self,
         fallback_cause: PreparationFailureCode,
-    ) -> RetainedFailureAssemblyResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> Result<(), FinalizationContainmentError> {
         if self.fields.mode != RetainedOutcomeMode::SuccessCapable
             || !self.has_exact_storage_graph()
         {
@@ -1125,18 +1318,15 @@ where
         self.activate_failure_terminal_work();
         self.try_discard_canonical_ownership()?;
 
-        Ok(RetainedFailureAssembly {
-            assembly: self,
-            fallback_cause,
-        })
+        Ok(())
     }
 
     /// Converts an already-open evidence-only publication into its rooted-failure construction
     /// state without ever creating canonical ownership.
-    pub(crate) fn into_verified_failure_only(
-        mut self,
+    fn verify_failure_only(
+        &mut self,
         fallback_cause: PreparationFailureCode,
-    ) -> RetainedFailureAssemblyResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> Result<(), FinalizationContainmentError> {
         if self.fields.mode != RetainedOutcomeMode::FailureOnly
             || !self.fields.success_outcome_rejected
             || !self.has_exact_storage_graph()
@@ -1146,10 +1336,7 @@ where
             return Err(cause);
         }
         self.record_terminal_cause(fallback_cause);
-        Ok(RetainedFailureAssembly {
-            assembly: self,
-            fallback_cause,
-        })
+        Ok(())
     }
 
     fn try_discard_canonical_ownership(&mut self) -> Result<(), FinalizationContainmentError> {
@@ -1165,7 +1352,8 @@ where
             return Err(cause);
         }
 
-        let account = match self.fields.account.as_ref() {
+        let fields = &mut *self.fields;
+        let account = match fields.account.as_ref() {
             Some(account) => account,
             None => {
                 let cause =
@@ -1173,7 +1361,7 @@ where
                 return Err(cause);
             }
         };
-        let canonical = match self.fields.canonical_table.take() {
+        let canonical = match fields.canonical_table.take() {
             Some(canonical) => canonical,
             None => {
                 let cause =
@@ -1513,14 +1701,8 @@ where
         })
     }
 
-    /// Borrows the complete candidate graph for validation and consumes the writable assembly.
-    ///
-    /// A semantic rejection returns an evidence-only builder so callers may append bounded failure
-    /// details and validate a rich failure. Invalid identity, poisoned state, and panic can only
-    /// proceed to the pre-admitted minimal fallback. A valid result owns the private closure proof
-    /// and exposes no mutation method, eliminating proof/mutation TOCTOU.
-    pub fn validate_success<CanonicalTag, EvidenceTag>(
-        mut self,
+    fn validate_success<CanonicalTag, EvidenceTag>(
+        &mut self,
         canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
         evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
         validate: impl for<'a> FnOnce(
@@ -1528,7 +1710,7 @@ where
             CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
             OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
         ) -> bool,
-    ) -> RetainedSuccessValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    ) -> RetainedClosureValidation<RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>>
     where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
@@ -1538,39 +1720,32 @@ where
             let cause = self.terminal_cause_or(PreparationFailureCode::product_graph(
                 FAILURE_TERMINAL_WORK_SEALED_CODE,
             ));
-            return RetainedSuccessValidation::FallbackOnly(self.into_fallback_only(cause));
+            return self.fallback_only(cause);
         }
         if self.fields.success_outcome_rejected {
             let fallback_cause = self.terminal_cause_or(PreparationFailureCode::requested());
-            return RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
-                assembly: self,
-                fallback_cause,
-            });
+            return RetainedClosureValidation::Rejected {
+                cause: fallback_cause,
+            };
         }
         match self.try_validate_success(canonical_root, evidence_root, validate) {
-            Ok(proof) => RetainedSuccessValidation::Valid(ValidatedRetainedSuccess {
-                assembly: self,
-                proof,
-            }),
+            Ok(proof) => RetainedClosureValidation::Valid(proof),
             Err(RetainedClosureValidationError::Rejected) => {
                 self.activate_failure_terminal_work();
-                RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
-                    assembly: self,
-                    fallback_cause: PreparationFailureCode::from_closure_validation(
+                RetainedClosureValidation::Rejected {
+                    cause: PreparationFailureCode::from_closure_validation(
                         RetainedClosureValidationError::Rejected,
                     ),
-                })
+                }
             }
-            Err(cause) => RetainedSuccessValidation::FallbackOnly(
-                self.into_closure_validation_fallback(cause),
-            ),
+            Err(cause) => self.closure_validation_fallback(cause),
         }
     }
 
     /// Validates a success graph while lending poll and prebound observed-work authority to the
     /// validator inside the existing panic boundary.
-    pub(crate) fn validate_success_controlled<CanonicalTag, EvidenceTag>(
-        mut self,
+    fn validate_success_controlled<CanonicalTag, EvidenceTag>(
+        &mut self,
         work_dimension: D,
         scratch_dimension: D,
         canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
@@ -1581,7 +1756,7 @@ where
             OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
             RetainedWorkControl<'control, O, P, PP, U, D>,
         ) -> bool,
-    ) -> RetainedSuccessValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    ) -> RetainedClosureValidation<RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>>
     where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
@@ -1591,14 +1766,13 @@ where
             let cause = self.terminal_cause_or(PreparationFailureCode::product_graph(
                 FAILURE_TERMINAL_WORK_SEALED_CODE,
             ));
-            return RetainedSuccessValidation::FallbackOnly(self.into_fallback_only(cause));
+            return self.fallback_only(cause);
         }
         if self.fields.success_outcome_rejected {
             let fallback_cause = self.terminal_cause_or(PreparationFailureCode::requested());
-            return RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
-                assembly: self,
-                fallback_cause,
-            });
+            return RetainedClosureValidation::Rejected {
+                cause: fallback_cause,
+            };
         }
         let validation = if self.fields.containment != AssemblyContainmentProvenance::Healthy {
             Err(RetainedClosureValidationError::Poisoned)
@@ -1608,13 +1782,11 @@ where
             let validation_storage_baseline = self
                 .operation
                 .as_ref()
-                .map(RetainedOperation::planning_baseline);
+                .map(RetainedOperationLoan::planning_baseline);
             let epoch = match self.try_next_validation_epoch() {
                 Ok(epoch) => epoch,
                 Err(cause) => {
-                    return RetainedSuccessValidation::FallbackOnly(
-                        self.into_closure_validation_fallback(cause),
-                    );
+                    return self.closure_validation_fallback(cause);
                 }
             };
             let control = match self.operation.as_mut() {
@@ -1668,10 +1840,8 @@ where
                             Ok(accepted) => accepted,
                             Err(payload) => {
                                 discard_untrusted_panic_payload(payload);
-                                return RetainedSuccessValidation::FallbackOnly(
-                                    self.into_closure_validation_fallback(
-                                        RetainedClosureValidationError::Panicked,
-                                    ),
+                                return self.closure_validation_fallback(
+                                    RetainedClosureValidationError::Panicked,
                                 );
                             }
                         };
@@ -1719,80 +1889,65 @@ where
             }
         };
         match validation {
-            Ok(proof) => RetainedSuccessValidation::Valid(ValidatedRetainedSuccess {
-                assembly: self,
-                proof,
-            }),
+            Ok(proof) => RetainedClosureValidation::Valid(proof),
             Err(RetainedClosureValidationError::Rejected) => {
                 self.activate_failure_terminal_work();
                 let fallback_cause =
                     self.terminal_cause_or(PreparationFailureCode::from_closure_validation(
                         RetainedClosureValidationError::Rejected,
                     ));
-                RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
-                    assembly: self,
-                    fallback_cause,
-                })
+                RetainedClosureValidation::Rejected {
+                    cause: fallback_cause,
+                }
             }
-            Err(cause) => RetainedSuccessValidation::FallbackOnly(
-                self.into_closure_validation_fallback(cause),
-            ),
+            Err(cause) => self.closure_validation_fallback(cause),
         }
     }
 
-    /// Borrows an evidence graph for validation and consumes the writable assembly.
-    pub fn validate_rich_failure<EvidenceTag>(
-        mut self,
+    fn validate_rich_failure<EvidenceTag>(
+        &mut self,
         evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
         validate: impl for<'a> FnOnce(
             &mut RetainedEvidenceClosureSession<'a, EvidenceBlock>,
             OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
         ) -> bool,
-    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    ) -> RetainedClosureValidation<RetainedEvidenceClosureProof<EvidenceBlock>>
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
         self.activate_failure_terminal_work();
         if self.fields.failure_terminal_work_state == FailureTerminalWorkState::Failed {
-            return RetainedFailureValidation::FallbackOnly(self.into_fallback_only(
-                PreparationFailureCode::product_graph(FAILURE_TERMINAL_WORK_SEALED_CODE),
+            return self.fallback_only(PreparationFailureCode::product_graph(
+                FAILURE_TERMINAL_WORK_SEALED_CODE,
             ));
         }
         match self.try_validate_rich_failure(evidence_root, validate) {
-            Ok(proof) => RetainedFailureValidation::Valid(ValidatedRetainedFailure {
-                assembly: self,
-                proof,
-            }),
-            Err(RetainedClosureValidationError::Rejected) => {
-                RetainedFailureValidation::Rejected(RetainedFailureAssembly {
-                    assembly: self,
-                    fallback_cause: PreparationFailureCode::from_closure_validation(
-                        RetainedClosureValidationError::Rejected,
-                    ),
-                })
-            }
-            Err(cause) => RetainedFailureValidation::FallbackOnly(
-                self.into_closure_validation_fallback(cause),
-            ),
+            Ok(proof) => RetainedClosureValidation::Valid(proof),
+            Err(RetainedClosureValidationError::Rejected) => RetainedClosureValidation::Rejected {
+                cause: PreparationFailureCode::from_closure_validation(
+                    RetainedClosureValidationError::Rejected,
+                ),
+            },
+            Err(cause) => self.closure_validation_fallback(cause),
         }
     }
 
-    pub(crate) fn validate_rich_failure_controlled<EvidenceTag>(
-        mut self,
+    fn validate_rich_failure_controlled<EvidenceTag>(
+        &mut self,
         evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
         validate: impl for<'session, 'control> FnOnce(
             &mut RetainedEvidenceClosureSession<'session, EvidenceBlock>,
             OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
             RetainedFailureWorkControl<'control, O, P, PP, U, D>,
         ) -> bool,
-    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    ) -> RetainedClosureValidation<RetainedEvidenceClosureProof<EvidenceBlock>>
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
         self.activate_failure_terminal_work();
         if self.fields.failure_terminal_work_state == FailureTerminalWorkState::Failed {
-            return RetainedFailureValidation::FallbackOnly(self.into_fallback_only(
-                PreparationFailureCode::product_graph(FAILURE_TERMINAL_WORK_SEALED_CODE),
+            return self.fallback_only(PreparationFailureCode::product_graph(
+                FAILURE_TERMINAL_WORK_SEALED_CODE,
             ));
         }
         let validation = if self.fields.containment != AssemblyContainmentProvenance::Healthy {
@@ -1801,9 +1956,7 @@ where
             let epoch = match self.try_next_validation_epoch() {
                 Ok(epoch) => epoch,
                 Err(cause) => {
-                    return RetainedFailureValidation::FallbackOnly(
-                        self.into_closure_validation_fallback(cause),
-                    );
+                    return self.closure_validation_fallback(cause);
                 }
             };
             let work = self.fields.failure_evidence_handle_share_work;
@@ -1847,10 +2000,8 @@ where
                             Ok(accepted) => accepted,
                             Err(payload) => {
                                 discard_untrusted_panic_payload(payload);
-                                return RetainedFailureValidation::FallbackOnly(
-                                    self.into_closure_validation_fallback(
-                                        RetainedClosureValidationError::Panicked,
-                                    ),
+                                return self.closure_validation_fallback(
+                                    RetainedClosureValidationError::Panicked,
                                 );
                             }
                         };
@@ -1872,21 +2023,13 @@ where
             }
         };
         match validation {
-            Ok(proof) => RetainedFailureValidation::Valid(ValidatedRetainedFailure {
-                assembly: self,
-                proof,
-            }),
-            Err(RetainedClosureValidationError::Rejected) => {
-                RetainedFailureValidation::Rejected(RetainedFailureAssembly {
-                    assembly: self,
-                    fallback_cause: PreparationFailureCode::from_closure_validation(
-                        RetainedClosureValidationError::Rejected,
-                    ),
-                })
-            }
-            Err(cause) => RetainedFailureValidation::FallbackOnly(
-                self.into_closure_validation_fallback(cause),
-            ),
+            Ok(proof) => RetainedClosureValidation::Valid(proof),
+            Err(RetainedClosureValidationError::Rejected) => RetainedClosureValidation::Rejected {
+                cause: PreparationFailureCode::from_closure_validation(
+                    RetainedClosureValidationError::Rejected,
+                ),
+            },
+            Err(cause) => self.closure_validation_fallback(cause),
         }
     }
 
@@ -1980,20 +2123,21 @@ where
                 RetainedPublicationError::Poisoned,
             ))?
             .split_work_control(work_dimension);
+        let fields = &mut *self.fields;
         let result = try_bind_canonical_source_mapping(
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(CanonicalSourceBindError::Publication(
                     RetainedPublicationError::Poisoned,
                 ))?,
-            self.fields
+            fields
                 .canonical_table
                 .as_mut()
                 .ok_or(CanonicalSourceBindError::Publication(
                     RetainedPublicationError::WrongOutcomeMode,
                 ))?,
-            self.fields.set_id,
+            fields.set_id,
             source,
             control,
             &mut root,
@@ -2033,21 +2177,23 @@ where
                 RetainedPublicationError::Poisoned,
             ))?
             .split_work_control(work_dimension);
+        let fields = &mut *self.fields;
         let result = try_inherit_all_canonical_leaves(
             &mut root,
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(CanonicalLeafInheritanceError::Publication(
                     RetainedPublicationError::Poisoned,
                 ))?,
-            self.fields.ordinary_handle_share_work,
-            self.fields.canonical_table.as_mut().ok_or(
-                CanonicalLeafInheritanceError::Publication(
+            fields.ordinary_handle_share_work,
+            fields
+                .canonical_table
+                .as_mut()
+                .ok_or(CanonicalLeafInheritanceError::Publication(
                     RetainedPublicationError::WrongOutcomeMode,
-                ),
-            )?,
-            self.fields.set_id,
+                ))?,
+            fields.set_id,
             source,
             control,
         );
@@ -2062,8 +2208,7 @@ where
         self.operation
             .as_ref()?
             .common
-            .coordinator
-            .retained_ledger()
+            .as_read()
             .dimension_evidence(dimension)
             .ok()
     }
@@ -2074,8 +2219,6 @@ where
             .as_ref()
             .expect("test assembly retains its operation")
             .common
-            .coordinator
-            .retained_ledger()
             .test_shared_probe()
     }
 
@@ -2121,28 +2264,29 @@ where
             .fields
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
+        let fields = &mut *self.fields;
         let result = try_retain_block(
             &mut self
                 .operation
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
                 .internal_work_root(),
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.ordinary_handle_share_work,
+            fields.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
-            self.fields
+            fields
                 .canonical_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .canonical_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             RetainedMembershipDestination::Canonical,
             RetainedPublicationError::CanonicalSlotLimit,
             RetainedBlockOrigin::New,
@@ -2192,24 +2336,25 @@ where
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
+        let fields = &mut *self.fields;
         let result = try_retain_block(
             &mut root,
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.ordinary_handle_share_work,
+            fields.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
-            self.fields
+            fields
                 .canonical_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .canonical_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             RetainedMembershipDestination::Canonical,
             RetainedPublicationError::CanonicalSlotLimit,
             RetainedBlockOrigin::New,
@@ -2251,28 +2396,29 @@ where
             .fields
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
+        let fields = &mut *self.fields;
         let result = try_retain_rewritten_canonical_block(
             &mut self
                 .operation
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
                 .internal_work_root(),
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.ordinary_handle_share_work,
+            fields.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
-            self.fields
+            fields
                 .canonical_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .canonical_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             source,
             source_slot.identity(),
             plan,
@@ -2319,24 +2465,25 @@ where
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
+        let fields = &mut *self.fields;
         let result = try_retain_rewritten_canonical_block(
             &mut root,
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.ordinary_handle_share_work,
+            fields.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
-            self.fields
+            fields
                 .canonical_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .canonical_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             source,
             source_slot.identity(),
             plan,
@@ -2391,8 +2538,7 @@ where
                         RetainedPublicationError::Poisoned,
                     ))?
                     .common
-                    .coordinator
-                    .retained_ledger(),
+                    .as_read(),
                 account: self.fields.account.as_ref().ok_or(
                     CanonicalRetainBatchError::Preflight(RetainedPublicationError::Poisoned),
                 )?,
@@ -2425,10 +2571,11 @@ where
             let Err(cause) = result else {
                 continue;
             };
+            let fields = &mut *self.fields;
             let rollback = match (
-                self.fields.account.as_ref(),
-                self.fields.canonical_table.as_mut(),
-                self.fields.canonical_batch.as_mut(),
+                fields.account.as_ref(),
+                fields.canonical_table.as_mut(),
+                fields.canonical_batch.as_mut(),
             ) {
                 (Some(account), Some(table), Some(batch)) => {
                     qualified.try_rollback_prefix(account, table, batch)
@@ -2513,22 +2660,23 @@ where
         if self.fields.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(RetainedPublicationError::WrongOutcomeMode);
         }
+        let fields = &mut *self.fields;
         let result = try_share_retained_block::<O, P, D, CanonicalBlock, Tag>(
             &mut self
                 .operation
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
                 .internal_work_root(),
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.ordinary_handle_share_work,
-            self.fields
+            fields.ordinary_handle_share_work,
+            fields
                 .canonical_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             RetainedMembershipDestination::Canonical,
             RetainedPublicationError::CanonicalSlotLimit,
             &source.inner,
@@ -2580,24 +2728,25 @@ where
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
+        let fields = &mut *self.fields;
         let result = try_rewrite_canonical_block_controlled(
             &mut root,
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.ordinary_handle_share_work,
+            fields.ordinary_handle_share_work,
             canonical_plan.writer.phase,
             canonical_plan.writer.attribution_dimension,
-            self.fields
+            fields
                 .canonical_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .canonical_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             source,
             source_slot.identity(),
             allocation_plan,
@@ -2634,28 +2783,29 @@ where
         let protected_action =
             self.fields.failure_terminal_work_state == FailureTerminalWorkState::Active;
         let handle_share_work = self.outcome_evidence_handle_share_work()?;
+        let fields = &mut *self.fields;
         let result = try_retain_block(
             &mut self
                 .operation
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
                 .internal_work_root(),
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
             handle_share_work,
-            self.fields.evidence_plan.writer.phase,
-            self.fields.evidence_plan.writer.attribution_dimension,
-            self.fields
+            fields.evidence_plan.writer.phase,
+            fields.evidence_plan.writer.attribution_dimension,
+            fields
                 .evidence_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .evidence_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             RetainedMembershipDestination::OutcomeEvidence,
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             RetainedBlockOrigin::New,
@@ -2704,24 +2854,25 @@ where
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_work_control(work_dimension);
+        let fields = &mut *self.fields;
         let result = try_retain_block(
             &mut root,
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.ordinary_handle_share_work,
-            self.fields.evidence_plan.writer.phase,
-            self.fields.evidence_plan.writer.attribution_dimension,
-            self.fields
+            fields.ordinary_handle_share_work,
+            fields.evidence_plan.writer.phase,
+            fields.evidence_plan.writer.attribution_dimension,
+            fields
                 .evidence_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .evidence_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             RetainedMembershipDestination::OutcomeEvidence,
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             RetainedBlockOrigin::New,
@@ -2764,24 +2915,25 @@ where
             .as_mut()
             .ok_or(RetainedPublicationError::Poisoned)?
             .split_failure_terminal_work_control(handle_share_work);
+        let fields = &mut *self.fields;
         let result = try_retain_block(
             &mut root,
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
             handle_share_work,
-            self.fields.evidence_plan.writer.phase,
-            self.fields.evidence_plan.writer.attribution_dimension,
-            self.fields
+            fields.evidence_plan.writer.phase,
+            fields.evidence_plan.writer.attribution_dimension,
+            fields
                 .evidence_batch
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields
+            fields
                 .evidence_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             RetainedMembershipDestination::OutcomeEvidence,
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             RetainedBlockOrigin::New,
@@ -2817,22 +2969,23 @@ where
         let protected_action =
             self.fields.failure_terminal_work_state == FailureTerminalWorkState::Active;
         let handle_share_work = self.outcome_evidence_handle_share_work()?;
+        let fields = &mut *self.fields;
         let result = try_share_retained_block::<O, P, D, EvidenceBlock, Tag>(
             &mut self
                 .operation
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?
                 .internal_work_root(),
-            self.fields
+            fields
                 .account
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?,
             handle_share_work,
-            self.fields
+            fields
                 .evidence_table
                 .as_mut()
                 .ok_or(RetainedPublicationError::Poisoned)?,
-            self.fields.set_id,
+            fields.set_id,
             RetainedMembershipDestination::OutcomeEvidence,
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             &source.inner,
@@ -2869,8 +3022,7 @@ where
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?
                 .common
-                .coordinator
-                .retained_ledger();
+                .as_read();
             let batch = self
                 .fields
                 .canonical_batch
@@ -2911,8 +3063,7 @@ where
                 .as_ref()
                 .ok_or(RetainedPublicationError::Poisoned)?
                 .common
-                .coordinator
-                .retained_ledger();
+                .as_read();
             let batch = self
                 .fields
                 .evidence_batch
@@ -2929,6 +3080,206 @@ where
             }
         }
         result
+    }
+}
+
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    pub(crate) fn contain_activation_fault(mut self) -> FinalizationContainmentError {
+        self.loan.contain_activation_fault()
+    }
+
+    /// Consumes a success-capable assembly and eagerly removes every canonical physical owner.
+    ///
+    /// Storage is released before its attribution batch. Only a verified evidence-only graph can
+    /// be returned; any uncertain release poisons the account and retains all remaining authority
+    /// fail-closed.
+    pub(crate) fn try_discard_canonical_for_rejection(
+        mut self,
+        fallback_cause: PreparationFailureCode,
+    ) -> RetainedFailureAssemblyResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        self.loan
+            .try_discard_canonical_for_rejection(fallback_cause)?;
+        Ok(RetainedFailureAssembly {
+            assembly: self,
+            fallback_cause,
+        })
+    }
+
+    pub(crate) fn into_verified_failure_only(
+        mut self,
+        fallback_cause: PreparationFailureCode,
+    ) -> RetainedFailureAssemblyResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        self.loan.verify_failure_only(fallback_cause)?;
+        Ok(RetainedFailureAssembly {
+            assembly: self,
+            fallback_cause,
+        })
+    }
+
+    fn map_success_validation(
+        self,
+        validation: RetainedClosureValidation<
+            RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+        >,
+    ) -> RetainedSuccessValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        match validation {
+            RetainedClosureValidation::Valid(proof) => {
+                RetainedSuccessValidation::Valid(ValidatedRetainedSuccess {
+                    assembly: self,
+                    proof,
+                })
+            }
+            RetainedClosureValidation::Rejected { cause } => {
+                RetainedSuccessValidation::Rejected(RetainedFailureAssembly {
+                    assembly: self,
+                    fallback_cause: cause,
+                })
+            }
+            RetainedClosureValidation::FallbackOnly {
+                cause,
+                activation_containment_required,
+            } => RetainedSuccessValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause,
+                activation_containment_required,
+            }),
+        }
+    }
+
+    /// Binds an already resolved private result to the original consuming owner without replay.
+    pub(crate) fn bind_resolved_success(
+        self,
+        validation: RetainedClosureValidation<
+            RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+        >,
+    ) -> RetainedSuccessValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        self.map_success_validation(validation)
+    }
+
+    fn map_failure_validation(
+        self,
+        validation: RetainedClosureValidation<RetainedEvidenceClosureProof<EvidenceBlock>>,
+    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        match validation {
+            RetainedClosureValidation::Valid(proof) => {
+                RetainedFailureValidation::Valid(ValidatedRetainedFailure {
+                    assembly: self,
+                    proof,
+                })
+            }
+            RetainedClosureValidation::Rejected { cause } => {
+                RetainedFailureValidation::Rejected(RetainedFailureAssembly {
+                    assembly: self,
+                    fallback_cause: cause,
+                })
+            }
+            RetainedClosureValidation::FallbackOnly {
+                cause,
+                activation_containment_required,
+            } => RetainedFailureValidation::FallbackOnly(RetainedFallbackOnly {
+                assembly: self,
+                cause,
+                activation_containment_required,
+            }),
+        }
+    }
+
+    /// Borrows the complete candidate graph for validation and consumes the writable assembly.
+    ///
+    /// A semantic rejection returns an evidence-only builder so callers may append bounded failure
+    /// details and validate a rich failure. Invalid identity, poisoned state, and panic can only
+    /// proceed to the pre-admitted minimal fallback. A valid result owns the private closure proof
+    /// and exposes no mutation method, eliminating proof/mutation TOCTOU.
+    pub fn validate_success<CanonicalTag, EvidenceTag>(
+        mut self,
+        canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'a> FnOnce(
+            &mut RetainedClosureSession<'a, CanonicalBlock, EvidenceBlock>,
+            CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        ) -> bool,
+    ) -> RetainedSuccessValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        CanonicalTag: Copy + Send + Sync + 'static,
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        let validation = self
+            .loan
+            .validate_success(canonical_root, evidence_root, validate);
+        self.map_success_validation(validation)
+    }
+
+    pub(crate) fn validate_success_controlled<CanonicalTag, EvidenceTag>(
+        mut self,
+        work_dimension: D,
+        scratch_dimension: D,
+        canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'session, 'control> FnOnce(
+            &mut RetainedClosureSession<'session, CanonicalBlock, EvidenceBlock>,
+            CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+            RetainedWorkControl<'control, O, P, PP, U, D>,
+        ) -> bool,
+    ) -> RetainedSuccessValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        CanonicalTag: Copy + Send + Sync + 'static,
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        let validation = self.loan.validate_success_controlled(
+            work_dimension,
+            scratch_dimension,
+            canonical_root,
+            evidence_root,
+            validate,
+        );
+        self.map_success_validation(validation)
+    }
+
+    /// Borrows an evidence graph for validation and consumes the writable assembly.
+    pub fn validate_rich_failure<EvidenceTag>(
+        mut self,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'a> FnOnce(
+            &mut RetainedEvidenceClosureSession<'a, EvidenceBlock>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        ) -> bool,
+    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        let validation = self.loan.validate_rich_failure(evidence_root, validate);
+        self.map_failure_validation(validation)
+    }
+
+    pub(crate) fn validate_rich_failure_controlled<EvidenceTag>(
+        mut self,
+        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+        validate: impl for<'session, 'control> FnOnce(
+            &mut RetainedEvidenceClosureSession<'session, EvidenceBlock>,
+            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
+            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
+        ) -> bool,
+    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    where
+        EvidenceTag: Copy + Send + Sync + 'static,
+    {
+        let validation = self
+            .loan
+            .validate_rich_failure_controlled(evidence_root, validate);
+        self.map_failure_validation(validation)
     }
 
     /// Discards every block table before attribution and publishes the pre-admitted fallback.
@@ -2988,13 +3339,196 @@ where
         RetainedJointCommitFormationWithControl<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
-        self.try_classify_terminal_preparation(request)?.finish()
+        let fields = match operation::DynamicTerminalRootFields::from_assembly(self) {
+            Ok(fields) => fields,
+            Err(mut assembly) => {
+                return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                    assembly
+                        .loan
+                        .poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified),
+                ));
+            }
+        };
+        fields.finish_publication(request)
+    }
+}
+
+impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: TerminalEvidenceKey + fmt::Debug,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    /// Preserves the distinct original Valid/Rejected cause-latching effects.
+    pub(crate) fn apply_success_rejection(
+        &mut self,
+        validation: RetainedClosureValidation<
+            RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+        >,
+        cause: PreparationFailureCode,
+    ) -> RetainedClosureValidation<RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>> {
+        match validation {
+            RetainedClosureValidation::Valid(_) => {
+                self.activate_failure_terminal_work();
+                RetainedClosureValidation::Rejected { cause }
+            }
+            RetainedClosureValidation::Rejected { .. } => {
+                self.record_terminal_cause(cause);
+                RetainedClosureValidation::Rejected { cause }
+            }
+            fallback @ RetainedClosureValidation::FallbackOnly { .. } => fallback,
+        }
+    }
+
+    pub(crate) fn try_issue_freeze_decision(
+        &mut self,
+        proof: &RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+        canonical_dimension: D,
+        outcome_evidence_dimension: D,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<RetainedSuccessFreezeDecision, FinalizationContainmentError> {
+        if !self.success_proof_is_current(proof) || !self.has_exact_storage_graph() {
+            return Err(self.contain_activation_fault());
+        }
+        let decision = self.try_stage_freeze_permit(
+            proof,
+            canonical_dimension,
+            outcome_evidence_dimension,
+            final_progress,
+        )?;
+        match &decision {
+            RetainedSuccessFreezeDecision::Ready => {}
+            RetainedSuccessFreezeDecision::RichFailure { cause, .. }
+            | RetainedSuccessFreezeDecision::DestinationRejected { cause } => {
+                self.try_discard_canonical_for_rejection(*cause)?;
+            }
+        }
+        Ok(decision)
+    }
+
+    fn try_stage_freeze_permit(
+        &mut self,
+        proof: &RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+        canonical_dimension: D,
+        outcome_evidence_dimension: D,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<RetainedSuccessFreezeDecision, FinalizationContainmentError> {
+        if self.canonical_commitment_len() != 0
+            || self.outcome_evidence_commitment_len() != 0
+            || !self.contains_dimension(canonical_dimension)
+            || !self.contains_dimension(outcome_evidence_dimension)
+        {
+            return Err(self.contain_activation_fault());
+        }
+        let Some(canonical_amount) = u64::try_from(proof.canonical_count)
+            .ok()
+            .and_then(NonZeroU64::new)
+        else {
+            return Err(self.contain_activation_fault());
+        };
+        let Some(evidence_amount) = u64::try_from(proof.evidence_count)
+            .ok()
+            .and_then(NonZeroU64::new)
+        else {
+            return Err(self.contain_activation_fault());
+        };
+        let staged = {
+            let Some(operation) = self.operation.as_ref() else {
+                return Err(self.contain_activation_fault());
+            };
+            let ledger = operation.common.as_read();
+            let fields = &mut *self.fields;
+            let (Some(canonical_batch), Some(evidence_batch)) = (
+                fields.canonical_batch.as_mut(),
+                fields.evidence_batch.as_mut(),
+            ) else {
+                return Err(self.contain_activation_fault());
+            };
+            operation.retained.baseline.batch_read().map(|baseline| {
+                ledger.try_qualify_and_push_exact_primary_commitment_pair_rows(
+                    baseline,
+                    canonical_batch,
+                    OutputCommitment::new(canonical_dimension, canonical_amount.get()),
+                    evidence_batch,
+                    OutputCommitment::new(outcome_evidence_dimension, evidence_amount.get()),
+                )
+            })
+        };
+        let Some(staged) = staged else {
+            return Err(self.contain_activation_fault());
+        };
+        if let Err(cause) = staged {
+            let publication_cause = match cause {
+                CommitmentPairPushError::CanonicalBatchFull
+                | CommitmentPairPushError::OutcomeEvidenceBatchFull => {
+                    RetainedPublicationError::Writer(RetainedWriterError::CommitmentBatchFull)
+                }
+                CommitmentPairPushError::Ledger(cause) => {
+                    RetainedPublicationError::Writer(RetainedWriterError::Ledger(cause))
+                }
+            };
+            self.observe_publication_error(&publication_cause);
+            return Ok(RetainedSuccessFreezeDecision::DestinationRejected {
+                cause: PreparationFailureCode::ledger(),
+            });
+        }
+        if self.canonical_commitment_len() != 1 || self.outcome_evidence_commitment_len() != 1 {
+            return Err(self.contain_activation_fault());
+        }
+
+        let (terminal_cause, control_cause) = match self.operation.as_mut() {
+            Some(operation) => {
+                let control_cause = operation.prepare_terminal_control(final_progress);
+                if let Some(cause) = control_cause.as_ref() {
+                    operation.record_terminal_cause(PreparationFailureCode::from_control(cause));
+                }
+                (operation.sticky_terminal_cause(), control_cause)
+            }
+            None => return Err(self.contain_activation_fault()),
+        };
+        if let Some(cause) = terminal_cause {
+            return Ok(RetainedSuccessFreezeDecision::RichFailure {
+                cause,
+                control_cause,
+            });
+        }
+        Ok(RetainedSuccessFreezeDecision::Ready)
+    }
+
+    fn try_stage_exact_outcome_evidence(
+        &mut self,
+        proof: &RetainedEvidenceClosureProof<EvidenceBlock>,
+        dimension: D,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        if self.outcome_evidence_commitment_len() != 0 {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let Some(amount) = u64::try_from(proof.evidence_count)
+            .ok()
+            .and_then(NonZeroU64::new)
+        else {
+            return Err(RetainedPublicationError::Poisoned);
+        };
+        self.try_commit_outcome_evidence(dimension, amount.get())?;
+        if self.outcome_evidence_commitment_len() != 1 {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        Ok(())
     }
 
     fn try_classify_terminal_preparation(
         mut self,
         request: RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U>,
     ) -> RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        if let Some(operation) = self.operation.as_ref() {
+            operation.assert_backend();
+        }
         if self.fields.containment != AssemblyContainmentProvenance::Healthy {
             let cause = match self.fields.containment {
                 AssemblyContainmentProvenance::NewFaultPending => {
@@ -3241,56 +3775,33 @@ where
             Some(operation) => operation,
             None => unreachable_final_owner_state(),
         };
-        let evidence_batch = match self.fields.evidence_batch.take() {
-            Some(batch) => batch,
-            None => unreachable_final_owner_state(),
-        };
-        let account = match self.fields.account.take() {
-            Some(account) => account,
-            None => unreachable_final_owner_state(),
-        };
-        let canonical_table = self.fields.canonical_table.take();
-        let evidence_table = self.fields.evidence_table.take();
-        let canonical_batch = self.fields.canonical_batch.take();
-        let RetainedOperation {
+        let fields = self.fields.take();
+        let set_id = fields.set_id;
+        let RetainedOperationLoan {
             retained,
             common,
             terminal: terminal_slot,
             ..
         } = operation;
         let ledger = common.into_terminal();
-        let (fallback, evidence, baseline_batches) = retained.baseline.take_parts();
-        let physical = BorrowedTerminalPhysicalOwnershipManifest::from_owned(
-            terminal_slot,
-            fallback,
-            evidence,
-            canonical_table,
-            evidence_table,
-            Some(account),
-        );
+        let (physical, baseline_batches, primary_batches) =
+            terminal_slot.install(retained.baseline, Some(fields));
 
         if let RetainedTerminalMode::MinimalFallback { cause } = terminal {
-            let attribution = TerminalFallbackAttribution::new(
-                ledger,
-                baseline_batches,
-                PrimaryPublicationBatches::new(canonical_batch, Some(evidence_batch)),
-            );
+            let attribution =
+                TerminalFallbackAttribution::new(ledger, baseline_batches, primary_batches);
             return Ok(RetainedPreFreezeClassification {
                 state: TerminalPreFreezeTransition::Fallback {
                     guard: TerminalFallbackGuard::new(attribution, physical),
                     cause,
                 },
-                set_id: self.fields.set_id,
+                set_id,
                 control_cause: observed_control_cause,
             });
         }
 
-        let primary = TerminalPrimaryGuard::new(
-            ledger,
-            baseline_batches,
-            PrimaryPublicationBatches::new(canonical_batch, Some(evidence_batch)),
-            physical,
-        );
+        let primary =
+            TerminalPrimaryGuard::new(ledger, baseline_batches, primary_batches, physical);
         let state = if frozen_success {
             primary.try_classify_frozen_success(terminal)?
         } else {
@@ -3298,14 +3809,14 @@ where
         };
         Ok(RetainedPreFreezeClassification {
             state,
-            set_id: self.fields.set_id,
+            set_id,
             control_cause: observed_control_cause,
         })
     }
 }
 
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -3438,12 +3949,7 @@ where
         if let Some(evidence) = self.fields.evidence_table.take() {
             std::mem::forget(evidence);
         }
-        if let Some(batch) = self.fields.canonical_batch.take() {
-            std::mem::forget(batch);
-        }
-        if let Some(batch) = self.fields.evidence_batch.take() {
-            std::mem::forget(batch);
-        }
+        self.fields.retain_batches_fail_closed();
         if let Some(account) = self.fields.account.take() {
             drop(account);
         }
@@ -3479,14 +3985,15 @@ where
     }
 
     fn drop_tables_before_attribution(&mut self) -> RetainedStorageDropOutcome {
-        let Some(account) = self.fields.account.as_ref() else {
+        let fields = &mut *self.fields;
+        let Some(account) = fields.account.as_ref() else {
             return RetainedStorageDropOutcome::MissingFaultAnchor;
         };
-        let canonical = match self.fields.canonical_table.take() {
+        let canonical = match fields.canonical_table.take() {
             Some(canonical) => drop_retained_table_with_account_anchor(canonical, account),
             None => RetainedStorageDropOutcome::Clean,
         };
-        let evidence = match self.fields.evidence_table.take() {
+        let evidence = match fields.evidence_table.take() {
             Some(evidence) => drop_retained_table_with_account_anchor(evidence, account),
             None => RetainedStorageDropOutcome::ForeignOwnershipFault(record_account_poison_event(
                 account,
@@ -3520,12 +4027,12 @@ where
 {
     #[cfg(test)]
     pub(crate) fn test_dimension_evidence(&self, dimension: D) -> Option<DimensionSnapshot> {
-        self.assembly.test_dimension_evidence(dimension)
+        self.assembly.loan.test_dimension_evidence(dimension)
     }
 
     #[cfg(test)]
     fn test_probe_freeze_permit_qualification(
-        self,
+        mut self,
         canonical_dimension: D,
         outcome_evidence_dimension: D,
     ) -> FreezePermitQualificationProbe<D> {
@@ -3540,27 +4047,26 @@ where
         let result = {
             let operation = self
                 .assembly
+                .loan
                 .operation
                 .as_ref()
                 .unwrap_or_else(|| panic!("test success must retain its operation"));
-            let ledger = operation.common.coordinator.retained_ledger();
-            let canonical_batch = self
-                .assembly
-                .fields
+            let ledger = operation.common.as_read();
+            let fields = &mut *self.assembly.loan.fields;
+            let canonical_batch = fields
                 .canonical_batch
                 .as_mut()
                 .unwrap_or_else(|| panic!("test success must retain its canonical batch"));
-            let evidence_batch = self
-                .assembly
-                .fields
+            let evidence_batch = fields
                 .evidence_batch
                 .as_mut()
                 .unwrap_or_else(|| panic!("test success must retain its evidence batch"));
             operation
                 .retained
                 .baseline
-                .with_batches(|baseline| {
-                    ledger.try_qualify_and_push_exact_primary_commitment_pair(
+                .batch_read()
+                .map(|baseline| {
+                    ledger.try_qualify_and_push_exact_primary_commitment_pair_rows(
                         baseline,
                         canonical_batch,
                         OutputCommitment::new(canonical_dimension, canonical_amount.get()),
@@ -3575,12 +4081,16 @@ where
             Err(cause) => {
                 let dimension = self
                     .assembly
+                    .loan
                     .test_dimension_evidence(canonical_dimension)
                     .unwrap_or_else(|| panic!("test dimension must remain observable"));
                 FreezePermitQualificationProbe::Rejected {
                     cause,
-                    canonical_commitments: self.assembly.canonical_commitment_len(),
-                    outcome_evidence_commitments: self.assembly.outcome_evidence_commitment_len(),
+                    canonical_commitments: self.assembly.loan.canonical_commitment_len(),
+                    outcome_evidence_commitments: self
+                        .assembly
+                        .loan
+                        .outcome_evidence_commitment_len(),
                     dimension,
                 }
             }
@@ -3600,10 +4110,10 @@ where
     }
 
     pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
-        match self.assembly.prepare_body_deferral() {
+        match self.assembly.loan.prepare_body_deferral() {
             Some(Ok(())) => {}
             Some(Err(_)) => {
-                if let Some(operation) = self.assembly.operation.as_mut() {
+                if let Some(operation) = self.assembly.loan.operation.as_mut() {
                     operation.record_ledger_failure();
                 }
                 return Err(self);
@@ -3611,7 +4121,9 @@ where
             None => return Err(self),
         }
         let Self { assembly, proof } = self;
-        assembly.install_deferred_stage(RetainedDeferredStage::Success { proof });
+        assembly
+            .loan
+            .install_deferred_stage(RetainedDeferredStage::Success { proof });
         Ok(())
     }
 
@@ -3628,95 +4140,41 @@ where
         RetainedSuccessFreezePermitIssue<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         FinalizationContainmentError,
     > {
-        if self.assembly.canonical_commitment_len() != 0
-            || self.assembly.outcome_evidence_commitment_len() != 0
-            || !self.assembly.contains_dimension(canonical_dimension)
-            || !self.assembly.contains_dimension(outcome_evidence_dimension)
-        {
-            return Err(self.contain_activation_fault());
-        }
-        let Some(canonical_amount) = u64::try_from(self.proof.canonical_count)
-            .ok()
-            .and_then(NonZeroU64::new)
-        else {
-            return Err(self.contain_activation_fault());
-        };
-        let Some(evidence_amount) = u64::try_from(self.proof.evidence_count)
-            .ok()
-            .and_then(NonZeroU64::new)
-        else {
-            return Err(self.contain_activation_fault());
-        };
-        let staged = {
-            let assembly = &mut self.assembly;
-            let Some(operation) = assembly.operation.as_ref() else {
-                return Err(self.contain_activation_fault());
-            };
-            let ledger = operation.common.coordinator.retained_ledger();
-            let (Some(canonical_batch), Some(evidence_batch)) = (
-                assembly.fields.canonical_batch.as_mut(),
-                assembly.fields.evidence_batch.as_mut(),
-            ) else {
-                return Err(self.contain_activation_fault());
-            };
-            operation.retained.baseline.with_batches(|baseline| {
-                ledger.try_qualify_and_push_exact_primary_commitment_pair(
-                    baseline,
-                    canonical_batch,
-                    OutputCommitment::new(canonical_dimension, canonical_amount.get()),
-                    evidence_batch,
-                    OutputCommitment::new(outcome_evidence_dimension, evidence_amount.get()),
-                )
-            })
-        };
-        let Some(staged) = staged else {
-            return Err(self.contain_activation_fault());
-        };
-        if let Err(cause) = staged {
-            let publication_cause = match cause {
-                CommitmentPairPushError::CanonicalBatchFull
-                | CommitmentPairPushError::OutcomeEvidenceBatchFull => {
-                    RetainedPublicationError::Writer(RetainedWriterError::CommitmentBatchFull)
-                }
-                CommitmentPairPushError::Ledger(cause) => {
-                    RetainedPublicationError::Writer(RetainedWriterError::Ledger(cause))
-                }
-            };
-            self.assembly.observe_publication_error(&publication_cause);
-            let cause = PreparationFailureCode::ledger();
-            let ValidatedRetainedSuccess { assembly, proof: _ } = self;
-            return Ok(RetainedSuccessFreezePermitIssue::DestinationRejected {
-                failure: assembly.try_discard_canonical_for_rejection(cause)?,
-                cause,
-            });
-        }
-        if self.assembly.canonical_commitment_len() != 1
-            || self.assembly.outcome_evidence_commitment_len() != 1
-        {
-            return Err(self.contain_activation_fault());
-        }
-
-        let (terminal_cause, control_cause) = match self.assembly.operation.as_mut() {
-            Some(operation) => {
-                let control_cause = operation.prepare_terminal_control(final_progress);
-                if let Some(cause) = control_cause.as_ref() {
-                    operation.record_terminal_cause(PreparationFailureCode::from_control(cause));
-                }
-                (operation.sticky_terminal_cause(), control_cause)
-            }
-            None => return Err(self.contain_activation_fault()),
-        };
-        if let Some(cause) = terminal_cause {
-            let ValidatedRetainedSuccess { assembly, proof: _ } = self;
-            return Ok(RetainedSuccessFreezePermitIssue::RichFailure {
-                failure: assembly.try_discard_canonical_for_rejection(cause)?,
+        let decision = self.assembly.loan.try_issue_freeze_decision(
+            &self.proof,
+            canonical_dimension,
+            outcome_evidence_dimension,
+            final_progress,
+        )?;
+        match decision {
+            RetainedSuccessFreezeDecision::Ready => Ok(RetainedSuccessFreezePermitIssue::Ready(
+                RetainedSuccessFreezePermit { validated: self },
+            )),
+            RetainedSuccessFreezeDecision::RichFailure {
                 cause,
                 control_cause,
-            });
+            } => {
+                let ValidatedRetainedSuccess { assembly, proof: _ } = self;
+                Ok(RetainedSuccessFreezePermitIssue::RichFailure {
+                    failure: RetainedFailureAssembly {
+                        assembly,
+                        fallback_cause: cause,
+                    },
+                    cause,
+                    control_cause,
+                })
+            }
+            RetainedSuccessFreezeDecision::DestinationRejected { cause } => {
+                let ValidatedRetainedSuccess { assembly, proof: _ } = self;
+                Ok(RetainedSuccessFreezePermitIssue::DestinationRejected {
+                    failure: RetainedFailureAssembly {
+                        assembly,
+                        fallback_cause: cause,
+                    },
+                    cause,
+                })
+            }
         }
-        Ok(RetainedSuccessFreezePermitIssue::Ready(
-            RetainedSuccessFreezePermit { validated: self },
-        ))
     }
 
     /// Consumes a valid success proof after a later domain admission rejects the canonical result.
@@ -3729,7 +4187,7 @@ where
         fallback_cause: PreparationFailureCode,
     ) -> RetainedFailureAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         let mut assembly = self.assembly;
-        assembly.activate_failure_terminal_work();
+        assembly.loan.activate_failure_terminal_work();
         RetainedFailureAssembly {
             assembly,
             fallback_cause,
@@ -3759,20 +4217,25 @@ where
         RetainedSuccessJointCommitFormation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
-        self.try_classify_pre_freeze(final_progress)?
-            .finish()
-            .map(|(formation, _control_cause)| formation)
-    }
-
-    pub(crate) fn try_classify_pre_freeze(
-        self,
-        final_progress: FinalProgress<PP, U>,
-    ) -> RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
         self.assembly
-            .try_classify_terminal_preparation(RetainedTerminalRequest::Success {
+            .try_form_terminal_preparation(RetainedTerminalRequest::Success {
                 proof: self.proof,
                 final_progress,
             })
+            .map(|(formation, _control_cause)| formation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_classify_pre_freeze(
+        self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+        self.assembly.into_loan().try_classify_terminal_preparation(
+            RetainedTerminalRequest::Success {
+                proof: self.proof,
+                final_progress,
+            },
+        )
     }
 
     pub fn prepare_minimal_fallback(
@@ -3807,13 +4270,13 @@ where
     pub(crate) fn terminal_observation(&self, dimension: D) -> Option<DimensionSnapshot> {
         self.validated
             .assembly
+            .loan
             .operation
             .as_ref()
             .and_then(|operation| {
                 operation
                     .common
-                    .coordinator
-                    .retained_ledger()
+                    .as_read()
                     .dimension_evidence(dimension)
                     .ok()
             })
@@ -3860,11 +4323,22 @@ where
         self.validated.contain_activation_fault()
     }
 
-    pub(crate) fn try_classify_pre_freeze(
+    pub(crate) fn try_form_joint_commit_intent(
         self,
-    ) -> RetainedPreFreezeResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
+    ) -> Result<
+        RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
         let ValidatedRetainedSuccess { assembly, proof } = self.validated;
-        assembly.try_classify_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })
+        match assembly
+            .try_form_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })?
+            .0
+        {
+            RetainedSuccessJointCommitFormation::Intent(intent) => Ok(intent),
+            RetainedSuccessJointCommitFormation::PreparedFailure(_) => {
+                unreachable_final_owner_state()
+            }
+        }
     }
 }
 
@@ -3883,7 +4357,7 @@ where
     pub(crate) fn try_discard_canonical_for_rejection(
         mut self,
     ) -> Result<Self, FinalizationContainmentError> {
-        self.assembly.try_discard_canonical_ownership()?;
+        self.assembly.loan.try_discard_canonical_ownership()?;
         Ok(self)
     }
 
@@ -3892,85 +4366,20 @@ where
     }
 
     pub(crate) fn canonical_ownership_is_absent(&self) -> bool {
-        self.assembly.fields.mode == RetainedOutcomeMode::FailureOnly
-            && self.assembly.canonical_ownership_is_absent()
+        self.assembly.loan.fields.mode == RetainedOutcomeMode::FailureOnly
+            && self.assembly.loan.canonical_ownership_is_absent()
     }
 
     pub fn outcome_evidence_len(&self) -> usize {
-        self.assembly.outcome_evidence_len()
+        self.assembly.loan.outcome_evidence_len()
     }
 
     pub fn outcome_evidence_new_blocks(&self) -> usize {
-        self.assembly.outcome_evidence_new_blocks()
+        self.assembly.loan.outcome_evidence_new_blocks()
     }
 
     pub fn outcome_evidence_commitment_len(&self) -> usize {
-        self.assembly.outcome_evidence_commitment_len()
-    }
-
-    pub fn contains_dimension(&self, dimension: D) -> bool {
-        self.assembly.contains_dimension(dimension)
-    }
-
-    pub(crate) fn try_validate_work_dimension(
-        &mut self,
-        dimension: D,
-    ) -> Result<(), RetainedPublicationError<D>> {
-        self.assembly.try_validate_work_dimension(dimension)
-    }
-
-    pub fn try_retain_outcome_evidence<Tag>(
-        &mut self,
-        plan: RetainedAllocationPlan,
-        build: impl for<'a> FnOnce(
-            BlockEmplacer<'a, EvidenceBlock>,
-        ) -> Result<
-            BlockPlacement<'a, EvidenceBlock, Tag>,
-            RetainedBuildFailureCode,
-        >,
-    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        self.assembly.try_retain_outcome_evidence(plan, build)
-    }
-
-    pub(crate) fn try_retain_outcome_evidence_controlled<Tag>(
-        &mut self,
-        plan: RetainedAllocationPlan,
-        build: impl for<'placement, 'control> FnOnce(
-            BlockEmplacer<'placement, EvidenceBlock>,
-            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
-        ) -> Result<
-            BlockPlacement<'placement, EvidenceBlock, Tag>,
-            RetainedBuildFailureCode,
-        >,
-    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        self.assembly
-            .try_retain_outcome_evidence_controlled(plan, build)
-    }
-
-    pub fn try_share_outcome_evidence<Tag>(
-        &mut self,
-        source: &PublishedOutcomeEvidenceAggregate<EvidenceBlock>,
-        source_slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
-    ) -> Result<OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>, RetainedPublicationError<D>>
-    where
-        Tag: Copy + Send + Sync + 'static,
-    {
-        self.assembly
-            .try_share_outcome_evidence(source, source_slot)
-    }
-
-    pub fn try_commit_outcome_evidence(
-        &mut self,
-        dimension: D,
-        amount: u64,
-    ) -> Result<(), RetainedPublicationError<D>> {
-        self.assembly.try_commit_outcome_evidence(dimension, amount)
+        self.assembly.loan.outcome_evidence_commitment_len()
     }
 
     pub fn validate_rich_failure<EvidenceTag>(
@@ -4033,28 +4442,16 @@ where
     }
 
     pub(crate) fn outcome_evidence_commitment_len(&self) -> usize {
-        self.assembly.outcome_evidence_commitment_len()
+        self.assembly.loan.outcome_evidence_commitment_len()
     }
 
     pub(crate) fn try_stage_exact_outcome_evidence(
         &mut self,
         dimension: D,
     ) -> Result<(), RetainedPublicationError<D>> {
-        if self.assembly.outcome_evidence_commitment_len() != 0 {
-            return Err(RetainedPublicationError::Poisoned);
-        }
-        let Some(amount) = u64::try_from(self.outcome_evidence_member_count())
-            .ok()
-            .and_then(NonZeroU64::new)
-        else {
-            return Err(RetainedPublicationError::Poisoned);
-        };
         self.assembly
-            .try_commit_outcome_evidence(dimension, amount.get())?;
-        if self.assembly.outcome_evidence_commitment_len() != 1 {
-            return Err(RetainedPublicationError::Poisoned);
-        }
-        Ok(())
+            .loan
+            .try_stage_exact_outcome_evidence(&self.proof, dimension)
     }
 
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
@@ -4144,7 +4541,7 @@ where
     }
 
     pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
-        if !matches!(self.assembly.prepare_body_deferral(), Some(Ok(()))) {
+        if !matches!(self.assembly.loan.prepare_body_deferral(), Some(Ok(()))) {
             return Err(self);
         }
         let Self {
@@ -4152,10 +4549,12 @@ where
             cause,
             activation_containment_required,
         } = self;
-        assembly.install_deferred_stage(RetainedDeferredStage::Fallback {
-            cause,
-            activation_containment_required,
-        });
+        assembly
+            .loan
+            .install_deferred_stage(RetainedDeferredStage::Fallback {
+                cause,
+                activation_containment_required,
+            });
         Ok(())
     }
 
@@ -4178,7 +4577,7 @@ where
 }
 
 impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> Drop
-    for RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    for RetainedPublicationAssemblyLoan<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -4190,6 +4589,9 @@ where
     EvidenceBlock: Send + Sync + 'static,
 {
     fn drop(&mut self) {
+        if self.fields.fields.is_none() {
+            return;
+        }
         if self.fields.canonical_table.is_none()
             && self.fields.evidence_table.is_none()
             && self.fields.canonical_batch.is_none()
@@ -4209,6 +4611,14 @@ where
                 let _ = self.contain_after_recorded_poison(reason);
                 return;
             }
+        }
+        if self
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.common.terminal_is_outstanding())
+        {
+            let _ = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return;
         }
         if !self.has_exact_storage_graph() {
             let _ = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);

@@ -29,9 +29,10 @@ use super::{
     RetainedStoreWriterPlan, RetainedStoreWriterRole, ScalarSequence, SequencePlan, SequenceWriter,
     ShareableStoreKind, StoreBuildCallbackFailure, StoreBuildError, StoreControlledError,
     StoreControlledSuccessValidation, StoreDimensionKey, StoreDomainLoan,
-    StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureValidation,
-    StoreFallbackOnly, StoreInvocation, StoreInvocationLayout, StorePhaseKey, StorePlanError,
-    StorePrepareError, StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
+    StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureEvidenceLoan,
+    StoreFailureValidation, StoreFallbackOnly, StoreInvocation, StoreInvocationLayout,
+    StorePhaseKey, StorePlanError, StorePrepareError, StorePublicationLoan, StorePublicationState,
+    StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
     StoreSuccessFreezePermitIssue, StoreValidationSession, StoreWorkError, StoredBlock,
     StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
     classify_prepared_fallback, map_publication_error, map_writer_error,
@@ -52,10 +53,13 @@ use crate::retained::{
 mod canonical;
 mod canonical_validation;
 mod failure_evidence;
+pub(in crate::concrete_store) use failure_evidence::{
+    failure_evidence_validator, run_failure_evidence_build,
+};
 mod fallback;
 mod final_state;
 pub use final_state::CanonicalFinal;
-mod host;
+pub(in crate::concrete_store) mod host;
 pub use host::{
     CanonicalActivationSlots, CanonicalBodyOperation, CanonicalBodyParts, CanonicalBodyStart,
     CanonicalBoundBodyError, CanonicalBoundBodyParts, CanonicalBoundBodyStart,
@@ -63,13 +67,19 @@ pub use host::{
     CanonicalGenerationSlots, CanonicalInvocationBodyError, CanonicalInvocationCompletion,
     CanonicalInvocationFinish, CanonicalInvocationHost, CanonicalInvocationOutcome,
     CanonicalOperationCompletion, CanonicalOperationPublication, CanonicalOutputSlot,
-    CanonicalProofSlot, CanonicalValidationSlots,
+    CanonicalProofSlot, CanonicalValidationSlots, FiniteCanonicalBoundBodyParts,
+    FiniteCanonicalBoundBodyStart, FiniteCanonicalBoundInvocationFinish,
+    FiniteCanonicalDispositionSlot, FiniteCanonicalInvocationHost,
+    FiniteCanonicalOperationPublication,
 };
 mod payload_owner;
 mod preflight;
 mod typed_storage;
 pub use typed_storage::{CanonicalRetainedStorageBuildControl, CanonicalStorageBuildError};
 mod work_batch;
+use super::ordinary::{
+    StoreOperationLoan, StorePublicationOpenDecision, StorePublicationOpenDisposition,
+};
 use payload_owner::{PayloadLoan, PayloadOwner, PayloadPair};
 
 pub use canonical_validation::{
@@ -135,14 +145,14 @@ pub struct CanonicalFailureTerminalWorkPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FailureEvidenceWorkEnvelope {
-    max_evidence_members: usize,
-    construction_work_limit: u64,
-    validation_work_limit: u64,
+pub(in crate::concrete_store) struct FailureEvidenceWorkEnvelope {
+    pub(in crate::concrete_store) max_evidence_members: usize,
+    pub(in crate::concrete_store) construction_work_limit: u64,
+    pub(in crate::concrete_store) validation_work_limit: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FailureEvidenceWorkBudget {
+pub(in crate::concrete_store) struct FailureEvidenceWorkBudget {
     remaining_members: usize,
     remaining_construction_work: u64,
     remaining_validation_work: u64,
@@ -150,7 +160,7 @@ struct FailureEvidenceWorkBudget {
 }
 
 impl FailureEvidenceWorkBudget {
-    const fn new(envelope: FailureEvidenceWorkEnvelope) -> Self {
+    pub(in crate::concrete_store) const fn new(envelope: FailureEvidenceWorkEnvelope) -> Self {
         Self {
             remaining_members: envelope.max_evidence_members,
             remaining_construction_work: envelope.construction_work_limit,
@@ -553,7 +563,7 @@ where
     reason = "the private activation helper keeps one admitted permit coupled to one writer factory"
 )]
 fn try_retain_activation_canonical_writer<O, PP, U, L, W, Kind, Tag>(
-    assembly: &mut RetainedStorePublicationAssembly<'_, O, PP, U, L>,
+    ordinary: &mut StorePublicationLoan<'_, O, PP, U, L>,
     allocation: RetainedAllocationPlan,
     work_dimension: StoreDimensionKey,
     work: NonZeroU64,
@@ -570,10 +580,10 @@ where
     U: ProgressUnit,
     Tag: Copy + Send + Sync + 'static,
 {
-    assembly.ensure_writable()?;
-    assembly.validate_dimension(work_dimension)?;
+    ordinary.ensure_writable()?;
+    ordinary.validate_dimension(work_dimension)?;
     let mut callback_failure = None;
-    let result = assembly.raw.try_retain_canonical_controlled(
+    let result = ordinary.raw.loan_mut().try_retain_canonical_controlled(
         work_dimension,
         allocation,
         |emplacer, raw| {
@@ -607,7 +617,7 @@ where
             Ok(emplacer.place(block, tag))
         },
     );
-    assembly
+    ordinary
         .map_controlled_action(result, callback_failure)
         .map(|raw| CanonicalStoreRef {
             raw,
@@ -620,7 +630,7 @@ where
     reason = "the private activation helper keeps exact source lineage, one admitted permit, and one writer factory coupled"
 )]
 fn try_rewrite_activation_canonical_writer<O, PP, U, SourceRootKind, SourceRootTag, W, Kind, Tag>(
-    assembly: &mut RetainedStorePublicationAssembly<'_, O, PP, U, CanonicalInheritanceSource>,
+    ordinary: &mut StorePublicationLoan<'_, O, PP, U, CanonicalInheritanceSource>,
     source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
     source_ref: CanonicalStoreRef<Kind, Tag>,
     allocation: RetainedAllocationPlan,
@@ -639,46 +649,52 @@ where
     U: ProgressUnit,
     Tag: Copy + Send + Sync + 'static,
 {
-    assembly.ensure_writable()?;
-    assembly.validate_dimension(work_dimension)?;
+    ordinary.ensure_writable()?;
+    ordinary.validate_dimension(work_dimension)?;
     let mut callback_failure = None;
-    let result = assembly.raw.try_retain_rewritten_canonical_controlled(
-        source.share_source().aggregate(),
-        source_ref.raw,
-        work_dimension,
-        allocation,
-        |emplacer, raw| {
-            let mut raw_control = RetainedStoreWorkControl { raw, sticky: None };
-            let mut permit = match try_begin_canonical_work(&mut raw_control, work) {
-                Ok(permit) => permit,
-                Err(cause) => {
-                    callback_failure = Some(StoreBuildCallbackFailure::VerifiedWork(cause));
-                    return Err(RetainedBuildFailureCode::new(super::BUILD_CODE_DOMAIN));
-                }
-            };
-            let mut writer = match make_writer() {
-                Ok(writer) => writer,
-                Err(cause) => {
-                    permit.resolve_partial();
-                    drop(permit);
-                    return finish_activation_writer_callback(
-                        raw_control,
-                        Err(cause.into()),
-                        &mut callback_failure,
-                    );
-                }
-            };
-            let mut control = CanonicalBuildControl::from_admitted(&mut writer, permit);
-            let callback = build(&mut control);
-            let callback = control
-                .finish(callback)
-                .and_then(|()| finish_writer(writer).map_err(StoreControlledError::from));
-            let block =
-                finish_activation_writer_callback(raw_control, callback, &mut callback_failure)?;
-            Ok(emplacer.place(block, tag))
-        },
-    );
-    assembly
+    let result = ordinary
+        .raw
+        .loan_mut()
+        .try_retain_rewritten_canonical_controlled(
+            source.share_source().aggregate(),
+            source_ref.raw,
+            work_dimension,
+            allocation,
+            |emplacer, raw| {
+                let mut raw_control = RetainedStoreWorkControl { raw, sticky: None };
+                let mut permit = match try_begin_canonical_work(&mut raw_control, work) {
+                    Ok(permit) => permit,
+                    Err(cause) => {
+                        callback_failure = Some(StoreBuildCallbackFailure::VerifiedWork(cause));
+                        return Err(RetainedBuildFailureCode::new(super::BUILD_CODE_DOMAIN));
+                    }
+                };
+                let mut writer = match make_writer() {
+                    Ok(writer) => writer,
+                    Err(cause) => {
+                        permit.resolve_partial();
+                        drop(permit);
+                        return finish_activation_writer_callback(
+                            raw_control,
+                            Err(cause.into()),
+                            &mut callback_failure,
+                        );
+                    }
+                };
+                let mut control = CanonicalBuildControl::from_admitted(&mut writer, permit);
+                let callback = build(&mut control);
+                let callback = control
+                    .finish(callback)
+                    .and_then(|()| finish_writer(writer).map_err(StoreControlledError::from));
+                let block = finish_activation_writer_callback(
+                    raw_control,
+                    callback,
+                    &mut callback_failure,
+                )?;
+                Ok(emplacer.place(block, tag))
+            },
+        );
+    ordinary
         .map_controlled_action(result, callback_failure)
         .map(|raw| CanonicalStoreRef {
             raw,
@@ -714,7 +730,7 @@ where
     reason = "the private mapped-copy helper binds both exact source and destination record plans to one linear writer"
 )]
 fn try_copy_activation_canonical_records<O, PP, U, SourceRootKind, SourceRootTag, Tag>(
-    assembly: &mut RetainedStorePublicationAssembly<'_, O, PP, U, CanonicalInheritanceSource>,
+    ordinary: &mut StorePublicationLoan<'_, O, PP, U, CanonicalInheritanceSource>,
     source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
     source_ref: CanonicalRecordRef<Tag>,
     source_plan: RecordPlan,
@@ -733,10 +749,10 @@ where
     U: ProgressUnit,
     Tag: Copy + Send + Sync + 'static,
 {
-    assembly.ensure_writable()?;
-    assembly.validate_dimension(work_dimension)?;
+    ordinary.ensure_writable()?;
+    ordinary.validate_dimension(work_dimension)?;
     let mut callback_failure = None;
-    let result = assembly.raw.try_rewrite_canonical_controlled(
+    let result = ordinary.raw.loan_mut().try_rewrite_canonical_controlled(
         source.share_source().aggregate(),
         source_ref.raw,
         work_dimension,
@@ -783,7 +799,7 @@ where
             Ok(emplacer.place(block, tag))
         },
     );
-    assembly
+    ordinary
         .map_controlled_action(result, callback_failure)
         .map(|raw| CanonicalStoreRef {
             raw,
@@ -1270,65 +1286,6 @@ impl StoreActivationContainmentAnchor {
     }
 }
 
-fn finish_rejected_session<'inv, O, PP, U, E, L>(
-    assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
-    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
-    failure_work: FailureEvidenceWorkBudget,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-    cause: StoreCanonicalRejection<E>,
-    failure_code: PreparationFailureCode,
-) -> Result<RejectedCanonicalStoreSession<'inv, O, PP, U, E>, StoreActivationContainment>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    #[cfg(test)]
-    inject_scoped_transition_panic(ScopedTransitionPanicPoint::FinishRejectedSession);
-
-    let cause = match cause_slot.place(cause) {
-        Ok(cause) => ManuallyDrop::new(cause),
-        Err(cause) => {
-            let _ = drop_scoped_value(cause);
-            return Err(StoreActivationContainment {
-                cause: assembly.contain_activation_fault(),
-            });
-        }
-    };
-    let RetainedStorePublicationAssembly {
-        raw,
-        fallback_cause: _,
-        success_rejection: _,
-        domain,
-        lineage,
-    } = assembly;
-    let lineage = ManuallyDrop::new(lineage);
-    match raw.try_discard_canonical_for_rejection(failure_code) {
-        Ok(raw) => {
-            if drop_scoped_value(ManuallyDrop::into_inner(lineage)).is_err() {
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-                return Err(StoreActivationContainment {
-                    cause: raw.contain_activation_fault(),
-                });
-            }
-            Ok(RejectedCanonicalStoreSession {
-                owner: UnrootedFailureEvidence {
-                    owner: PayloadOwner::new(ManuallyDrop::into_inner(cause), raw),
-                    domain,
-                    failure_code,
-                    failure_work,
-                    outcome_evidence_destination_dimension,
-                },
-            })
-        }
-        Err(containment) => {
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(lineage));
-            Err(StoreActivationContainment { cause: containment })
-        }
-    }
-}
-
 struct ActivationFirstFault {
     cause: StoreRuntimeError,
     contract_seen: bool,
@@ -1543,9 +1500,6 @@ where
         operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     },
     Recoverable {
-        cause: StoreRuntimeError,
-        failure_code: PreparationFailureCode,
-        fallback_only: bool,
         // Keep the recoverable operation last so its physical baseline observes any unwind.
         operation: RetainedStoreOperation<'inv, O, PP, U, L>,
     },
@@ -1553,7 +1507,7 @@ where
 
 #[allow(clippy::result_large_err, clippy::type_complexity)]
 fn try_open_activation<O, PP, U, L>(
-    operation: RetainedStoreOperation<'_, O, PP, U, L>,
+    mut operation: RetainedStoreOperation<'_, O, PP, U, L>,
     plan: RetainedStorePublicationPlan,
 ) -> Result<RetainedStorePublicationAssembly<'_, O, PP, U, L>, ActivationOpenFailure<'_, O, PP, U, L>>
 where
@@ -1576,63 +1530,104 @@ where
         }
         Ok(Ok(())) => {}
     }
-    if plan.is_success_capable()
-        && let Some(failure_code) = operation.activation_terminal_cause()
-    {
-        return Err(ActivationOpenFailure::Recoverable {
-            operation,
-            cause: StoreRuntimeError::SuccessOutcomeRejected,
-            failure_code,
-            fallback_only: false,
-        });
+    if plan.is_success_capable() && operation.activation_terminal_cause().is_some() {
+        return Err(ActivationOpenFailure::Recoverable { operation });
     }
-    let RetainedStoreOperation {
-        raw,
-        domain,
-        lineage,
-    } = operation;
-    match raw.try_publication_assembly(plan.into_raw()) {
-        Ok(raw) => Ok(RetainedStorePublicationAssembly {
+    let mut state = super::StorePublicationState::default();
+    let disposition = {
+        let ordinary = operation.ordinary_operation();
+        ordinary
+            .open_publication_loan(plan, &mut state)
+            .into_disposition()
+    };
+    let disposition = match disposition {
+        Ok(disposition) => disposition,
+        Err(_) => return Err(ActivationOpenFailure::DeferredContainment { operation }),
+    };
+    operation.bind_opened_publication(state, disposition)
+}
+
+impl<'inv, O, PP, U, L> RetainedStoreOperation<'inv, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    #[allow(clippy::result_large_err, clippy::type_complexity)]
+    fn bind_opened_publication(
+        self,
+        state: super::StorePublicationState,
+        disposition: super::ordinary::StorePublicationOpenDisposition,
+    ) -> Result<
+        RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+        ActivationOpenFailure<'inv, O, PP, U, L>,
+    > {
+        use super::ordinary::StorePublicationOpenDisposition;
+        let RetainedStoreOperation {
             raw,
-            fallback_cause: None,
-            success_rejection: None,
             domain,
             lineage,
-        }),
-        Err(error) => {
-            let cause = map_writer_error(error.cause());
-            let classification = classify_activation_fault(&cause);
-            let (raw, fallback_only) = match error.into_activation_disposition() {
-                RetainedActivationOpenDisposition::Retry(raw) => (raw, false),
-                RetainedActivationOpenDisposition::FallbackOnly(raw) => (raw, true),
-                RetainedActivationOpenDisposition::FailClosed(raw) => {
-                    return Err(ActivationOpenFailure::DeferredContainment {
+        } = self;
+        let error = match disposition {
+            StorePublicationOpenDisposition::Opened(opened) => {
+                return match raw.bind_opened_assembly(opened) {
+                    Ok(raw) => Ok(RetainedStorePublicationAssembly {
+                        raw,
+                        state,
+                        domain,
+                        lineage,
+                    }),
+                    Err((raw, _opened)) => Err(ActivationOpenFailure::DeferredContainment {
                         operation: RetainedStoreOperation {
                             raw,
                             domain,
                             lineage,
                         },
-                    });
+                    }),
+                };
+            }
+            StorePublicationOpenDisposition::Failed(failure) => {
+                match raw.bind_publication_open_failure(failure) {
+                    Ok(error) => error,
+                    Err((raw, _failure)) => {
+                        return Err(ActivationOpenFailure::DeferredContainment {
+                            operation: RetainedStoreOperation {
+                                raw,
+                                domain,
+                                lineage,
+                            },
+                        });
+                    }
                 }
-            };
-            let mut operation = RetainedStoreOperation {
-                raw,
-                domain,
-                lineage,
-            };
-            match classification {
-                ActivationFaultClassification::Contract => {
-                    Err(ActivationOpenFailure::DeferredContainment { operation })
-                }
-                ActivationFaultClassification::Recoverable(failure_code) => {
-                    operation.latch_activation_terminal_cause(failure_code);
-                    Err(ActivationOpenFailure::Recoverable {
-                        operation,
-                        cause,
-                        failure_code,
-                        fallback_only,
-                    })
-                }
+            }
+        };
+        let cause = map_writer_error(error.cause());
+        let classification = classify_activation_fault(&cause);
+        let raw = match error.into_activation_disposition() {
+            RetainedActivationOpenDisposition::Retry(raw)
+            | RetainedActivationOpenDisposition::FallbackOnly(raw) => raw,
+            RetainedActivationOpenDisposition::FailClosed(raw) => {
+                return Err(ActivationOpenFailure::DeferredContainment {
+                    operation: RetainedStoreOperation {
+                        raw,
+                        domain,
+                        lineage,
+                    },
+                });
+            }
+        };
+        let mut operation = RetainedStoreOperation {
+            raw,
+            domain,
+            lineage,
+        };
+        match classification {
+            ActivationFaultClassification::Contract => {
+                Err(ActivationOpenFailure::DeferredContainment { operation })
+            }
+            ActivationFaultClassification::Recoverable(failure_code) => {
+                operation.latch_activation_terminal_cause(failure_code);
+                Err(ActivationOpenFailure::Recoverable { operation })
             }
         }
     }
@@ -1682,7 +1677,8 @@ where
 /// transitions. No ledger key, operation owner, publication authority, or generation identity can
 /// escape this interface.
 pub struct CanonicalPlanning<
-    'inv,
+    'host,
+    'op,
     'scope,
     O,
     PP,
@@ -1697,8 +1693,18 @@ pub struct CanonicalPlanning<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    driver:
-        &'scope mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    driver: &'scope mut ScopedActivationDriver<
+        'host,
+        'op,
+        O,
+        PP,
+        U,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+        L,
+    >,
     receipt_brand: &'scope ScopedReceiptBrand,
 }
 
@@ -1725,7 +1731,7 @@ where
     receipt_brand: &'scope ScopedReceiptBrand,
     completed_any: bool,
     resolved: bool,
-    lineage: PhantomData<&'borrow mut RetainedStoreOperation<'borrow, O, PP, U, L>>,
+    lineage: PhantomData<&'borrow mut L>,
     scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
 }
 
@@ -1833,7 +1839,8 @@ impl<'scope, P> CanonicalSealedActivationPlan<'scope, P> {
 /// interprets the core plan.
 #[must_use = "the activation permit must activate exactly once"]
 pub struct CanonicalActivationPermit<
-    'inv,
+    'host,
+    'op,
     'scope,
     O,
     PP,
@@ -1854,7 +1861,18 @@ pub struct CanonicalActivationPermit<
         reason = "the U4e permit borrows the complete inline linear driver without allocation"
     )]
     driver: Option<
-        &'scope mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        &'scope mut ScopedActivationDriver<
+            'host,
+            'op,
+            O,
+            PP,
+            U,
+            T,
+            E,
+            CanonicalKind,
+            CanonicalTag,
+            L,
+        >,
     >,
     request: Option<BoundScopedSuccessRequest>,
     plan: Option<P>,
@@ -1869,7 +1887,8 @@ pub struct CanonicalActivationPermit<
 /// contained fail closed.
 #[must_use = "resolve the unsealed activation exactly once"]
 pub struct CanonicalActivationSealFailure<
-    'inv,
+    'host,
+    'op,
     'scope,
     O,
     PP,
@@ -1890,7 +1909,18 @@ pub struct CanonicalActivationSealFailure<
         reason = "the U4e resolver borrows the complete inline linear driver without allocation"
     )]
     driver: Option<
-        &'scope mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        &'scope mut ScopedActivationDriver<
+            'host,
+            'op,
+            O,
+            PP,
+            U,
+            T,
+            E,
+            CanonicalKind,
+            CanonicalTag,
+            L,
+        >,
     >,
     plan: Option<P>,
     receipt_brand: &'scope ScopedReceiptBrand,
@@ -1903,7 +1933,8 @@ pub struct CanonicalActivationSealFailure<
     reason = "the linear activation permit remains inline so no unmetered allocation is introduced"
 )]
 pub enum CanonicalActivationSeal<
-    'inv,
+    'host,
+    'op,
     'scope,
     O,
     PP,
@@ -1920,11 +1951,25 @@ pub enum CanonicalActivationSeal<
     U: ProgressUnit,
 {
     Sealed(
-        CanonicalActivationPermit<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>,
+        CanonicalActivationPermit<
+            'host,
+            'op,
+            'scope,
+            O,
+            PP,
+            U,
+            T,
+            E,
+            CanonicalKind,
+            CanonicalTag,
+            L,
+            P,
+        >,
     ),
     Unsealed(
         CanonicalActivationSealFailure<
-            'inv,
+            'host,
+            'op,
             'scope,
             O,
             PP,
@@ -1960,49 +2005,57 @@ enum ScopedSemanticState {
     Rejected,
 }
 
-enum ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    Activated(ActivatedCanonicalStoreSession<'inv, O, PP, U, T, CanonicalKind, CanonicalTag, L>),
-    Rejected(RejectedCanonicalStoreSession<'inv, O, PP, U, E>),
-    NeverActivated(NeverActivatedStoreSession<'inv, O, PP, U, E, L>),
+enum ScopedPendingDecision<'host, T, E, CK, CT> {
+    Activated {
+        output: PayloadLoan<'host, T>,
+        root: CanonicalStoreRef<CK, CT>,
+        validation: ScopedActivationValidation,
+    },
+    Rejected {
+        cause: PayloadLoan<'host, StoreCanonicalRejection<E>>,
+        failure_code: PreparationFailureCode,
+    },
+    NeverActivated {
+        cause: PayloadLoan<'host, StoreNeverActivatedCause<E>>,
+        failure_code: PreparationFailureCode,
+        fallback_only: bool,
+    },
+    Contain {
+        recorded: Option<StoreActivationContainment>,
+    },
 }
 
-#[allow(
-    clippy::large_enum_variant,
-    reason = "the scoped state keeps every linear terminal owner inline for fail-closed containment without allocation"
-)]
-enum ScopedActivationState<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+enum ScopedActivationState<'op, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Dormant(ScopedDormantActivation<'inv, O, PP, U, L>),
+    Dormant {
+        operation: StoreOperationLoan<'op, O, PP, U, L>,
+        publication_state: &'op mut super::StorePublicationState,
+    },
+    Opened(StorePublicationLoan<'op, O, PP, U, L>),
     Transitioning,
-    Pending(ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>),
-    Contained(StoreActivationContainment),
-    Finished,
+    Resolved,
 }
 
-struct ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+struct ScopedActivationDriver<'host, 'op, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    output: Option<CanonicalOutputSlot<'inv, T>>,
-    never: Option<CanonicalCauseSlot<'inv, StoreNeverActivatedCause<E>>>,
-    rejection: Option<CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>>,
-    state: ScopedActivationState<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-    containment_anchor: RetainedPlanningContainmentAnchor,
+    output: Option<CanonicalOutputSlot<'host, T>>,
+    never: Option<CanonicalCauseSlot<'host, StoreNeverActivatedCause<E>>>,
+    rejection: Option<CanonicalCauseSlot<'host, StoreCanonicalRejection<E>>>,
+    state: ScopedActivationState<'op, O, PP, U, L>,
+    lineage: &'op mut Option<L>,
+    opened: &'op mut Option<StorePublicationOpenDisposition>,
+    pending: &'op mut Option<ScopedPendingDecision<'host, T, E, CanonicalKind, CanonicalTag>>,
     roles: Option<BoundActivationRoles>,
-    failure: Option<BoundScopedFailureRequest>,
+    failure: Option<&'op BoundScopedFailureRequest>,
     planning_baseline: RetainedPlanningBaseline,
-    failure_work: FailureEvidenceWorkBudget,
     first_fault: Option<ActivationFirstFault>,
     semantic_state: ScopedSemanticState,
 }
@@ -2231,6 +2284,26 @@ struct BoundScopedSuccessRequest {
     semantic_bytes_dimension: Option<StoreDimensionKey>,
 }
 
+struct ScopedActivationValidation {
+    phase: StorePhaseKey,
+    work_dimension: StoreDimensionKey,
+    scratch_dimension: StoreDimensionKey,
+    canonical_destination: StoreDimensionKey,
+    work: NonZeroU64,
+}
+
+impl BoundScopedSuccessRequest {
+    fn into_validation(self) -> ScopedActivationValidation {
+        ScopedActivationValidation {
+            phase: self.validation_phase,
+            work_dimension: self.validation_work_dimension,
+            scratch_dimension: self.validation_scratch_dimension,
+            canonical_destination: self.canonical_destination_dimension,
+            work: self.validation_work,
+        }
+    }
+}
+
 /// Host-owned dimensions for semantic planning and retained materialization work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalMaterializationRole {
@@ -2429,7 +2502,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly: &'lane mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
+    assembly: &'lane mut StorePublicationLoan<'inv, O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     pending_rejection: bool,
     materialization_phase: StorePhaseKey,
@@ -2928,6 +3001,7 @@ where
 {
     owner: PayloadOwner<PayloadLoan<'inv, Cause>, RawStoreFailureAssembly<'inv, O, PP, U>>,
     domain: StoreDomainLoan<'inv>,
+    state: StorePublicationState,
     failure_code: PreparationFailureCode,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
@@ -2949,13 +3023,13 @@ pub type CanonicalRejectionEvidenceOutcome<'inv, O, PP, U, E, EvidenceKind, Evid
     FailureEvidenceOutcome<'inv, O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag>;
 
 /// One-shot failure-evidence lane. It is consumed together with the owner and cannot be reopened.
-pub struct FailureEvidenceLane<'inv, 'lane, O, PP, U>
+pub struct FailureEvidenceLane<'evidence, 'lane, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    raw: &'lane mut RawStoreFailureAssembly<'inv, O, PP, U>,
+    evidence: &'lane mut StoreFailureEvidenceLoan<'evidence, O, PP, U>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
     failure_work: &'lane mut FailureEvidenceWorkBudget,
 }
@@ -3246,7 +3320,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation.raw.poll_terminal_control();
+    operation.raw.loan_mut().poll_terminal_control();
     let RetainedStoreOperation {
         raw,
         domain,
@@ -3283,17 +3357,21 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    assembly.latch_activation_terminal_cause(failure_code);
+    assembly
+        .ordinary()
+        .latch_activation_terminal_cause(failure_code);
     let RetainedStorePublicationAssembly {
         raw,
-        fallback_cause,
-        success_rejection,
+        state,
         domain,
         lineage,
     } = assembly;
     let cause = ManuallyDrop::new(cause);
     let lineage = ManuallyDrop::new(lineage);
-    let failure_code = fallback_cause.or(success_rejection).unwrap_or(failure_code);
+    let failure_code = state
+        .fallback_cause
+        .or(state.success_rejection)
+        .unwrap_or(failure_code);
     if drop_scoped_value(ManuallyDrop::into_inner(lineage)).is_err() {
         let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
         return Err(StoreActivationContainment {
@@ -3330,7 +3408,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    operation.raw.poll_terminal_control();
+    operation.raw.loan_mut().poll_terminal_control();
     let RetainedStoreOperation {
         raw,
         domain,
@@ -4131,7 +4209,7 @@ mod scoped_transition_tests {
                     CanonicalActivationOutcome::Activated(activated) => activated,
                     _ => panic!("borrowed scratch must allow activation"),
                 };
-                let probe = activated.owner.storage().raw.test_ledger_probe();
+                let probe = activated.owner.storage().raw.loan().test_ledger_probe();
                 let builder_called = Cell::new(false);
                 let outcome = activated
                     .validate_centrally(
@@ -4357,8 +4435,8 @@ mod scoped_transition_tests {
             account: &PhysicalStorageAccount,
             control: OperationControl<TestProgress, TestUnit>,
             evidence_limit: u64,
-            mut build: impl for<'lane> FnMut(
-                &mut CanonicalLane<'inv, 'lane, TestOwner, TestProgress, TestUnit>,
+            mut build: impl for<'op, 'lane> FnMut(
+                &mut CanonicalLane<'op, 'lane, TestOwner, TestProgress, TestUnit>,
             ) -> T,
         ) -> Activated<'inv, T> {
             let (operation, keys) =
@@ -4663,7 +4741,7 @@ mod scoped_transition_tests {
             );
             let header_bytes = SharedRetainedStorage::<T>::header_bytes().unwrap();
             let mut host = Host::<_, _>::new();
-            let (prepared, ledger, keys, expected_control) = {
+            let (deferred, ledger, keys, expected_control, evidence_root) = {
                 let mut value = Some(value);
                 let mut control = Some(control);
                 let mut ledger = None;
@@ -4711,14 +4789,15 @@ mod scoped_transition_tests {
                         )
                     },
                 );
-                ledger = Some(activated.owner.storage().raw.test_ledger_probe());
-                let proof_ledger = activated.owner.storage().raw.test_ledger_probe();
+                ledger = Some(activated.owner.storage().raw.loan().test_ledger_probe());
+                let proof_ledger = activated.owner.storage().raw.loan().test_ledger_probe();
                 let activated = if minimal {
                     let destination = activated.outcome_evidence_destination_dimension;
                     let (output, mut assembly) = activated.owner.into_parts();
                     // Fill the existing evidence headroom before central evidence is added.
                     // Baseline fallback still fits; publishing rich evidence cannot fit.
                     assembly
+                        .ordinary()
                         .try_commit_outcome_evidence(destination, 2)
                         .unwrap();
                     ActivatedCanonicalStoreSession {
@@ -4811,7 +4890,7 @@ mod scoped_transition_tests {
                 };
                 let raw = store
                     .raw
-                    .try_classify_pre_freeze(FinalProgress::new(
+                    .test_classify_pre_freeze(FinalProgress::new(
                         TestProgress::Build,
                         TestUnit::Items,
                         2,
@@ -4838,27 +4917,45 @@ mod scoped_transition_tests {
                     })
                 } else {
                     raw.check_payload_cleanup()
-                        .and_then(|raw| raw.finish().map_err(map_raw_prepare_error))
-                        .map(|(formation, control_cause)| {
-                            let crate::retained::RetainedSuccessJointCommitFormation::PreparedFailure(
-                                prepared,
-                            ) = formation
-                            else {
-                                panic!("an ordinary failure classification must retain its rail")
-                            };
-                            (
-                                crate::concrete_store::classify_prepared_failure(
-                                    prepared,
-                                    store.evidence_root,
-                                    domain.into_owned(),
-                                ),
-                                control_cause,
-                            )
-                        })
+                        .and_then(|raw| raw.finish_deferred().map_err(map_raw_prepare_error))
                         .map_err(|cause| StoreActivationContainment { cause })
                 };
-                (prepared, ledger, keys, expected_control)
+                (
+                    prepared,
+                    ledger,
+                    keys,
+                    expected_control,
+                    store.evidence_root,
+                )
             };
+            let prepared =
+                deferred.and_then(|(deferred, control_cause)| {
+                    let root = host.store_for_test();
+                    let stamp = root.raw.install_terminal_preparation(deferred);
+                    let formation = root
+                        .raw
+                        .try_finish_publication_terminal(stamp)
+                        .unwrap_or_else(|_| {
+                            panic!("the same raw root must accept its original stamp")
+                        })
+                        .map_err(|cause| StoreActivationContainment { cause })?;
+                    let crate::retained::RetainedSuccessJointCommitFormation::PreparedFailure(
+                        prepared,
+                    ) = formation
+                    else {
+                        panic!("an ordinary failure classification must retain its rail")
+                    };
+                    Ok((
+                        crate::concrete_store::classify_prepared_failure(
+                            prepared,
+                            evidence_root,
+                            root.domain
+                                .take()
+                                .expect("the original domain transfers only after raw success"),
+                        ),
+                        control_cause,
+                    ))
+                });
             assert_eq!(*events.borrow(), ["output", "proof"]);
             if release_failed {
                 let error = match prepared {
@@ -4995,8 +5092,8 @@ mod scoped_transition_tests {
                                 }
                             })),
                         );
-                        ledger = Some(activated.owner.storage().raw.test_ledger_probe());
-                        let proof_ledger = activated.owner.storage().raw.test_ledger_probe();
+                        ledger = Some(activated.owner.storage().raw.loan().test_ledger_probe());
+                        let proof_ledger = activated.owner.storage().raw.loan().test_ledger_probe();
                         let proof_account = &account;
                         let proof_events = &events;
                         let candidate = validate(

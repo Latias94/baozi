@@ -28,15 +28,17 @@ fn assert_canonical_rollback(
     members_before: usize,
 ) {
     let operation = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("assembly retains operation");
     assert!(operation.planning_matches_baseline(storage_before));
     assert!(!operation.has_outstanding_work_permit());
-    assert_eq!(assembly.canonical_len(), members_before);
-    assert_eq!(assembly.canonical_new_blocks(), members_before);
+    assert_eq!(assembly.loan().canonical_len(), members_before);
+    assert_eq!(assembly.loan().canonical_new_blocks(), members_before);
     assert_eq!(
         assembly
+            .loan()
             .fields
             .canonical_batch
             .as_ref()
@@ -45,11 +47,12 @@ fn assert_canonical_rollback(
         members_before + 1
     );
     assert_eq!(
-        assembly.test_canonical_attributed_bytes(),
+        assembly.loan().test_canonical_attributed_bytes(),
         attributed_before
     );
-    assert!(assembly.test_storage_graph_is_exact());
+    assert!(assembly.loan().test_storage_graph_is_exact());
     let physical = assembly
+        .loan()
         .fields
         .account
         .as_ref()
@@ -92,19 +95,22 @@ fn earlier_table_or_physical_capacity_failure_precedes_deferred_work_binding() {
         let mut assembly = ordinary_assembly(&mut root, &account, OperationControl::default());
         if table_full {
             let _slot = assembly
+                .loan_mut()
                 .try_retain_canonical(empty_plan(), |emplacer| {
                     Ok(emplacer.place(11, CanonicalRootTag))
                 })
                 .unwrap_or_else(|_| panic!("the first canonical block must fill the table"));
         }
         let storage_before = assembly
+            .loan()
             .operation
             .as_ref()
             .expect("assembly retains operation")
             .planning_baseline();
         let physical_before = account.snapshot();
-        let attributed_before = assembly.test_canonical_attributed_bytes();
+        let attributed_before = assembly.loan().test_canonical_attributed_bytes();
         let work_before = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         let shares_before = account.share_call_count();
@@ -115,7 +121,7 @@ fn earlier_table_or_physical_capacity_failure_precedes_deferred_work_binding() {
             RetainedAllocationPlan::new(1, 128).expect("finite physical over-capacity plan")
         };
 
-        let result = assembly.try_retain_canonical_controlled(
+        let result = assembly.loan_mut().try_retain_canonical_controlled(
             TestDimension::Unregistered,
             plan,
             |emplacer, control| {
@@ -148,6 +154,7 @@ fn earlier_table_or_physical_capacity_failure_precedes_deferred_work_binding() {
         assert!(!builder_ran);
         assert_eq!(account.share_call_count(), shares_before);
         let work = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         assert_eq!(
@@ -157,11 +164,17 @@ fn earlier_table_or_physical_capacity_failure_precedes_deferred_work_binding() {
         assert_eq!(work.consumed(), work_before.consumed());
         assert!(
             assembly
+                .loan()
                 .test_dimension_evidence(TestDimension::Unregistered)
                 .is_none()
         );
         assert_eq!(
-            assembly.operation.as_ref().unwrap().sticky_terminal_cause(),
+            assembly
+                .loan()
+                .operation
+                .as_ref()
+                .unwrap()
+                .sticky_terminal_cause(),
             None,
             "a deferred invalid key must not latch a failure before the builder runs"
         );
@@ -193,31 +206,39 @@ fn fresh_cancellation_precedes_deferred_binding_at_connected_builder_begin() {
         &account,
         OperationControl::default().with_cancellation(cancellation.clone()),
     );
-    let storage_before = assembly.operation.as_ref().unwrap().planning_baseline();
+    let storage_before = assembly
+        .loan()
+        .operation
+        .as_ref()
+        .unwrap()
+        .planning_baseline();
     let physical_before = account.snapshot();
-    let attributed_before = assembly.test_canonical_attributed_bytes();
+    let attributed_before = assembly.loan().test_canonical_attributed_bytes();
     let work_before = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap();
     let shares_before = account.share_call_count();
     let mut builder_ran = false;
 
-    let result = assembly.try_retain_canonical_controlled::<CanonicalRootTag>(
-        TestDimension::Unregistered,
-        empty_plan(),
-        |_emplacer, control| {
-            builder_ran = true;
-            assert_eq!(account.share_call_count(), shares_before + 1);
-            cancellation.cancel();
-            assert!(matches!(
-                control.try_begin(NonZeroU64::MIN),
-                Err(RetainedWorkStartError::Control(
-                    crate::ControlCause::Cancelled { .. }
-                ))
-            ));
-            Err(BUILD_FAILED)
-        },
-    );
+    let result = assembly
+        .loan_mut()
+        .try_retain_canonical_controlled::<CanonicalRootTag>(
+            TestDimension::Unregistered,
+            empty_plan(),
+            |_emplacer, control| {
+                builder_ran = true;
+                assert_eq!(account.share_call_count(), shares_before + 1);
+                cancellation.cancel();
+                assert!(matches!(
+                    control.try_begin(NonZeroU64::MIN),
+                    Err(RetainedWorkStartError::Control(
+                        crate::ControlCause::Cancelled { .. }
+                    ))
+                ));
+                Err(BUILD_FAILED)
+            },
+        );
 
     assert!(builder_ran);
     assert!(matches!(
@@ -227,6 +248,7 @@ fn fresh_cancellation_precedes_deferred_binding_at_connected_builder_begin() {
         ))) if cause == BUILD_FAILED
     ));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap();
     assert_eq!(
@@ -235,6 +257,7 @@ fn fresh_cancellation_precedes_deferred_binding_at_connected_builder_begin() {
     );
     assert!(
         assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Unregistered)
             .is_none()
     );
@@ -260,10 +283,16 @@ fn completed_same_row_share_reduces_connected_builder_consumed_headroom() {
     let account = account(&factory, u64::MAX, 128);
     let mut root = TestInvocationRoot::new();
     let mut assembly = ordinary_assembly(&mut root, &account, OperationControl::default());
-    let storage_before = assembly.operation.as_ref().unwrap().planning_baseline();
+    let storage_before = assembly
+        .loan()
+        .operation
+        .as_ref()
+        .unwrap()
+        .planning_baseline();
     let physical_before = account.snapshot();
-    let attributed_before = assembly.test_canonical_attributed_bytes();
+    let attributed_before = assembly.loan().test_canonical_attributed_bytes();
     let work_before = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap();
     let shares_before = account.share_call_count();
@@ -271,12 +300,12 @@ fn completed_same_row_share_reduces_connected_builder_consumed_headroom() {
     let attempted_limit = work_before.attempted() + 5;
     assert!(consumed_limit <= attempted_limit);
     assembly
+        .loan_mut()
         .operation
         .as_mut()
         .unwrap()
         .common
-        .coordinator
-        .retained_ledger_mut()
+        .test_ledger_mut()
         .tighten_dimension_policy(
             TestDimension::Bytes,
             DimensionPolicy::reservable_bytes(attempted_limit, consumed_limit, u64::MAX, u64::MAX)
@@ -285,24 +314,26 @@ fn completed_same_row_share_reduces_connected_builder_consumed_headroom() {
         .unwrap_or_else(|_| panic!("legal tightening must leave exactly one completed share"));
     let mut builder_ran = false;
 
-    let result = assembly.try_retain_canonical_controlled::<CanonicalRootTag>(
-        TestDimension::Bytes,
-        empty_plan(),
-        |_emplacer, control| {
-            builder_ran = true;
-            assert_eq!(account.share_call_count(), shares_before + 1);
-            assert!(matches!(
-                control.try_begin(NonZeroU64::new(3).unwrap()),
-                Err(RetainedWorkStartError::Ledger(LedgerCause::LimitExceeded {
-                    class: CounterClass::Consumed,
-                    dimension: TestDimension::Bytes,
-                    value,
-                    limit,
-                })) if value == work_before.consumed() + 5 && limit == consumed_limit
-            ));
-            Err(BUILD_FAILED)
-        },
-    );
+    let result = assembly
+        .loan_mut()
+        .try_retain_canonical_controlled::<CanonicalRootTag>(
+            TestDimension::Bytes,
+            empty_plan(),
+            |_emplacer, control| {
+                builder_ran = true;
+                assert_eq!(account.share_call_count(), shares_before + 1);
+                assert!(matches!(
+                    control.try_begin(NonZeroU64::new(3).unwrap()),
+                    Err(RetainedWorkStartError::Ledger(LedgerCause::LimitExceeded {
+                        class: CounterClass::Consumed,
+                        dimension: TestDimension::Bytes,
+                        value,
+                        limit,
+                    })) if value == work_before.consumed() + 5 && limit == consumed_limit
+                ));
+                Err(BUILD_FAILED)
+            },
+        );
 
     assert!(builder_ran);
     assert!(matches!(
@@ -312,6 +343,7 @@ fn completed_same_row_share_reduces_connected_builder_consumed_headroom() {
         ))) if cause == BUILD_FAILED
     ));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap();
     assert_eq!(
@@ -341,16 +373,22 @@ fn forgotten_builder_permission_rejects_ok_before_commit_and_host_resolves_frame
         let account = account(&factory, u64::MAX, 128);
         let mut root = TestInvocationRoot::new();
         let mut assembly = ordinary_assembly(&mut root, &account, OperationControl::default());
-        let storage_before = assembly.operation.as_ref().unwrap().planning_baseline();
+        let storage_before = assembly
+            .loan()
+            .operation
+            .as_ref()
+            .unwrap()
+            .planning_baseline();
         let physical_before = account.snapshot();
-        let attributed_before = assembly.test_canonical_attributed_bytes();
+        let attributed_before = assembly.loan().test_canonical_attributed_bytes();
         let work_before = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         let shares_before = account.share_call_count();
         let mut builder_returned_ok = false;
 
-        let result = assembly.try_retain_canonical_controlled(
+        let result = assembly.loan_mut().try_retain_canonical_controlled(
             TestDimension::Bytes,
             empty_plan(),
             |emplacer, mut control| {
@@ -391,6 +429,7 @@ fn forgotten_builder_permission_rejects_ok_before_commit_and_host_resolves_frame
         ));
         assert_eq!(account.share_call_count(), shares_before + 1);
         let work = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         assert_eq!(
@@ -424,16 +463,22 @@ fn ignored_builder_completion_or_overrun_error_rejects_ok_before_commit() {
         let account = account(&factory, u64::MAX, 128);
         let mut root = TestInvocationRoot::new();
         let mut assembly = ordinary_assembly(&mut root, &account, OperationControl::default());
-        let storage_before = assembly.operation.as_ref().unwrap().planning_baseline();
+        let storage_before = assembly
+            .loan()
+            .operation
+            .as_ref()
+            .unwrap()
+            .planning_baseline();
         let physical_before = account.snapshot();
-        let attributed_before = assembly.test_canonical_attributed_bytes();
+        let attributed_before = assembly.loan().test_canonical_attributed_bytes();
         let work_before = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         let shares_before = account.share_call_count();
         let mut builder_returned_ok = false;
 
-        let result = assembly.try_retain_canonical_controlled(
+        let result = assembly.loan_mut().try_retain_canonical_controlled(
             TestDimension::Bytes,
             empty_plan(),
             |emplacer, control| {
@@ -474,6 +519,7 @@ fn ignored_builder_completion_or_overrun_error_rejects_ok_before_commit() {
         ));
         assert_eq!(account.share_call_count(), shares_before + 1);
         let work = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         assert_eq!(work.attempted(), work_before.attempted() + 5);
@@ -528,28 +574,23 @@ fn protected_builder_distinguishes_accepted_control_from_fresh_cancellation() {
         let (canonical, evidence) = retain_scalar_success(&mut assembly);
         if accepted_control {
             cancellation.cancel();
-            assembly.operation.as_mut().unwrap().poll_terminal_control();
+            assembly
+                .loan_mut()
+                .operation
+                .as_mut()
+                .unwrap()
+                .poll_terminal_control();
         }
         let mut failure = match assembly.validate_success(canonical, evidence, |_, _, _| false) {
             RetainedSuccessValidation::Rejected(failure) => failure,
             _ => panic!("both rejected success paths must retain the failure assembly"),
         };
-        let operation = failure.assembly.operation.as_ref().unwrap();
+        let operation = failure.assembly.loan().operation.as_ref().unwrap();
         assert_eq!(
-            operation
-                .common
-                .coordinator
-                .recorded_control_cause()
-                .is_some(),
+            operation.common.recorded_control_cause().is_some(),
             accepted_control
         );
-        assert!(
-            operation
-                .common
-                .coordinator
-                .retained_ledger()
-                .ordinary_work_is_sealed()
-        );
+        assert!(operation.common.test_ledger().ordinary_work_is_sealed());
         if !accepted_control {
             assert_eq!(
                 failure.fallback_cause.class(),
@@ -560,14 +601,17 @@ fn protected_builder_distinguishes_accepted_control_from_fresh_cancellation() {
         let physical_before = account.snapshot();
         let ordinary_before = failure
             .assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         let protected_before = failure
             .assembly
+            .loan()
             .test_dimension_evidence(TestDimension::FailureTerminalWork)
             .unwrap();
         let attributed_before = failure
             .assembly
+            .loan()
             .fields
             .evidence_batch
             .as_ref()
@@ -576,8 +620,10 @@ fn protected_builder_distinguishes_accepted_control_from_fresh_cancellation() {
         let shares_before = account.share_call_count();
         let mut builder_returned_ok = false;
 
-        let result =
-            failure.try_retain_outcome_evidence_controlled(empty_plan(), |emplacer, control| {
+        let result = failure
+            .borrow_ordinary()
+            .loan_mut()
+            .try_retain_outcome_evidence_controlled(empty_plan(), |emplacer, control| {
                 assert_eq!(account.share_call_count(), shares_before + 1);
                 if accepted_control {
                     let mut permission = control.try_begin(NonZeroU64::MIN).unwrap_or_else(|_| {
@@ -601,10 +647,12 @@ fn protected_builder_distinguishes_accepted_control_from_fresh_cancellation() {
         assert!(builder_returned_ok);
         let ordinary = failure
             .assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
         let protected = failure
             .assembly
+            .loan()
             .test_dimension_evidence(TestDimension::FailureTerminalWork)
             .unwrap();
         assert_eq!(
@@ -619,10 +667,11 @@ fn protected_builder_distinguishes_accepted_control_from_fresh_cancellation() {
                 protected_before.consumed() + completed
             )
         );
-        assert!(failure.assembly.test_storage_graph_is_exact());
+        assert!(failure.assembly.loan().test_storage_graph_is_exact());
         assert!(
             !failure
                 .assembly
+                .loan()
                 .operation
                 .as_ref()
                 .unwrap()
@@ -661,6 +710,7 @@ fn protected_builder_distinguishes_accepted_control_from_fresh_cancellation() {
             assert_eq!(
                 failure
                     .assembly
+                    .loan()
                     .fields
                     .evidence_batch
                     .as_ref()
@@ -671,6 +721,7 @@ fn protected_builder_distinguishes_accepted_control_from_fresh_cancellation() {
             assert!(
                 failure
                     .assembly
+                    .loan()
                     .operation
                     .as_ref()
                     .unwrap()

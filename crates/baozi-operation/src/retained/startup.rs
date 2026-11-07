@@ -11,6 +11,12 @@ use crate::ledger::{
     AttributionBatchCreateError, FallbackBatchBaseline, Ledger, StartupAccountShareEnvelope,
     StartupAttributionGraph, StartupLedgerGraphSeal, StartupLedgerPlanParts,
 };
+mod finite;
+pub(super) use finite::{
+    FiniteStartupAdmissionCause, FiniteStartupCrossPlaneAdmissionFailure,
+    FiniteStartupCrossPlaneContainment, FiniteStartupCrossPlanePlan,
+};
+
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -222,6 +228,7 @@ pub(super) enum StartupAccountOwnerRole {
     EvidenceWitness,
     FallbackLease,
     EvidenceLease,
+    TerminalWitness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -635,25 +642,33 @@ impl PhysicalStorageAccount {
             StartupAccountOwnerRole::EvidenceLease,
         )?;
 
-        with_startup_account_lock(self, StartupLockKind::PhysicalTransition, |state| {
-            let mut next = *state;
-            next.admitted_retained_owners = next
-                .admitted_retained_owners
-                .checked_add(2)
-                .ok_or(StartupPhysicalNoMutation::RetainedOwnerOverflow)?;
-            try_admit_locked(
-                &mut next.counters,
-                self.limits().counter_limits(),
-                guard.manifest.aggregate,
-            )
-            .map_err(map_startup_admission_error)?;
-
-            inject_startup_transition_panic(StartupTransitionPanicPoint::BeforeCommit);
-            *state = next;
-            inject_startup_transition_panic(StartupTransitionPanicPoint::AfterCommit);
-            Ok(())
-        })
+        try_commit_startup_physical_charge(self, guard.manifest.aggregate, 2)
     }
+}
+
+/// One physical commit algorithm observes the charge and owner count of the actual graph.
+fn try_commit_startup_physical_charge(
+    account: &PhysicalStorageAccount,
+    charge: AdmissionCharge,
+    retained_owners: u64,
+) -> Result<(), StartupPhysicalNoMutation> {
+    with_startup_account_lock(account, StartupLockKind::PhysicalTransition, |state| {
+        let mut next = *state;
+        next.admitted_retained_owners = next
+            .admitted_retained_owners
+            .checked_add(retained_owners)
+            .ok_or(StartupPhysicalNoMutation::RetainedOwnerOverflow)?;
+        try_admit_locked(
+            &mut next.counters,
+            account.limits().counter_limits(),
+            charge,
+        )
+        .map_err(map_startup_admission_error)?;
+        inject_startup_transition_panic(StartupTransitionPanicPoint::BeforeCommit);
+        *state = next;
+        inject_startup_transition_panic(StartupTransitionPanicPoint::AfterCommit);
+        Ok(())
+    })
 }
 
 impl<'account> PendingOperationStartAdmission<'account> {

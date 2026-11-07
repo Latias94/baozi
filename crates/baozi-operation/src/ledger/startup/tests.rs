@@ -1,6 +1,10 @@
+use super::super::finite::{FiniteLedger, FiniteLedgerLimits};
 use super::super::{
     AttributionBatchPlan, CounterClass, LedgerCause, LedgerLimits, OutcomeEvidenceDestination,
-    OutputCommitment, test_attribution_batch_allocation_entries,
+    OutputCommitment, PublicationState, WorkDimensionState, WorkLane, WorkMode, WorkPolicy,
+    test_attribution_batch_allocation_entries, test_evidence_allocation_failure_is_armed,
+    test_evidence_allocation_guard, test_fail_next_evidence_allocation,
+    test_set_evidence_allocation_failure,
 };
 use super::*;
 use crate::{DimensionPolicy, OperationOwner};
@@ -14,6 +18,7 @@ impl OperationOwner for Owner {}
 enum Phase {
     Build,
     Finalize,
+    Publish,
     Unknown,
 }
 
@@ -22,70 +27,51 @@ enum Dimension {
     Bytes,
     Records,
     Scratch,
+    Canonical,
+    Evidence,
+    Progress,
     Unknown,
 }
 
 #[test]
-fn startup_current_state_admission_has_one_production_module() {
-    let ledger_root = include_str!("../../ledger.rs");
-    let reservation = include_str!("../reservation.rs");
-    let startup = include_str!("../startup.rs");
-    let crate_root = include_str!("../../lib.rs");
+fn startup_dynamic_adapters_share_the_borrowed_builder_and_owner_check() {
+    test_reset_startup_graph_probes(None);
+    let (limits, parts, _) = default_graph_request();
+    let mut ledger = frozen_graph_ledger(limits);
+    ledger
+        .preflight_startup_attribution_graph(&parts)
+        .expect("dynamic immutable preflight");
+    ledger
+        .view()
+        .preflight_startup_attribution_graph(&parts)
+        .expect("borrowed dynamic preflight");
+    assert_eq!(test_startup_graph_allocation_entries(), 0);
+    assert!(ledger.state.shared().is_none());
 
-    assert!(ledger_root.contains("mod reservation;"));
-    assert!(ledger_root.contains("pub(crate) use reservation::{"));
-    assert!(ledger_root.contains("mod startup;"));
-    assert!(ledger_root.contains("pub(crate) use startup::{"));
-    assert!(!ledger_root.contains("pub(crate) struct StartupLedgerPlan<"));
-    assert!(reservation.contains("pub(crate) struct AttributionReservationBatch<"));
-    assert!(!reservation.contains("TypedFreezeProof"));
-    assert!(!startup.contains("pub(crate) struct StartupLedgerPlan<"));
-    assert!(!startup.contains("fn try_qualify_startup<"));
-    assert!(startup.contains("pub(crate) struct StartupLedgerPlanParts<"));
-    assert!(startup.contains("pub(crate) fn preflight_startup_attribution_graph("));
-    assert!(startup.contains("pub(crate) struct StartupAttributionGraph<"));
-    assert!(!crate_root.contains("StartupAttributionGraph"));
-    assert!(!startup.contains("ensure_phase("));
+    let (graph, _) = ledger
+        .view()
+        .try_admit_startup_attribution_graph(parts)
+        .expect("dynamic graph through the borrowed builder")
+        .into_parts();
+    assert!(graph.belongs_to(&ledger));
+    assert!(graph.belongs_to_view(&ledger.view().as_read()));
 
-    let graph = startup
-        .split("pub(crate) struct StartupAttributionGraph<")
-        .nth(1)
-        .expect("startup graph exists")
-        .split("impl<O, P, D> Ledger<O, P, D>")
-        .next()
-        .expect("startup graph boundary exists");
-    assert!(graph.contains("cores: StartupLedgerCores"));
-    assert!(!graph.contains("AttributionReservationBatch"));
-    assert_eq!(
-        graph
-            .matches("pub(crate) fn into_runtime_baseline(")
-            .count(),
-        1
-    );
-    assert!(graph.contains("_authority: ReadyStartupGraphSplitAuthority"));
-    let graph_without_ready_split = graph.replacen(
-        "pub(crate) fn into_runtime_baseline(",
-        "fn into_runtime_baseline(",
-        1,
-    );
-    assert_eq!(
-        graph_without_ready_split.matches("pub(crate) fn ").count(),
-        1,
-        "the graph exposes only its actual-ledger identity check"
-    );
-    assert!(graph_without_ready_split.contains("pub(crate) fn belongs_to("));
-    for forbidden in [
-        "pub fn ",
-        "pub(super)",
-        "pub(in ",
-        "fn accept",
-        "fn into_parts",
-    ] {
-        assert!(
-            !graph_without_ready_split.contains(forbidden),
-            "startup graph exposes forbidden seam `{forbidden}`"
-        );
-    }
+    let (limits, parts, _) = default_graph_request();
+    let mut foreign = frozen_graph_ledger(limits);
+    assert!(!graph.belongs_to(&foreign));
+    assert!(!graph.belongs_to_view(&foreign.view().as_read()));
+    let foreign_graph = foreign
+        .try_bind_startup_attribution_graph(parts)
+        .expect("foreign graph with the same catalog");
+    assert!(!graph.belongs_to(&foreign));
+    assert!(!graph.belongs_to_view(&foreign.view().as_read()));
+
+    drop(graph);
+    assert_eq!(ledger.test_probe().current_live_bytes(), 0);
+    assert_eq!(ledger.test_probe().active_reservations(), 0);
+    drop(foreign_graph);
+    assert_eq!(foreign.test_probe().current_live_bytes(), 0);
+    assert_eq!(foreign.test_probe().active_reservations(), 0);
 }
 
 fn startup_limits(
@@ -316,6 +302,99 @@ fn default_graph_request() -> (
 
 fn frozen_graph_ledger(limits: LedgerLimits<Dimension>) -> Ledger<Owner, Phase, Dimension> {
     Ledger::try_new(limits, &[Phase::Build, Phase::Finalize]).expect("frozen startup graph ledger")
+}
+
+fn finite_startup_ledger(
+    operation_live_byte_limit: u64,
+    evidence_byte_limit: u64,
+) -> FiniteLedger<Owner, Phase, Dimension> {
+    let policies = [
+        Dimension::Progress,
+        Dimension::Bytes,
+        Dimension::Evidence,
+        Dimension::Records,
+        Dimension::Canonical,
+        Dimension::Scratch,
+    ]
+    .map(|dimension| {
+        let policy = if dimension == Dimension::Records {
+            DimensionPolicy::counter(u64::MAX, u64::MAX, u64::MAX)
+        } else {
+            DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, u64::MAX)
+        };
+        (
+            dimension,
+            policy.with_published_outcome_evidence_limit(u64::MAX),
+        )
+    });
+    FiniteLedger::try_new(
+        FiniteLedgerLimits::try_new(operation_live_byte_limit, evidence_byte_limit, policies)
+            .expect("six finite startup policies"),
+        [Phase::Publish, Phase::Build, Phase::Finalize],
+    )
+    .expect("three finite startup phases")
+}
+
+fn finite_graph_request() -> (StartupLedgerPlanParts<Owner, Phase, Dimension>, [u64; 4]) {
+    let batches = graph_batch_plans(
+        [Phase::Build, Phase::Finalize, Phase::Publish, Phase::Build],
+        [
+            Dimension::Bytes,
+            Dimension::Scratch,
+            Dimension::Canonical,
+            Dimension::Evidence,
+        ],
+    );
+    let covers = [
+        batches.canonical_assembly.planned_bytes,
+        batches.evidence_assembly.planned_bytes,
+        batches.fallback.planned_bytes,
+        batches.evidence.planned_bytes,
+    ];
+    (
+        StartupLedgerPlanParts {
+            batches,
+            retained_attributions: [
+                StartupRetainedAttribution::new(Phase::Finalize, Dimension::Bytes, 3),
+                StartupRetainedAttribution::new(Phase::Publish, Dimension::Progress, 5),
+            ],
+            account_shares: startup_account_shares(),
+            commitments: startup_commitments(Dimension::Records, Dimension::Records),
+        },
+        covers,
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FiniteStartupWorkObservation {
+    rows: [(Dimension, WorkPolicy, WorkDimensionState); 6],
+    mode: WorkMode,
+    open_envelopes: u64,
+    producer_open: bool,
+    parser_parent_open: bool,
+    parser_child_open: bool,
+    protected_open: bool,
+    protected_dimension: Option<usize>,
+    integrity_fault: bool,
+}
+
+fn finite_work_observation(
+    ledger: &FiniteLedger<Owner, Phase, Dimension>,
+) -> FiniteStartupWorkObservation {
+    FiniteStartupWorkObservation {
+        rows: ledger
+            .work
+            .each_ref()
+            .map(|row| (row.dimension, row.policy, row.state)),
+        mode: ledger.work_header.mode,
+        open_envelopes: ledger.work_header.open_envelopes,
+        producer_open: ledger.work_header.producer_open,
+        parser_parent_open: ledger.work_header.parser_parent_open,
+        parser_child_open: ledger.work_header.parser_child_open,
+        protected_open: ledger.work_header.protected_open,
+        protected_dimension: ledger.work_header.protected_dimension,
+        integrity_fault: ledger.work_header.integrity_fault,
+    }
 }
 
 fn preflight_startup(
@@ -1019,9 +1098,10 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
     );
     assert_eq!(
         ledger
+            .view()
             .try_admit_startup_ledger(
                 parts.reservation_specs(),
-                &parts.account_shares,
+                parts.account_shares.work_specs(),
                 parts.commitments,
             )
             .err(),
@@ -1046,9 +1126,10 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
     );
     assert_eq!(
         ledger
+            .view()
             .try_admit_startup_ledger(
                 parts.reservation_specs(),
-                &parts.account_shares,
+                parts.account_shares.work_specs(),
                 parts.commitments,
             )
             .err(),
@@ -1076,9 +1157,10 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
     );
     assert_eq!(
         ledger
+            .view()
             .try_admit_startup_ledger(
                 parts.reservation_specs(),
-                &parts.account_shares,
+                parts.account_shares.work_specs(),
                 parts.commitments,
             )
             .err(),
@@ -1102,9 +1184,10 @@ fn startup_preflight_preserves_live_work_and_commitment_error_order() {
     );
     assert_eq!(
         ledger
+            .view()
             .try_admit_startup_ledger(
                 parts.reservation_specs(),
-                &parts.account_shares,
+                parts.account_shares.work_specs(),
                 parts.commitments,
             )
             .err(),
@@ -1278,7 +1361,7 @@ fn startup_graph_owns_exact_envelopes_and_drops_storage_before_one_ledger_rollba
     assert_eq!(ownership.evidence_assembly.commitments.len(), 0);
     assert_eq!(ownership.fallback.commitments.len(), 1);
     assert_eq!(ownership.evidence.commitments.len(), 1);
-    assert_eq!(account_shares.steps.len(), 4);
+    assert_eq!(account_shares.into_steps().len(), 4);
 
     drop(graph);
 
@@ -1416,54 +1499,6 @@ fn startup_graph_rejects_missing_terminal_slots_before_ledger_or_allocator_side_
         assert_eq!(test_startup_graph_storage_releases(), 0);
         assert_eq!(test_startup_graph_ledger_release_locks(), 0);
     }
-}
-
-#[test]
-fn startup_graph_commit_tail_is_infallible_and_has_no_dynamic_phase_path() {
-    let startup = include_str!("../startup.rs");
-    let commit = startup
-        .split("fn commit_startup_ledger")
-        .nth(1)
-        .expect("startup commit helper exists")
-        .split("fn empty_startup_batch")
-        .next()
-        .expect("startup commit boundary exists");
-    for forbidden in [
-        "Result<",
-        "?",
-        "checked_",
-        "binary_search",
-        "ensure_phase",
-        "try_reserve",
-    ] {
-        assert!(
-            !commit.contains(forbidden),
-            "startup commit tail contains fallible operation `{forbidden}`"
-        );
-    }
-    let admission = startup
-        .split("fn try_admit_startup_ledger(")
-        .nth(1)
-        .expect("startup ledger admission exists")
-        .split("fn bind_startup_ledger(")
-        .next()
-        .expect("startup admission boundary exists");
-    assert_eq!(admission.matches("preflight_startup_ledger(").count(), 1);
-    assert_eq!(admission.matches("bind_startup_ledger(").count(), 1);
-    assert!(admission.contains("commit_startup_ledger"));
-    assert!(!admission.contains("try_reserve"));
-    assert!(!admission.contains("ensure_phase"));
-    let preflight = startup
-        .split("pub(crate) fn preflight_startup_attribution_graph(")
-        .nth(1)
-        .expect("read-only startup graph preflight exists")
-        .split("pub(crate) fn try_bind_startup_attribution_graph(")
-        .next()
-        .expect("read-only preflight boundary exists");
-    assert_eq!(preflight.matches("bind_startup_ledger(").count(), 1);
-    assert_eq!(preflight.matches("preflight_startup_ledger(").count(), 1);
-    assert!(!preflight.contains("commit_startup_ledger"));
-    assert!(!admission.contains("preflight_startup_attribution_graph"));
 }
 
 #[test]
@@ -1862,5 +1897,777 @@ fn startup_graph_allocator_failpoints_are_thread_local() {
 
     for worker in workers {
         worker.join().expect("startup graph failpoint worker");
+    }
+}
+
+#[test]
+fn finite_startup_graph_promotes_actual_storage_and_drops_exact_credits_after_backings() {
+    test_reset_startup_graph_probes(None);
+    let mut ledger = finite_startup_ledger(u64::MAX, u64::MAX);
+    let (parts, covers) = finite_graph_request();
+    let total_live = covers.into_iter().sum::<u64>() + 8;
+    let identity = ledger.identity;
+    let work_rows = ledger.work.as_ptr();
+    let (layout, mut pending) = {
+        let (mut work, _) = ledger.view().into_internal();
+        let layout = work
+            .bind_ordinary([Dimension::Records])
+            .expect("finite share layout");
+        let pending = layout
+            .admit_observed(
+                &mut work.reborrow().expect("finite work view").work,
+                [4],
+                WorkLane::Internal,
+            )
+            .expect("actual pending finite work");
+        (layout, pending)
+    };
+    let before_work = finite_work_observation(&ledger);
+
+    ledger
+        .view()
+        .preflight_startup_attribution_graph(&parts)
+        .expect("finite read-only preflight");
+    assert!(ledger.storage.shared().is_none());
+    assert_eq!(ledger.known_administrative_bytes(0), Some(0));
+    assert_eq!(test_startup_graph_allocation_entries(), 0);
+    assert_eq!(finite_work_observation(&ledger), before_work);
+
+    let (graph, shares) = ledger
+        .view()
+        .try_admit_startup_attribution_graph(parts)
+        .expect("actual finite startup promotion")
+        .into_parts();
+    let shared = Arc::clone(ledger.storage.shared().expect("promoted finite storage"));
+    let administrative_bytes = ledger
+        .known_administrative_bytes(0)
+        .expect("owned storage bytes");
+    assert!(administrative_bytes > 0);
+    assert_eq!(ledger.identity, identity);
+    assert_eq!(ledger.work.as_ptr(), work_rows);
+    assert_eq!(finite_work_observation(&ledger), before_work);
+    assert!(graph.belongs_to_view(&ledger.view().as_read()));
+    assert_eq!(test_startup_graph_allocation_entries(), 8);
+
+    let ownership = graph
+        .ownership
+        .as_ref()
+        .expect("finite graph backings and credits");
+    assert!(
+        ownership
+            .runtime_owners
+            .iter()
+            .all(|owner| Arc::ptr_eq(owner, &shared))
+    );
+    for core in [
+        &ownership.cores.canonical_assembly_cover,
+        &ownership.cores.evidence_assembly_cover,
+        &ownership.cores.fallback_cover,
+        &ownership.cores.evidence_cover,
+        &ownership.cores.fallback_attribution,
+        &ownership.cores.evidence_attribution,
+    ] {
+        assert!(Arc::ptr_eq(
+            core.owner.as_ref().expect("issued finite credit"),
+            &shared
+        ));
+    }
+    for (actual, cover) in [
+        batch_backing_bytes(&ownership.canonical_assembly),
+        batch_backing_bytes(&ownership.evidence_assembly),
+        batch_backing_bytes(&ownership.fallback),
+        batch_backing_bytes(&ownership.evidence),
+    ]
+    .into_iter()
+    .zip(covers)
+    {
+        assert!(actual <= cover);
+    }
+    assert!(ownership.canonical_assembly.commitments.is_empty());
+    assert!(ownership.evidence_assembly.commitments.is_empty());
+    assert_eq!(
+        ownership.fallback.commitments[0].dimension,
+        Dimension::Records
+    );
+    assert_eq!(ownership.fallback.commitments[0].amount, 4);
+    assert_eq!(
+        ownership.evidence.commitments[0].dimension,
+        Dimension::Records
+    );
+    assert_eq!(ownership.evidence.commitments[0].amount, 6);
+    for step in shares.into_steps() {
+        assert_eq!(step.into_charges(), startup_share_charges());
+    }
+    {
+        let state = lock(&shared);
+        assert_eq!(state.active_reservations, 6);
+        assert_eq!(state.current_live_bytes, total_live);
+        assert_eq!(state.peak_live_bytes, total_live);
+        assert_eq!(state.current_administrative_bytes, administrative_bytes);
+        let expected_dimensions = [covers[0] + 3, 0, covers[1], covers[2], covers[3], 5];
+        for (entry, expected) in state.dimensions.iter().zip(expected_dimensions) {
+            assert_eq!(entry.state.current_live_bytes, expected);
+            assert_eq!(entry.state.peak_live_bytes, expected);
+            assert_eq!(entry.state.published_outcome_evidence, 0);
+        }
+        for (phase, expected) in
+            state
+                .phase_states
+                .iter()
+                .zip([covers[2] + 5, covers[0] + covers[3], covers[1] + 3])
+        {
+            assert_eq!(phase.current_live_bytes, expected);
+            assert_eq!(phase.peak_live_bytes, expected);
+        }
+    }
+
+    drop(graph);
+
+    assert_eq!(test_startup_graph_storage_releases(), 8);
+    assert_eq!(test_startup_graph_ledger_release_locks(), 1);
+    assert_eq!(
+        test_startup_graph_storage_releases_at_ledger_lock(),
+        Some(8)
+    );
+    assert_eq!(finite_work_observation(&ledger), before_work);
+    assert_eq!(
+        ledger.known_administrative_bytes(0),
+        Some(administrative_bytes)
+    );
+    assert!(Arc::ptr_eq(
+        &shared,
+        ledger.storage.shared().expect("same finite storage")
+    ));
+    {
+        let state = lock(&shared);
+        assert_eq!(state.active_reservations, 0);
+        assert_eq!(state.current_live_bytes, 0);
+        assert_eq!(state.peak_live_bytes, total_live);
+        assert!(
+            state
+                .dimensions
+                .iter()
+                .all(|entry| entry.state.current_live_bytes == 0)
+        );
+        assert!(
+            state
+                .phase_states
+                .iter()
+                .all(|phase| phase.current_live_bytes == 0)
+        );
+        assert_eq!(Arc::strong_count(&shared), 2);
+    }
+    ledger
+        .view()
+        .into_internal()
+        .0
+        .resolve(layout, &mut pending, false)
+        .expect("resolve original finite frame");
+}
+
+#[test]
+fn finite_startup_graph_reuses_shared_identity_after_owner_move_and_current_live_rejection() {
+    test_reset_startup_graph_probes(None);
+    let mut ledger = finite_startup_ledger(u64::MAX, u64::MAX);
+    let (parts, covers) = finite_graph_request();
+    let (first, _) = ledger
+        .view()
+        .try_admit_startup_attribution_graph(parts)
+        .expect("first finite graph")
+        .into_parts();
+    let shared = Arc::clone(ledger.storage.shared().expect("first finite identity"));
+    let administrative_bytes = ledger.known_administrative_bytes(0);
+    let total_live = covers.into_iter().sum::<u64>() + 8;
+    let mut moved = ledger;
+    let mut foreign = finite_startup_ledger(u64::MAX, u64::MAX);
+    assert!(first.belongs_to_view(&moved.view().as_read()));
+    assert!(!first.belongs_to_view(&foreign.view().as_read()));
+    let (foreign_parts, _) = finite_graph_request();
+    let foreign_graph = foreign
+        .view()
+        .try_bind_startup_attribution_graph(foreign_parts)
+        .expect("foreign finite graph with identical keys");
+    assert!(!first.belongs_to_view(&foreign.view().as_read()));
+    drop(foreign_graph);
+    test_reset_startup_graph_probes(None);
+
+    let bytes = covers[0] + 3;
+    moved
+        .view()
+        .tighten_dimension_policy(
+            Dimension::Bytes,
+            DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, 2 * bytes - 1)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("tighten current finite storage policy");
+    let (parts, _) = finite_graph_request();
+    assert!(matches!(
+        moved.view().try_bind_startup_attribution_graph(parts),
+        Err(AttributionBatchCreateError::Ledger(LedgerCause::LimitExceeded {
+            class: CounterClass::Live,
+            dimension: Dimension::Bytes,
+            value,
+            limit,
+        })) if value == 2 * bytes && limit == 2 * bytes - 1
+    ));
+    assert_eq!(test_startup_graph_allocation_entries(), 0);
+    assert_eq!(lock(&shared).active_reservations, 6);
+    assert_eq!(lock(&shared).current_live_bytes, total_live);
+    assert_eq!(moved.known_administrative_bytes(0), administrative_bytes);
+    assert!(first.belongs_to_view(&moved.view().as_read()));
+
+    drop(first);
+    let (parts, _) = finite_graph_request();
+    let second = moved
+        .view()
+        .try_bind_startup_attribution_graph(parts)
+        .expect("released credits fit the current tightened policy");
+    assert!(Arc::ptr_eq(
+        &shared,
+        moved.storage.shared().expect("reused finite identity")
+    ));
+    assert_eq!(moved.known_administrative_bytes(0), administrative_bytes);
+    assert_eq!(test_startup_graph_allocation_entries(), 8);
+    drop(second);
+    assert_eq!(lock(&shared).active_reservations, 0);
+    assert_eq!(lock(&shared).current_live_bytes, 0);
+    assert_eq!(Arc::strong_count(&shared), 2);
+}
+
+#[test]
+fn finite_startup_graph_outlives_the_fixed_root_and_releases_its_actual_shared_state() {
+    test_reset_startup_graph_probes(None);
+    let (graph, shared, total_live) = {
+        let mut ledger = finite_startup_ledger(u64::MAX, u64::MAX);
+        let (parts, covers) = finite_graph_request();
+        let (graph, _) = ledger
+            .view()
+            .try_admit_startup_attribution_graph(parts)
+            .expect("finite graph before its root exits")
+            .into_parts();
+        let shared = Arc::clone(ledger.storage.shared().expect("escaping actual storage"));
+        (graph, shared, covers.into_iter().sum::<u64>() + 8)
+    };
+    assert_eq!(lock(&shared).current_live_bytes, total_live);
+    assert_eq!(lock(&shared).active_reservations, 6);
+    drop(graph);
+    assert_eq!(test_startup_graph_storage_releases(), 8);
+    assert_eq!(test_startup_graph_ledger_release_locks(), 1);
+    assert_eq!(
+        test_startup_graph_storage_releases_at_ledger_lock(),
+        Some(8)
+    );
+    assert_eq!(lock(&shared).current_live_bytes, 0);
+    assert_eq!(lock(&shared).active_reservations, 0);
+    assert_eq!(lock(&shared).peak_live_bytes, total_live);
+    assert_eq!(Arc::strong_count(&shared), 1);
+}
+
+#[test]
+fn finite_startup_numeric_rejections_precede_promotion_and_deferred_binding_errors() {
+    let _guard = test_evidence_allocation_guard();
+    let (_, covers) = finite_graph_request();
+    let bytes = covers[0] + 3;
+    let total_live = covers.into_iter().sum::<u64>() + 8;
+    for (operation_limit, tightened, expected) in [
+        (
+            u64::MAX,
+            Some((
+                Dimension::Bytes,
+                DimensionPolicy::reservable_bytes(u64::MAX, u64::MAX, u64::MAX, bytes - 1)
+                    .with_published_outcome_evidence_limit(u64::MAX),
+            )),
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Live,
+                dimension: Dimension::Bytes,
+                value: bytes,
+                limit: bytes - 1,
+            },
+        ),
+        (
+            total_live - 1,
+            None,
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Live,
+                dimension: Dimension::Progress,
+                value: total_live,
+                limit: total_live - 1,
+            },
+        ),
+        (
+            u64::MAX,
+            Some((
+                Dimension::Records,
+                DimensionPolicy::counter(11, 11, u64::MAX)
+                    .with_published_outcome_evidence_limit(u64::MAX),
+            )),
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension: Dimension::Records,
+                value: 12,
+                limit: 11,
+            },
+        ),
+        (
+            u64::MAX,
+            Some((
+                Dimension::Records,
+                DimensionPolicy::counter(12, 11, u64::MAX)
+                    .with_published_outcome_evidence_limit(u64::MAX),
+            )),
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+                value: 12,
+                limit: 11,
+            },
+        ),
+        (
+            u64::MAX,
+            Some((
+                Dimension::Records,
+                DimensionPolicy::counter(u64::MAX, u64::MAX, u64::MAX)
+                    .with_published_outcome_evidence_limit(9),
+            )),
+            LedgerCause::LimitExceeded {
+                class: CounterClass::PublishedOutcomeEvidence,
+                dimension: Dimension::Records,
+                value: 10,
+                limit: 9,
+            },
+        ),
+    ] {
+        test_reset_startup_graph_probes(None);
+        let mut ledger = finite_startup_ledger(operation_limit, 0);
+        let (mut parts, _) = finite_graph_request();
+        if let Some((dimension, policy)) = tightened {
+            ledger
+                .view()
+                .tighten_dimension_policy(dimension, policy)
+                .expect("current finite limit");
+        }
+        match &expected {
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Live,
+                ..
+            } => {
+                parts.account_shares = StartupAccountShareEnvelope::four_identical([
+                    (Dimension::Unknown, 1),
+                    (Dimension::Records, 2),
+                ]);
+                parts.commitments[0] = OutputCommitment::new(Dimension::Unknown, 4);
+            }
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted | CounterClass::Consumed,
+                ..
+            } => parts.commitments[0] = OutputCommitment::new(Dimension::Unknown, 4),
+            _ => {}
+        }
+        let before_work = finite_work_observation(&ledger);
+        test_fail_next_evidence_allocation();
+        assert!(matches!(
+            ledger.view().preflight_startup_attribution_graph(&parts),
+            Err(AttributionBatchCreateError::Ledger(actual)) if actual == expected
+        ));
+        assert!(matches!(
+            ledger.view().try_bind_startup_attribution_graph(parts),
+            Err(AttributionBatchCreateError::Ledger(actual)) if actual == expected
+        ));
+        assert!(test_evidence_allocation_failure_is_armed());
+        test_set_evidence_allocation_failure(false);
+        assert!(ledger.storage.shared().is_none());
+        assert_eq!(finite_work_observation(&ledger), before_work);
+        assert_eq!(test_startup_graph_allocation_entries(), 0);
+        assert_eq!(test_startup_graph_storage_releases(), 0);
+        assert_eq!(test_startup_graph_ledger_release_locks(), 0);
+        let state = ledger.storage.read();
+        let view = state.view();
+        assert_eq!(view.current_live_bytes, 0);
+        assert_eq!(view.peak_live_bytes, 0);
+        assert_eq!(view.active_reservations, 0);
+        assert_eq!(view.current_administrative_bytes, 0);
+        assert_eq!(view.peak_administrative_bytes, 0);
+        assert!(view.dimensions.iter().all(|entry| {
+            entry.state.current_live_bytes == 0
+                && entry.state.peak_live_bytes == 0
+                && entry.state.published_outcome_evidence == 0
+        }));
+        assert!(
+            view.phase_states
+                .iter()
+                .all(|phase| { phase.current_live_bytes == 0 && phase.peak_live_bytes == 0 })
+        );
+    }
+}
+
+#[test]
+fn finite_startup_uses_current_pending_work_and_tightened_policies_on_both_storage_paths() {
+    test_reset_startup_graph_probes(None);
+    let mut ledger = finite_startup_ledger(u64::MAX, u64::MAX);
+    let (layout, mut pending) = {
+        let (mut work, _) = ledger.view().into_internal();
+        let layout = work
+            .bind_ordinary([Dimension::Records])
+            .expect("finite pending share layout");
+        let pending = layout
+            .admit_observed(
+                &mut work.reborrow().expect("finite pending work").work,
+                [4],
+                WorkLane::Internal,
+            )
+            .expect("finite pending consumption");
+        (layout, pending)
+    };
+    ledger
+        .view()
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(16, 15, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("tightened finite work limits");
+    let before_work = finite_work_observation(&ledger);
+    let (parts, _) = finite_graph_request();
+    assert!(matches!(
+        ledger.view().preflight_startup_attribution_graph(&parts),
+        Err(AttributionBatchCreateError::Ledger(
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+                value: 16,
+                limit: 15,
+            }
+        ))
+    ));
+    assert!(matches!(
+        ledger.view().try_bind_startup_attribution_graph(parts),
+        Err(AttributionBatchCreateError::Ledger(
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: Dimension::Records,
+                value: 16,
+                limit: 15,
+            }
+        ))
+    ));
+    assert!(ledger.storage.shared().is_none());
+    assert_eq!(finite_work_observation(&ledger), before_work);
+    assert_eq!(test_startup_graph_allocation_entries(), 0);
+    ledger
+        .view()
+        .into_internal()
+        .0
+        .resolve(layout, &mut pending, false)
+        .expect("release pending finite work");
+
+    let after_resolve = finite_work_observation(&ledger);
+    let (parts, _) = finite_graph_request();
+    let graph = ledger
+        .view()
+        .try_bind_startup_attribution_graph(parts)
+        .expect("resolved pending work leaves exact startup headroom");
+    let shared = Arc::clone(
+        ledger
+            .storage
+            .shared()
+            .expect("finite promotion after resolution"),
+    );
+    drop(graph);
+    assert_eq!(finite_work_observation(&ledger), after_resolve);
+
+    ledger
+        .view()
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(15, 15, u64::MAX)
+                .with_published_outcome_evidence_limit(u64::MAX),
+        )
+        .expect("tighten the shared finite work policy");
+    let before_rejection = finite_work_observation(&ledger);
+    let (parts, _) = finite_graph_request();
+    assert!(matches!(
+        ledger.view().try_bind_startup_attribution_graph(parts),
+        Err(AttributionBatchCreateError::Ledger(
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension: Dimension::Records,
+                value: 16,
+                limit: 15,
+            }
+        ))
+    ));
+    assert_eq!(finite_work_observation(&ledger), before_rejection);
+    assert!(Arc::ptr_eq(
+        &shared,
+        ledger.storage.shared().expect("unchanged shared identity")
+    ));
+    assert_eq!(test_startup_graph_allocation_entries(), 8);
+    assert_eq!(lock(&shared).active_reservations, 0);
+    assert_eq!(lock(&shared).current_live_bytes, 0);
+}
+
+#[test]
+fn finite_startup_checks_current_published_evidence_before_promoting() {
+    test_reset_startup_graph_probes(None);
+    let mut ledger = finite_startup_ledger(u64::MAX, 0);
+    let records = ledger
+        .catalog
+        .binary_search(&Dimension::Records)
+        .expect("finite records slot");
+    ledger.storage.write().view_mut().dimensions[records]
+        .state
+        .published_outcome_evidence = 1;
+    ledger
+        .view()
+        .tighten_dimension_policy(
+            Dimension::Records,
+            DimensionPolicy::counter(u64::MAX, u64::MAX, u64::MAX)
+                .with_published_outcome_evidence_limit(10),
+        )
+        .expect("current published finite policy");
+    let before_work = finite_work_observation(&ledger);
+    let (parts, _) = finite_graph_request();
+    assert!(matches!(
+        ledger.view().preflight_startup_attribution_graph(&parts),
+        Err(AttributionBatchCreateError::Ledger(
+            LedgerCause::LimitExceeded {
+                class: CounterClass::PublishedOutcomeEvidence,
+                dimension: Dimension::Records,
+                value: 11,
+                limit: 10,
+            }
+        ))
+    ));
+    assert!(matches!(
+        ledger.view().try_bind_startup_attribution_graph(parts),
+        Err(AttributionBatchCreateError::Ledger(
+            LedgerCause::LimitExceeded {
+                class: CounterClass::PublishedOutcomeEvidence,
+                dimension: Dimension::Records,
+                value: 11,
+                limit: 10,
+            }
+        ))
+    ));
+    assert!(ledger.storage.shared().is_none());
+    assert_eq!(finite_work_observation(&ledger), before_work);
+    assert_eq!(test_startup_graph_allocation_entries(), 0);
+    let state = ledger.storage.read();
+    let view = state.view();
+    assert_eq!(view.dimensions[records].state.published_outcome_evidence, 1);
+    assert_eq!(view.active_reservations, 0);
+    assert_eq!(view.current_live_bytes, 0);
+    assert_eq!(view.current_administrative_bytes, 0);
+    assert_eq!(view.peak_administrative_bytes, 0);
+}
+
+#[test]
+fn finite_startup_promotion_denial_and_candidate_failure_preserve_the_actual_inline_source() {
+    let _guard = test_evidence_allocation_guard();
+    for allocation_failure in [false, true] {
+        test_reset_startup_graph_probes(None);
+        let evidence_limit = if allocation_failure { u64::MAX } else { 0 };
+        let mut ledger = finite_startup_ledger(u64::MAX, evidence_limit);
+        ledger
+            .view()
+            .charge_attempted(Dimension::Records, 2)
+            .expect("existing finite attempts");
+        ledger
+            .view()
+            .charge_consumed(Dimension::Records, 1)
+            .expect("existing finite consumption");
+        let before_work = finite_work_observation(&ledger);
+        let work_rows = ledger.work.as_ptr();
+        let identity = ledger.identity;
+        let (dimensions, phases, phase_states, before_dimensions) = {
+            let state = ledger.storage.read();
+            let view = state.view();
+            let rows: [_; 6] = std::array::from_fn(|position| {
+                let entry = &view.dimensions[position];
+                (entry.dimension, entry.policy, entry.state)
+            });
+            (
+                view.dimensions.as_ptr(),
+                state.phases().as_ptr(),
+                view.phase_states.as_ptr(),
+                rows,
+            )
+        };
+        let (parts, _) = finite_graph_request();
+        ledger
+            .view()
+            .preflight_startup_attribution_graph(&parts)
+            .expect("finite numeric preflight before promotion");
+        assert_eq!(ledger.known_administrative_bytes(0), Some(0));
+        test_fail_next_evidence_allocation();
+        let result = ledger.view().try_bind_startup_attribution_graph(parts);
+        if allocation_failure {
+            assert!(matches!(
+                result,
+                Err(AttributionBatchCreateError::Ledger(LedgerCause::Evidence {
+                    cause: super::super::LedgerEvidenceError::AllocationFailed {
+                        purpose: super::super::LedgerEvidencePurpose::SharedStorage,
+                        requested_bytes,
+                    },
+                })) if requested_bytes == u64::try_from(std::mem::size_of::<
+                    Mutex<Option<LedgerState<Phase, Dimension>>>,
+                >()).expect("known shared payload bytes")
+            ));
+            assert!(!test_evidence_allocation_failure_is_armed());
+        } else {
+            assert!(matches!(
+                result,
+                Err(AttributionBatchCreateError::Ledger(LedgerCause::Evidence {
+                    cause: super::super::LedgerEvidenceError::LimitExceeded {
+                        purpose: super::super::LedgerEvidencePurpose::SharedStorage,
+                        value,
+                        limit: 0,
+                    },
+                })) if value > 0
+            ));
+            assert!(test_evidence_allocation_failure_is_armed());
+        }
+        test_set_evidence_allocation_failure(false);
+        assert!(ledger.storage.shared().is_none());
+        assert_eq!(ledger.identity, identity);
+        assert_eq!(ledger.work.as_ptr(), work_rows);
+        assert_eq!(finite_work_observation(&ledger), before_work);
+        assert_eq!(test_startup_graph_allocation_entries(), 0);
+        assert_eq!(test_startup_graph_storage_releases(), 0);
+        assert_eq!(test_startup_graph_ledger_release_locks(), 0);
+        {
+            let state = ledger.storage.read();
+            let view = state.view();
+            let rows: [_; 6] = std::array::from_fn(|position| {
+                let entry = &view.dimensions[position];
+                (entry.dimension, entry.policy, entry.state)
+            });
+            assert_eq!(view.dimensions.as_ptr(), dimensions);
+            assert_eq!(state.phases().as_ptr(), phases);
+            assert_eq!(view.phase_states.as_ptr(), phase_states);
+            assert_eq!(rows, before_dimensions);
+            assert_eq!(view.current_live_bytes, 0);
+            assert_eq!(view.peak_live_bytes, 0);
+            assert_eq!(view.active_reservations, 0);
+            assert_eq!(view.current_administrative_bytes, 0);
+            assert_eq!(view.peak_administrative_bytes > 0, allocation_failure);
+            assert_eq!(view.publication, PublicationState::Open);
+            assert!(
+                view.phase_states
+                    .iter()
+                    .all(|phase| { phase.current_live_bytes == 0 && phase.peak_live_bytes == 0 })
+            );
+        }
+        if allocation_failure {
+            let (parts, _) = finite_graph_request();
+            let graph = ledger
+                .view()
+                .try_bind_startup_attribution_graph(parts)
+                .expect("original inline source remains promotable after candidate failure");
+            drop(graph);
+            assert_eq!(ledger.identity, identity);
+            assert_eq!(finite_work_observation(&ledger), before_work);
+            assert_eq!(test_startup_graph_allocation_entries(), 8);
+            assert_eq!(ledger.storage.read().view().current_live_bytes, 0);
+            assert_eq!(ledger.storage.read().view().active_reservations, 0);
+        }
+    }
+}
+
+#[test]
+fn every_finite_startup_backing_failure_releases_only_its_six_credits_after_eight_backings() {
+    for already_shared in [false, true] {
+        for failure_index in 0..8 {
+            test_reset_startup_graph_probes(Some(failure_index));
+            let mut ledger = finite_startup_ledger(u64::MAX, u64::MAX);
+            let existing = already_shared.then(|| {
+                ledger
+                    .view()
+                    .reserve(Phase::Finalize, Dimension::Progress, 7)
+                    .expect("preexisting finite credit")
+            });
+            let shared_before = ledger.storage.shared().map(Arc::clone);
+            let administrative_before = ledger.known_administrative_bytes(0);
+            let (layout, mut pending) = {
+                let (mut work, _) = ledger.view().into_internal();
+                let layout = work
+                    .bind_ordinary([Dimension::Records])
+                    .expect("finite failure work layout");
+                let pending = layout
+                    .admit_observed(
+                        &mut work.reborrow().expect("finite failure work").work,
+                        [4],
+                        WorkLane::Internal,
+                    )
+                    .expect("preexisting finite pending work");
+                (layout, pending)
+            };
+            let before_work = finite_work_observation(&ledger);
+            let work_rows = ledger.work.as_ptr();
+            let (parts, covers) = finite_graph_request();
+            assert!(matches!(
+                ledger.view().try_bind_startup_attribution_graph(parts),
+                Err(AttributionBatchCreateError::AllocationFailed)
+            ));
+            assert_eq!(test_startup_graph_allocation_entries(), failure_index + 1);
+            assert_eq!(test_startup_graph_storage_releases(), 8);
+            assert_eq!(test_startup_graph_ledger_release_locks(), 1);
+            assert_eq!(
+                test_startup_graph_storage_releases_at_ledger_lock(),
+                Some(8)
+            );
+            assert_eq!(ledger.work.as_ptr(), work_rows);
+            assert_eq!(finite_work_observation(&ledger), before_work);
+            let shared = Arc::clone(
+                ledger
+                    .storage
+                    .shared()
+                    .expect("actual finite shared source"),
+            );
+            if let Some(before) = &shared_before {
+                assert!(Arc::ptr_eq(before, &shared));
+                assert_eq!(ledger.known_administrative_bytes(0), administrative_before);
+            }
+            drop(shared_before);
+            let baseline_bytes = if already_shared { 7 } else { 0 };
+            let baseline_reservations = u64::from(already_shared);
+            let total_live = covers.into_iter().sum::<u64>() + 8 + baseline_bytes;
+            {
+                let state = lock(&shared);
+                assert_eq!(state.current_live_bytes, baseline_bytes);
+                assert_eq!(state.active_reservations, baseline_reservations);
+                assert_eq!(state.peak_live_bytes, total_live);
+                assert!(state.current_administrative_bytes > 0);
+                for entry in &state.dimensions {
+                    let expected = if entry.dimension == Dimension::Progress {
+                        baseline_bytes
+                    } else {
+                        0
+                    };
+                    assert_eq!(entry.state.current_live_bytes, expected);
+                    assert_eq!(entry.state.published_outcome_evidence, 0);
+                }
+                for (position, phase) in state.phase_states.iter().enumerate() {
+                    assert_eq!(
+                        phase.current_live_bytes,
+                        if position == 2 { baseline_bytes } else { 0 }
+                    );
+                }
+                assert_eq!(
+                    Arc::strong_count(&shared),
+                    if already_shared { 3 } else { 2 }
+                );
+            }
+            ledger
+                .view()
+                .into_internal()
+                .0
+                .resolve(layout, &mut pending, false)
+                .expect("resolve only the original frame");
+            drop(existing);
+            assert_eq!(lock(&shared).current_live_bytes, 0);
+            assert_eq!(lock(&shared).active_reservations, 0);
+            assert_eq!(Arc::strong_count(&shared), 2);
+        }
     }
 }

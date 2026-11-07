@@ -111,7 +111,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    if operation.raw.is_terminal_only() {
+    if operation.raw.loan().is_terminal_only() {
         return Err(StoreTranscriptStartError::new(
             operation,
             StoreTranscriptStartCause::Runtime(StoreRuntimeError::FallbackOnly),
