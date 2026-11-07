@@ -1,5 +1,11 @@
 //! Concrete finite binding for the one shared central validation algorithm.
 
+pub(in crate::concrete_store::activation) mod freeze;
+pub use freeze::{
+    FiniteCanonicalFreezePermit, FiniteCanonicalFreezePermitIssue, FiniteCanonicalJointCommit,
+    FiniteCanonicalJointSuccess,
+};
+
 use super::super::payload_owner::PayloadValue;
 use super::super::*;
 use crate::concrete_store::finite::{

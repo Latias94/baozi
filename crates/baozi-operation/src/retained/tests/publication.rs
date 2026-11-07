@@ -2712,7 +2712,7 @@ fn frozen_success_classification_defers_qualification_and_freeze_until_finish() 
     let account = account(&factory, u64::MAX, 128);
     let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     let (deferred, ledger) = {
-        let validated =
+        let mut validated =
             validated_freeze_success_with_limits(&mut invocation_root, &account, 64, 64, 1);
         let ledger = validated
             .assembly
@@ -2723,15 +2723,21 @@ fn frozen_success_classification_defers_qualification_and_freeze_until_finish() 
             .common
             .test_ledger()
             .test_shared_probe();
-        let permit = match validated
-            .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
+        match validated
+            .assembly
+            .loan_mut()
+            .try_issue_freeze_decision(
+                &validated.proof,
+                TestDimension::Bytes,
+                TestDimension::Bytes,
+                final_progress(),
+            )
             .unwrap_or_else(|_| panic!("the exact destinations must issue a permit"))
         {
-            RetainedSuccessFreezePermitIssue::Ready(permit) => permit,
+            RetainedSuccessFreezeDecision::Ready => {}
             _ => panic!("the healthy candidate must retain a ready permit"),
-        };
+        }
         let physical_before = account.snapshot();
-        let RetainedSuccessFreezeContribution { validated } = permit.into_contribution();
         let ValidatedRetainedSuccess { assembly, proof } = validated;
         let classification = assembly
             .into_loan()
@@ -2855,31 +2861,44 @@ fn assert_freeze_destination_rejected(
 
     let mut invocation_root_2: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     {
-        let issue = validated_freeze_success_with_limits(
+        let mut validated = validated_freeze_success_with_limits(
             &mut invocation_root_2,
             account,
             committed_limit,
             evidence_limit,
             evidence_members,
-        )
-        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
-        .unwrap_or_else(|_| panic!("destination rejection must retain the ordinary failure owner"));
+        );
+        let decision = validated
+            .assembly
+            .loan_mut()
+            .try_issue_freeze_decision(
+                &validated.proof,
+                TestDimension::Bytes,
+                TestDimension::Bytes,
+                final_progress(),
+            )
+            .unwrap_or_else(|_| {
+                panic!("destination rejection must retain the ordinary failure owner")
+            });
         assert!(!account.snapshot().poisoned());
-        match issue {
-            RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
+        match decision {
+            RetainedSuccessFreezeDecision::DestinationRejected { cause } => {
                 assert_eq!(cause.class(), PreparationFailureClass::Ledger);
                 assert_eq!(
-                    failure.assembly.loan.fields.mode,
+                    validated.assembly.loan().fields.mode,
                     RetainedOutcomeMode::FailureOnly
                 );
-                assert!(failure.assembly.loan.canonical_ownership_is_absent());
-                assert_eq!(failure.assembly.loan().outcome_evidence_commitment_len(), 0);
-                drop(failure);
+                assert!(validated.assembly.loan().canonical_ownership_is_absent());
+                assert_eq!(
+                    validated.assembly.loan().outcome_evidence_commitment_len(),
+                    0
+                );
+                drop(validated);
             }
-            RetainedSuccessFreezePermitIssue::Ready(_) => {
+            RetainedSuccessFreezeDecision::Ready => {
                 panic!("destination-ineligible exact pair must not issue a ready permit")
             }
-            RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
+            RetainedSuccessFreezeDecision::RichFailure { .. } => {
                 panic!("zero-commit destination rejection must not masquerade as frozen failure")
             }
         }
@@ -2921,41 +2940,44 @@ fn freeze_permit_issues_ready_for_the_exact_qualified_pair() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
-    let validated = validated_freeze_success_with_limits(&mut invocation_root, &account, 1, 2, 1);
+    let mut validated =
+        validated_freeze_success_with_limits(&mut invocation_root, &account, 1, 2, 1);
 
-    let permit = match validated
-        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
+    match validated
+        .assembly
+        .loan_mut()
+        .try_issue_freeze_decision(
+            &validated.proof,
+            TestDimension::Bytes,
+            TestDimension::Bytes,
+            final_progress(),
+        )
         .unwrap_or_else(|_| panic!("qualified exact pair must retain the freeze owner"))
     {
-        RetainedSuccessFreezePermitIssue::Ready(permit) => permit,
-        RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
+        RetainedSuccessFreezeDecision::Ready => {}
+        RetainedSuccessFreezeDecision::RichFailure { .. } => {
             panic!("qualified exact pair must issue a ready freeze permit")
         }
-        RetainedSuccessFreezePermitIssue::DestinationRejected { .. } => {
+        RetainedSuccessFreezeDecision::DestinationRejected { .. } => {
             panic!("qualified exact pair must not reject its destinations")
         }
-    };
-    let snapshot = permit
+    }
+    let snapshot = validated
+        .assembly
+        .loan()
         .terminal_observation(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ready freeze permit must expose the ledger observation"));
     assert_eq!(snapshot.pending_publication(), 0);
     assert_eq!(snapshot.committed(), 0);
     assert_eq!(snapshot.committed_canonical_output(), 0);
     assert_eq!(snapshot.published_outcome_evidence(), 0);
+    assert_eq!(validated.assembly.loan().canonical_commitment_len(), 1);
     assert_eq!(
-        permit.validated.assembly.loan().canonical_commitment_len(),
-        1
-    );
-    assert_eq!(
-        permit
-            .validated
-            .assembly
-            .loan()
-            .outcome_evidence_commitment_len(),
+        validated.assembly.loan().outcome_evidence_commitment_len(),
         1
     );
 
-    drop(permit);
+    drop(validated);
     drop(invocation_root);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);

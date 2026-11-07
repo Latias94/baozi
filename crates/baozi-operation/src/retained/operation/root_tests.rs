@@ -3,7 +3,7 @@ use crate::ledger::OutputCommitment;
 use crate::retained::{
     CanonicalRetainedSlot, OutcomeEvidenceRetainedSlot, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, RetainedBlockTablePlan,
-    RetainedClosureValidationError, RetainedFailureValidation, RetainedSuccessFreezePermitIssue,
+    RetainedClosureValidationError, RetainedFailureValidation, RetainedSuccessFreezeDecision,
     RetainedSuccessJointCommitFormation, RetainedSuccessValidation, TerminalDisposition,
 };
 use std::sync::{Arc, Mutex};
@@ -2462,7 +2462,9 @@ fn freeze_permit_phase_order_panic_keeps_the_real_validated_tables_and_control_o
         assert!(drops.lock().unwrap().is_empty());
 
         let panic = match catch_unwind(AssertUnwindSafe(|| {
-            let _ = validated.try_issue_freeze_permit(
+            let mut validated = validated;
+            let _ = validated.assembly.loan_mut().try_issue_freeze_decision(
+                &validated.proof,
                 1,
                 1,
                 FinalProgress::new(AttachedOrderPanicPhase::Terminal, Unit, 1),
@@ -3423,7 +3425,7 @@ fn validated_changed_success_ready_preserves_original_tables_set_and_keys_until_
     let probe = assembly.loan().test_ledger_probe();
     let work_before = assembly.loan().test_dimension_evidence(1).unwrap();
     let (prepared, control_cause) = {
-        let validated =
+        let mut validated =
             match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
                 session
                     .canonical(canonical)
@@ -3435,15 +3437,15 @@ fn validated_changed_success_ready_preserves_original_tables_set_and_keys_until_
                 RetainedSuccessValidation::Valid(validated) => validated,
                 _ => panic!("the genuine original roots must validate"),
             };
-        let permit = match validated
-            .try_issue_freeze_permit(1, 1, FinalProgress::new(Phase, Unit, 2))
+        match validated
+            .assembly
+            .loan_mut()
+            .try_issue_freeze_decision(&validated.proof, 1, 1, FinalProgress::new(Phase, Unit, 2))
             .unwrap_or_else(|_| panic!("actual exact destination qualification must succeed"))
         {
-            RetainedSuccessFreezePermitIssue::Ready(permit) => permit,
+            RetainedSuccessFreezeDecision::Ready => {}
             _ => panic!("the validated original candidate must receive a real freeze permit"),
-        };
-        let crate::retained::RetainedSuccessFreezeContribution { validated } =
-            permit.into_contribution();
+        }
         let crate::retained::ValidatedRetainedSuccess { assembly, proof } = validated;
         let classification = assembly
             .into_loan()

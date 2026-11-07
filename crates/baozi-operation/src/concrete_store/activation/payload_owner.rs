@@ -191,6 +191,14 @@ impl<T, S: PayloadStorage> PayloadOwner<T, S> {
         }
     }
 
+    pub(super) fn storage_mut(&mut self) -> &mut S {
+        &mut self
+            .parts
+            .as_mut()
+            .expect("a live payload owner retains its storage")
+            .1
+    }
+
     pub(super) fn into_parts(mut self) -> (T, S) {
         self.parts.take().expect("payload owner is consumed once")
     }
@@ -307,31 +315,7 @@ where
     }
 }
 
-impl<'inv, O, PP, U, CK, CT, EK, ET> PayloadStorage
-    for StoreSuccessFreezePermit<'inv, O, PP, U, CK, CT, EK, ET>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn contain_payload_failure(self) {
-        let _ = self.contain_activation_fault();
-    }
-}
-
 impl<'inv, O, PP, U, EK, ET> PayloadStorage for StoreFailureAssembly<'inv, O, PP, U, EK, ET>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn contain_payload_failure(self) {
-        let _ = self.contain_activation_fault();
-    }
-}
-
-impl<'inv, O, PP, U, CK, CT, EK, ET> PayloadStorage
-    for StoreSuccessFreezeContribution<'inv, O, PP, U, CK, CT, EK, ET>
 where
     O: OperationOwner,
     PP: ProgressPhase,

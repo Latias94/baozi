@@ -230,6 +230,7 @@ where
             evidence_root,
             forced_cause,
             error,
+            None,
         )
     }
 
@@ -383,6 +384,7 @@ where
             cause: PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE),
             provenance: ordinary::StoreSuccessFallbackProvenance::EarlyAssemblyLatch,
             error,
+            original_freeze_control: None,
         }
     }
 }
@@ -418,7 +420,9 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFiel
         )
     }
 
-    fn assembly_borrow(&mut self) -> RawStoreAssemblyBorrow<'_, O, PP, U> {
+    pub(in crate::concrete_store) fn assembly_borrow(
+        &mut self,
+    ) -> RawStoreAssemblyBorrow<'_, O, PP, U> {
         RetainedPublicationAssemblyBorrow::from_loan(
             self.raw
                 .assembly_loan()

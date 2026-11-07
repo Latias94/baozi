@@ -5,6 +5,8 @@ mod activation_tests;
 mod completion;
 #[cfg(test)]
 mod final_failure_tests;
+#[cfg(test)]
+mod freeze_joint_tests;
 pub use completion::{
     FiniteCanonicalInvocationCompletion, FiniteCanonicalInvocationOutcome,
     FiniteCanonicalOperationCompletion,

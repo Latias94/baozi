@@ -13,22 +13,32 @@ use crate::concrete_store::{PreparedFiniteStoreFailureOutcome, PreparedFiniteSto
 use crate::retained::RetainedClosureValidation;
 
 /// Final-only rooted evidence coupled to its original finite failure assembly.
-pub type FiniteRootedFailureEvidence<'host, O, PP, U, Cause, EK, ET> = CanonicalFinal<
-    RootedFailureEvidence<
-        'host,
-        Cause,
-        FiniteStoreFailureAssembly<'host, O, PP, U, EK, ET>,
-        OrdinaryFailureState,
-    >,
->;
+pub type FiniteRootedFailureEvidence<'host, O, PP, U, Cause, EK, ET, State = OrdinaryFailureState> =
+    CanonicalFinal<
+        RootedFailureEvidence<
+            'host,
+            Cause,
+            FiniteStoreFailureAssembly<'host, O, PP, U, EK, ET>,
+            State,
+        >,
+    >;
 
 /// Final-only evidence with the original finite closure proof and commitment.
-pub type FiniteValidatedFailureEvidence<'host, O, PP, U, Cause, EK, ET> = CanonicalFinal<
+pub type FiniteValidatedFailureEvidence<
+    'host,
+    O,
+    PP,
+    U,
+    Cause,
+    EK,
+    ET,
+    State = OrdinaryFailureState,
+> = CanonicalFinal<
     ValidatedFailureEvidence<
         'host,
         Cause,
         ValidatedFiniteStoreFailure<'host, O, PP, U, EK, ET>,
-        OrdinaryFailureState,
+        State,
     >,
 >;
 
@@ -38,8 +48,17 @@ pub type FiniteRejectedFailureEvidence<'host, O, PP, U, Cause, EK, ET> = Canonic
 >;
 
 /// One shared validation result bound to the original finite owner.
-pub type FiniteRootedFailureValidation<'host, O, PP, U, Cause, EK, ET> = RootedFailureValidation<
-    FiniteValidatedFailureEvidence<'host, O, PP, U, Cause, EK, ET>,
+pub type FiniteRootedFailureValidation<
+    'host,
+    O,
+    PP,
+    U,
+    Cause,
+    EK,
+    ET,
+    State = OrdinaryFailureState,
+> = RootedFailureValidation<
+    FiniteValidatedFailureEvidence<'host, O, PP, U, Cause, EK, ET, State>,
     FiniteRejectedFailureEvidence<'host, O, PP, U, Cause, EK, ET>,
     VerifiedMinimalFallback<StoreRuntimeError, PreparedFiniteStoreFallback>,
 >;
@@ -49,12 +68,21 @@ pub type FinitePreparedFailureEvidence<Cause, EK, ET> =
     PreparedFailureEvidence<Cause, PreparedFiniteStoreFailureOutcome<EK, ET>>;
 
 /// Final-only rich evidence or the original cause coupled to finite minimal fallback.
-pub type FiniteFailureEvidenceOutcome<'host, O, PP, U, Cause, EK, ET> = FailureEvidenceOutcome<
-    FiniteRootedFailureEvidence<'host, O, PP, U, Cause, EK, ET>,
+pub type FiniteFailureEvidenceOutcome<
+    'host,
+    O,
+    PP,
+    U,
+    Cause,
+    EK,
+    ET,
+    State = OrdinaryFailureState,
+> = FailureEvidenceOutcome<
+    FiniteRootedFailureEvidence<'host, O, PP, U, Cause, EK, ET, State>,
     VerifiedMinimalFallback<Cause, PreparedFiniteStoreFallback>,
 >;
 
-struct FiniteFailureTransition<'host, O, PP, U, Cause, EK, ET>
+struct FiniteFailureTransition<'host, O, PP, U, Cause, EK, ET, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -68,13 +96,16 @@ where
     forced_cause: Option<PreparationFailureCode>,
     root: OutcomeEvidenceStoreRef<EK, ET>,
     error: Option<StorePrepareError>,
+    original_freeze_control: Option<ControlCause>,
     resolved: Option<EvidenceValidation>,
     unmatched: Option<EvidenceDecision>,
     failure_work: FailureEvidenceWorkBudget,
     destination: StoreDimensionKey,
+    _lifecycle: PhantomData<State>,
 }
 
-impl<'host, O, PP, U, Cause, EK, ET> FiniteFailureTransition<'host, O, PP, U, Cause, EK, ET>
+impl<'host, O, PP, U, Cause, EK, ET, State>
+    FiniteFailureTransition<'host, O, PP, U, Cause, EK, ET, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -89,7 +120,7 @@ where
         destination: StoreDimensionKey,
     ) -> Self {
         let (source, failure) = owner.into_parts();
-        let (fields, state, failure_cause, forced_cause, root, error) =
+        let (fields, state, failure_cause, forced_cause, root, error, original_freeze_control) =
             failure.into_failure_parts();
         Self {
             fields: Some(fields),
@@ -100,10 +131,12 @@ where
             forced_cause,
             root,
             error,
+            original_freeze_control,
             resolved: None,
             unmatched: None,
             failure_work,
             destination,
+            _lifecycle: PhantomData,
         }
     }
 
@@ -118,6 +151,7 @@ where
             .take()
             .expect("the finite failure guard retains its original fields until transfer")
             .into_request_error(self.error);
+        error.attach_original_freeze_control(self.original_freeze_control.take());
         let mut first_panic = None;
         drop_finite_error_value(&mut self.source, &mut error, &mut first_panic);
         drop_finite_error_value(&mut self.runtime, &mut error, &mut first_panic);
@@ -145,35 +179,35 @@ where
             &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
             FailureEvidenceMember<'session, EK, ET>,
         ) -> bool,
-    ) -> FiniteFailureValidationResult<'host, O, PP, U, Cause, EK, ET>
+    ) -> FiniteFailureValidationResult<'host, O, PP, U, Cause, EK, ET, State>
     where
         ET: Copy + Send + Sync + 'static,
+        State: FailureLifecycleState,
     {
-        let resolution =
-            run_rooted_failure_validation::<O, PP, U, Cause, EK, ET, OrdinaryFailureState, _>(
-                self.fields
-                    .as_mut()
-                    .expect("the original finite assembly remains installed")
-                    .failure_decision_loan(&mut self.state),
-                FailureValidationFacts {
-                    root: self.root,
-                    failure_cause: self.failure_cause,
-                    forced_cause: self.forced_cause,
-                    original_error: self.error,
-                    destination: self.destination,
-                },
-                &self.failure_work,
-                FailureValidationPayloads {
-                    source: &mut self.source,
-                    runtime: &mut self.runtime,
-                    fallback: Some(fallback),
-                },
-                FailureValidationCustody {
-                    resolved: &mut self.resolved,
-                    unmatched: &mut self.unmatched,
-                },
-                validate,
-            );
+        let resolution = run_rooted_failure_validation::<O, PP, U, Cause, EK, ET, State, _>(
+            self.fields
+                .as_mut()
+                .expect("the original finite assembly remains installed")
+                .failure_decision_loan(&mut self.state),
+            FailureValidationFacts {
+                root: self.root,
+                failure_cause: self.failure_cause,
+                forced_cause: self.forced_cause,
+                original_error: self.error,
+                destination: self.destination,
+            },
+            &self.failure_work,
+            FailureValidationPayloads {
+                source: &mut self.source,
+                runtime: &mut self.runtime,
+                fallback: Some(fallback),
+            },
+            FailureValidationCustody {
+                resolved: &mut self.resolved,
+                unmatched: &mut self.unmatched,
+            },
+            validate,
+        );
         match resolution {
             FinalFailureResolution::Contain { error } => {
                 self.error = self.error.or(error);
@@ -193,7 +227,8 @@ where
                     proof,
                     self.forced_cause,
                     self.root,
-                );
+                )
+                .with_original_freeze_control(self.original_freeze_control.take());
                 Ok(RootedFailureValidation::Valid(CanonicalFinal::new(
                     ValidatedFailureEvidence {
                         owner: PayloadOwner::new(
@@ -220,7 +255,8 @@ where
                     self.forced_cause,
                     self.root,
                     None,
-                );
+                )
+                .with_original_freeze_control(self.original_freeze_control.take());
                 Ok(RootedFailureValidation::Rejected(CanonicalFinal::new(
                     RejectedFailureEvidence {
                         owner: PayloadOwner::new(
@@ -255,7 +291,8 @@ where
                     code,
                     provenance,
                     self.error,
-                );
+                )
+                .with_original_freeze_control(self.original_freeze_control.take());
                 finish_finite_minimal(cause, fallback.prepare_minimal_fallback())
                     .map(RootedFailureValidation::Fallback)
             }
@@ -263,7 +300,8 @@ where
     }
 }
 
-impl<O, PP, U, Cause, EK, ET> Drop for FiniteFailureTransition<'_, O, PP, U, Cause, EK, ET>
+impl<O, PP, U, Cause, EK, ET, State> Drop
+    for FiniteFailureTransition<'_, O, PP, U, Cause, EK, ET, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -367,26 +405,42 @@ where
 {
     let (cause, failure) = owner.into_parts();
     let cause = ManuallyDrop::new(cause);
-    let (fields, state, failure_cause, forced_cause, _root, error) = failure.into_failure_parts();
+    let (fields, state, failure_cause, forced_cause, _root, error, original_freeze_control) =
+        failure.into_failure_parts();
     let code = forced_cause
         .or(state.fallback_cause)
         .unwrap_or(failure_cause);
-    finish_finite_minimal(cause, fields.prepare_publication_fallback(code, error))
+    let prepared = match fields.prepare_publication_fallback(code, error) {
+        Ok(mut prepared) => {
+            prepared.attach_original_freeze_control(original_freeze_control);
+            Ok(prepared)
+        }
+        Err(mut error) => {
+            error.attach_original_freeze_control(original_freeze_control);
+            Err(error)
+        }
+    };
+    finish_finite_minimal(cause, prepared)
 }
 
-impl<'host, O, PP, U, Cause, EK, ET>
+#[allow(
+    private_bounds,
+    reason = "public failure typestates are sealed by the crate-private lifecycle contract"
+)]
+impl<'host, O, PP, U, Cause, EK, ET, State>
     CanonicalFinal<
         RootedFailureEvidence<
             'host,
             Cause,
             FiniteStoreFailureAssembly<'host, O, PP, U, EK, ET>,
-            OrdinaryFailureState,
+            State,
         >,
     >
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
+    State: FailureLifecycleState,
 {
     pub const fn cause(&self) -> &Cause {
         self.state.owner.value().value()
@@ -400,7 +454,7 @@ where
             &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
             FailureEvidenceMember<'session, EK, ET>,
         ) -> bool,
-    ) -> FiniteFailureValidationResult<'host, O, PP, U, Cause, EK, ET>
+    ) -> FiniteFailureValidationResult<'host, O, PP, U, Cause, EK, ET, State>
     where
         ET: Copy + Send + Sync + 'static,
     {
@@ -410,8 +464,12 @@ where
             outcome_evidence_destination_dimension,
             _lifecycle: _,
         } = self.state;
-        FiniteFailureTransition::new(owner, failure_work, outcome_evidence_destination_dimension)
-            .validate(fallback, validate)
+        FiniteFailureTransition::<O, PP, U, Cause, EK, ET, State>::new(
+            owner,
+            failure_work,
+            outcome_evidence_destination_dimension,
+        )
+        .validate(fallback, validate)
     }
 
     /// Prepares minimal fallback with the original effective finite failure code.
@@ -439,10 +497,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub const fn cause(&self) -> &Cause {
-        self.state.owner.value().value()
-    }
-
     /// Prepares once and retains the actual terminal control cause for every physical outcome.
     pub fn try_prepare(
         self,
@@ -461,6 +515,59 @@ where
                 error,
             )),
         }
+    }
+}
+
+impl<'host, O, PP, U, Cause, EK, ET>
+    CanonicalFinal<
+        ValidatedFailureEvidence<
+            'host,
+            Cause,
+            ValidatedFiniteStoreFailure<'host, O, PP, U, EK, ET>,
+            FrozenFailureState,
+        >,
+    >
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Prepares the frozen failure without another final control observation.
+    pub fn try_prepare_frozen(
+        self,
+    ) -> Result<FinitePreparedFailureEvidence<Cause, EK, ET>, FiniteStoreExitError<O, PP, U>> {
+        let (cause, validated) = self.state.owner.into_parts();
+        let cause = ManuallyDrop::new(cause);
+        match validated.try_prepare_frozen() {
+            Ok(prepared) => Ok(PreparedFailureEvidence::new(
+                prepared,
+                ManuallyDrop::into_inner(cause).into_owned(),
+                None,
+            )),
+            Err(error) => Err(dispose_failed_finite_cause(
+                ManuallyDrop::into_inner(cause),
+                error,
+            )),
+        }
+    }
+}
+
+impl<'host, O, PP, U, Cause, EK, ET, State>
+    CanonicalFinal<
+        ValidatedFailureEvidence<
+            'host,
+            Cause,
+            ValidatedFiniteStoreFailure<'host, O, PP, U, EK, ET>,
+            State,
+        >,
+    >
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub const fn cause(&self) -> &Cause {
+        self.state.owner.value().value()
     }
 
     /// Discards the validated details while retaining the original cause and finite owners.

@@ -25,6 +25,8 @@ pub(crate) use operation::{RetainedAssemblyOpened, RetainedPublicationBorrowFail
 pub(crate) use ordinary::{RetainedAssemblyDecision, RetainedPublicationAssemblyBorrow};
 mod ownership;
 mod physical;
+#[cfg(test)]
+pub(crate) use physical::reject_next_account_bound_commit;
 mod publication_contract;
 mod range;
 mod startup;
@@ -841,89 +843,6 @@ where
 {
     assembly: RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
     proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
-}
-
-/// Success closure after exact destinations and final progress are sealed for generation.
-#[must_use = "the freeze permit must be downgraded or converted into a joint-commit contribution"]
-pub(crate) struct RetainedSuccessFreezePermit<
-    'inv,
-    O,
-    P,
-    PP,
-    U,
-    D,
-    F,
-    CanonicalBlock,
-    EvidenceBlock,
-> where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
-    F: Send + Sync + 'static,
-    CanonicalBlock: Send + Sync + 'static,
-    EvidenceBlock: Send + Sync + 'static,
-{
-    validated: ValidatedRetainedSuccess<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-}
-
-/// Operation-only success owner released after the core accepts one generation identity.
-#[must_use = "the freeze contribution must form the exact joint-commit intent"]
-pub(crate) struct RetainedSuccessFreezeContribution<
-    'inv,
-    O,
-    P,
-    PP,
-    U,
-    D,
-    F,
-    CanonicalBlock,
-    EvidenceBlock,
-> where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
-    F: Send + Sync + 'static,
-    CanonicalBlock: Send + Sync + 'static,
-    EvidenceBlock: Send + Sync + 'static,
-{
-    validated: ValidatedRetainedSuccess<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-}
-
-#[must_use = "every freeze-permit branch retains the exact publication owner"]
-pub(crate) enum RetainedSuccessFreezePermitIssue<
-    'inv,
-    O,
-    P,
-    PP,
-    U,
-    D,
-    F,
-    CanonicalBlock,
-    EvidenceBlock,
-> where
-    O: OperationOwner,
-    P: Copy + Ord,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
-    F: Send + Sync + 'static,
-    CanonicalBlock: Send + Sync + 'static,
-    EvidenceBlock: Send + Sync + 'static,
-{
-    Ready(RetainedSuccessFreezePermit<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
-    RichFailure {
-        failure: RetainedFailureAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        cause: PreparationFailureCode,
-        control_cause: Option<ControlCause>,
-    },
-    DestinationRejected {
-        failure: RetainedFailureAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        cause: PreparationFailureCode,
-    },
 }
 
 #[cfg(test)]
@@ -3112,23 +3031,6 @@ where
         self.loan.contain_activation_fault()
     }
 
-    /// Consumes a success-capable assembly and eagerly removes every canonical physical owner.
-    ///
-    /// Storage is released before its attribution batch. Only a verified evidence-only graph can
-    /// be returned; any uncertain release poisons the account and retains all remaining authority
-    /// fail-closed.
-    pub(crate) fn try_discard_canonical_for_rejection(
-        mut self,
-        fallback_cause: PreparationFailureCode,
-    ) -> RetainedFailureAssemblyResult<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> {
-        self.loan
-            .try_discard_canonical_for_rejection(fallback_cause)?;
-        Ok(RetainedFailureAssembly {
-            assembly: self,
-            fallback_cause,
-        })
-    }
-
     pub(crate) fn into_verified_failure_only(
         mut self,
         fallback_cause: PreparationFailureCode,
@@ -3345,6 +3247,24 @@ where
             }
         };
         fields.finish_publication(request)
+    }
+
+    pub(crate) fn try_form_frozen_success_intent(
+        self,
+        proof: RetainedSuccessClosureProof<CanonicalBlock, EvidenceBlock>,
+    ) -> Result<
+        RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        match self
+            .try_form_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })?
+            .0
+        {
+            RetainedSuccessJointCommitFormation::Intent(intent) => Ok(intent),
+            RetainedSuccessJointCommitFormation::PreparedFailure(_) => {
+                unreachable_final_owner_state()
+            }
+        }
     }
 }
 
@@ -4114,56 +4034,6 @@ where
         Ok(())
     }
 
-    #[allow(
-        clippy::type_complexity,
-        reason = "the private freeze-permit result keeps the full retained ownership graph in each linear branch"
-    )]
-    pub(crate) fn try_issue_freeze_permit(
-        mut self,
-        canonical_dimension: D,
-        outcome_evidence_dimension: D,
-        final_progress: FinalProgress<PP, U>,
-    ) -> Result<
-        RetainedSuccessFreezePermitIssue<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        FinalizationContainmentError,
-    > {
-        let decision = self.assembly.loan.try_issue_freeze_decision(
-            &self.proof,
-            canonical_dimension,
-            outcome_evidence_dimension,
-            final_progress,
-        )?;
-        match decision {
-            RetainedSuccessFreezeDecision::Ready => Ok(RetainedSuccessFreezePermitIssue::Ready(
-                RetainedSuccessFreezePermit { validated: self },
-            )),
-            RetainedSuccessFreezeDecision::RichFailure {
-                cause,
-                control_cause,
-            } => {
-                let ValidatedRetainedSuccess { assembly, proof: _ } = self;
-                Ok(RetainedSuccessFreezePermitIssue::RichFailure {
-                    failure: RetainedFailureAssembly {
-                        assembly,
-                        fallback_cause: cause,
-                    },
-                    cause,
-                    control_cause,
-                })
-            }
-            RetainedSuccessFreezeDecision::DestinationRejected { cause } => {
-                let ValidatedRetainedSuccess { assembly, proof: _ } = self;
-                Ok(RetainedSuccessFreezePermitIssue::DestinationRejected {
-                    failure: RetainedFailureAssembly {
-                        assembly,
-                        fallback_cause: cause,
-                    },
-                    cause,
-                })
-            }
-        }
-    }
-
     /// Consumes a valid success proof after a later domain admission rejects the canonical result.
     ///
     /// Canonical ownership remains sealed and inaccessible until the existing rich-failure
@@ -4235,97 +4105,6 @@ where
             .try_prepare_terminal(RetainedTerminalRequest::MinimalFallback {
                 requested_cause: PreparationFailureCode::requested(),
             })
-    }
-}
-
-impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedSuccessFreezePermit<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: TerminalEvidenceKey,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: TerminalEvidenceKey + fmt::Debug,
-    F: Send + Sync + 'static,
-    CanonicalBlock: Send + Sync + 'static,
-    EvidenceBlock: Send + Sync + 'static,
-{
-    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
-        self.validated.contain_activation_fault()
-    }
-
-    pub(crate) fn terminal_observation(&self, dimension: D) -> Option<DimensionSnapshot> {
-        self.validated
-            .assembly
-            .loan
-            .operation
-            .as_ref()
-            .and_then(|operation| {
-                operation
-                    .common
-                    .as_read()
-                    .dimension_evidence(dimension)
-                    .ok()
-            })
-    }
-
-    #[allow(
-        clippy::type_complexity,
-        reason = "generation rejection returns the exact evidence-only retained owner without a detachable alias"
-    )]
-    pub(crate) fn reject_generation(
-        self,
-        cause: PreparationFailureCode,
-    ) -> Result<
-        RetainedFailureAssembly<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
-        FinalizationContainmentError,
-    > {
-        let ValidatedRetainedSuccess { assembly, proof: _ } = self.validated;
-        assembly.try_discard_canonical_for_rejection(cause)
-    }
-
-    pub(crate) fn into_contribution(
-        self,
-    ) -> RetainedSuccessFreezeContribution<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    {
-        RetainedSuccessFreezeContribution {
-            validated: self.validated,
-        }
-    }
-}
-
-impl<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    RetainedSuccessFreezeContribution<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-where
-    O: OperationOwner,
-    P: TerminalEvidenceKey,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    D: TerminalEvidenceKey + fmt::Debug,
-    F: Send + Sync + 'static,
-    CanonicalBlock: Send + Sync + 'static,
-    EvidenceBlock: Send + Sync + 'static,
-{
-    pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
-        self.validated.contain_activation_fault()
-    }
-
-    pub(crate) fn try_form_joint_commit_intent(
-        self,
-    ) -> Result<
-        RetainedSuccessJointCommitIntent<O, P, D, F, CanonicalBlock, EvidenceBlock>,
-        RetainedPublicationPrepareError,
-    > {
-        let ValidatedRetainedSuccess { assembly, proof } = self.validated;
-        match assembly
-            .try_form_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })?
-            .0
-        {
-            RetainedSuccessJointCommitFormation::Intent(intent) => Ok(intent),
-            RetainedSuccessJointCommitFormation::PreparedFailure(_) => {
-                unreachable_final_owner_state()
-            }
-        }
     }
 }
 
@@ -4530,13 +4309,9 @@ where
         if self.fields.fields.is_none() {
             return;
         }
-        if self.fields.canonical_table.is_none()
-            && self.fields.evidence_table.is_none()
-            && self.fields.canonical_batch.is_none()
-            && self.fields.evidence_batch.is_none()
-            && self.fields.account.is_none()
-            && self.operation.is_none()
-        {
+        // An ordinary reborrow can already have retired every original physical field.
+        // A remaining operation loan owns no resources; its root closes numerical state.
+        if self.fields.is_empty() {
             return;
         }
         match self.fields.containment {

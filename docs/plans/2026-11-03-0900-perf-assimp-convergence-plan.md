@@ -879,9 +879,24 @@ negative case only for a genuinely new boundary, not for incidental private layo
   both strict and both formats, with 1,049 stable inputs and 163 frozen files. The
   Import Dynamic annotations are migrated and original fallback/admission assertions
   are qualified without changing production behavior to satisfy tests.
-  The finite success freeze/joint boundary and actual changed Core/Postprocess consumers
-  still follow. The producer-result workers remain separate immutable evidence; no
-  finite allocation, layout, performance, main integration or release claim follows
+  The finite success freeze/joint boundary is now implemented on the actual concrete
+  owners, with one shared decision kernel, the existing invariant joint seal, independent
+  detailed freeze metadata and retired forwarding hierarchies. Source148 passes 1,388
+  Operation tests and its bounded source/required-test reviews. The new dynamic fault
+  witness exposes and then verifies the shared fix for repeated containment after
+  original physical fields have already retired. Full26/source148 passes 3,944 workspace
+  tests and 209 doctests, then fails strict Clippy on three complex private annotations;
+  four later gates do not start. Source149 only names those equivalent private return
+  types and passes scoped strict53. Full27/source149 passes all seven gates: 3,944
+  workspace tests (two slow, six existing manual skips), 209 doctests, 138 consumer
+  tests (one existing manual scale skip), both strict and both formats. Its 1,056
+  stable inputs, 170 frozen files and five current user-note identities match; the
+  exact association is `owned-finite-source149-integrated-association-1.json`.
+  Actual Core/Postprocess consumer migration follows this structural cut. Both real
+  finite candidate variants are already promoted by startup attribution; no Inline
+  freeze or allocation improvement is inferred. The producer-result workers remain
+  separate immutable evidence; no finite allocation, layout, performance, main
+  integration or release claim follows
   from these structural checkpoints.
 - The [preparation producer result](../reviews/2026-11-06-preparation-producer-result.md)
   qualifies `e8c4802`: only real effects materialize output, unchanged prefixes/suffixes

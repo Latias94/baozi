@@ -93,6 +93,70 @@ where
             operation: self.operation.as_mut().map(RetainedOperationLoan::reborrow),
         })
     }
+
+    pub(crate) fn terminal_observation(&self, dimension: D) -> Option<DimensionSnapshot> {
+        self.operation.as_ref().and_then(|operation| {
+            operation
+                .common
+                .as_read()
+                .dimension_evidence(dimension)
+                .ok()
+        })
+    }
+}
+
+type SuccessStorageParts<'inv, O, P, PP, U, D, F, CB, EB> = (
+    RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CB, EB>,
+    RetainedSuccessClosureProof<CB, EB>,
+);
+
+impl<'inv, O, P, PP, U, D, F, CB, EB> ValidatedRetainedSuccess<'inv, O, P, PP, U, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CB: Send + Sync + 'static,
+    EB: Send + Sync + 'static,
+{
+    pub(crate) fn into_storage_parts(self) -> SuccessStorageParts<'inv, O, P, PP, U, D, F, CB, EB> {
+        (self.assembly, self.proof)
+    }
+
+    pub(crate) fn from_storage_parts(
+        assembly: RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CB, EB>,
+        proof: RetainedSuccessClosureProof<CB, EB>,
+    ) -> Self {
+        Self { assembly, proof }
+    }
+
+    pub(crate) fn terminal_observation(&self, dimension: D) -> Option<DimensionSnapshot> {
+        self.assembly.loan().terminal_observation(dimension)
+    }
+}
+
+impl<'inv, O, P, PP, U, D, F, CB, EB> RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CB: Send + Sync + 'static,
+    EB: Send + Sync + 'static,
+{
+    pub(crate) fn bind_discarded_failure(
+        self,
+        cause: PreparationFailureCode,
+    ) -> RetainedFailureAssembly<'inv, O, P, PP, U, D, F, CB, EB> {
+        RetainedFailureAssembly {
+            assembly: self,
+            fallback_cause: cause,
+        }
+    }
 }
 
 impl<O, P, PP, U, D, F, CB, EB> RetainedFailureAssembly<'_, O, P, PP, U, D, F, CB, EB>

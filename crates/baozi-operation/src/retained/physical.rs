@@ -493,6 +493,16 @@ where
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static REJECT_NEXT_ACCOUNT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn reject_next_account_bound_commit() {
+    REJECT_NEXT_ACCOUNT_COMMIT.with(|pending| assert!(!pending.replace(true)));
+}
+
 /// Eligibility belongs to the physical graph; numerical ownership stays in the concrete guard.
 fn try_commit_fields<Physical, Facts>(
     physical: &mut Option<Physical>,
@@ -501,6 +511,14 @@ fn try_commit_fields<Physical, Facts>(
 where
     Physical: AccountBoundPublicationManifest,
 {
+    #[cfg(test)]
+    if REJECT_NEXT_ACCOUNT_COMMIT.with(|pending| pending.replace(false)) {
+        let _ = physical
+            .as_ref()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .publication_account()
+            .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+    }
     let eligibility = physical
         .as_ref()
         .unwrap_or_else(|| unreachable_final_owner_state())

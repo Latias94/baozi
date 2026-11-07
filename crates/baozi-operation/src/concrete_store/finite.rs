@@ -130,6 +130,7 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreInvocatio
             unattached: None,
             terminal: None,
             rejected_domain: None,
+            original_freeze_control: None,
         }
     }
 }
@@ -249,6 +250,7 @@ pub struct FiniteStoreExitError<O: OperationOwner, PP: ProgressPhase, U: Progres
     unattached: Option<StoreUnattachedFailure<O, PP, U>>,
     terminal: Option<operation::StoreTerminalFailure<O, PP, U>>,
     rejected_domain: Option<StoreKeyDomain>,
+    original_freeze_control: Option<ControlCause>,
 }
 
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError<O, PP, U> {
@@ -259,10 +261,25 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError
             unattached: None,
             terminal: None,
             rejected_domain: None,
+            original_freeze_control: None,
         }
     }
     pub const fn cause(&self) -> &FiniteStoreExitCause {
         &self.cause
+    }
+
+    /// Borrows the detailed control cause observed by the original finite freeze, if any.
+    pub const fn original_freeze_control(&self) -> Option<&ControlCause> {
+        self.original_freeze_control.as_ref()
+    }
+
+    pub(in crate::concrete_store) fn attach_original_freeze_control(
+        &mut self,
+        control: Option<ControlCause>,
+    ) {
+        if self.original_freeze_control.is_none() {
+            self.original_freeze_control = control;
+        }
     }
 
     /// Borrows the original domain even when startup never produced qualified facts.
@@ -276,6 +293,19 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError
     /// Returns whether this error owns an original root or low-level failure residue.
     pub fn has_residue(&self) -> bool {
         self.residue.is_some() || self.unattached.is_some() || self.terminal.is_some()
+    }
+
+    #[cfg(test)]
+    pub(in crate::concrete_store) fn test_uncommitted_cover_observation(
+        &mut self,
+    ) -> Option<(u64, u64, u64, usize)> {
+        match self.terminal.as_mut()? {
+            crate::retained::operation::finite_root::FiniteRootTerminalFailure::Commit {
+                proof,
+                ..
+            } => proof.test_cover_observation(),
+            _ => None,
+        }
     }
 
     pub(in crate::concrete_store) fn record_payload_failure(&mut self, code: u32) {

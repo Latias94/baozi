@@ -3,6 +3,16 @@ use super::*;
 type SuccessPreparationResult<O, PP, U, CK, CT, EK, ET> =
     Result<PreparedFiniteStoreSuccessOutcome<CK, CT, EK, ET>, FiniteStoreExitError<O, PP, U>>;
 
+type FrozenSuccessPreparationResult<O, PP, U, CK, CT, EK, ET> =
+    Result<PreparedFiniteStoreSuccess<CK, CT, EK, ET>, FiniteStoreExitError<O, PP, U>>;
+
+type SuccessStorageParts<'inv, O, PP, U, CK, CT, EK, ET> = (
+    FiniteStoreFinalFields<'inv, O, PP, U>,
+    RetainedSuccessClosureProof<StoredBlock, StoredBlock>,
+    CanonicalStoreRef<CK, CT>,
+    OutcomeEvidenceStoreRef<EK, ET>,
+);
+
 type FailureAssemblyParts<'inv, O, PP, U, EK, ET> = (
     FiniteStoreFinalFields<'inv, O, PP, U>,
     StorePublicationState,
@@ -10,6 +20,7 @@ type FailureAssemblyParts<'inv, O, PP, U, EK, ET> = (
     Option<PreparationFailureCode>,
     OutcomeEvidenceStoreRef<EK, ET>,
     Option<StorePrepareError>,
+    Option<ControlCause>,
 );
 
 type FailurePreparationWithControlResult<O, PP, U, EK, ET> = Result<
@@ -49,6 +60,7 @@ where
     pub(in crate::concrete_store::finite) forced_cause: Option<PreparationFailureCode>,
     pub(in crate::concrete_store::finite) evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
     pub(in crate::concrete_store::finite) error: Option<StorePrepareError>,
+    pub(in crate::concrete_store::finite) original_freeze_control: Option<ControlCause>,
 }
 
 /// An exact evidence proof alongside the original finite terminal fields.
@@ -63,6 +75,7 @@ where
     proof: RetainedEvidenceClosureProof<StoredBlock>,
     forced_cause: Option<PreparationFailureCode>,
     evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
+    original_freeze_control: Option<ControlCause>,
 }
 
 /// Terminal-only finite authority preserves the original fallback provenance and fields.
@@ -77,6 +90,7 @@ where
     pub(in crate::concrete_store::finite) cause: PreparationFailureCode,
     pub(in crate::concrete_store::finite) provenance: ordinary::StoreSuccessFallbackProvenance,
     pub(in crate::concrete_store::finite) error: Option<StorePrepareError>,
+    pub(in crate::concrete_store::finite) original_freeze_control: Option<ControlCause>,
 }
 
 impl<'inv, O, PP, U, CK, CT, EK, ET> ValidatedFiniteStoreSuccess<'inv, O, PP, U, CK, CT, EK, ET>
@@ -101,6 +115,54 @@ where
 
     pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
         self.fields.into_request_error(None)
+    }
+
+    pub(in crate::concrete_store) fn into_storage_parts(
+        self,
+    ) -> SuccessStorageParts<'inv, O, PP, U, CK, CT, EK, ET> {
+        (
+            self.fields,
+            self.proof,
+            self.canonical_root,
+            self.evidence_root,
+        )
+    }
+
+    pub(in crate::concrete_store) fn roots_match(
+        &self,
+        canonical_root: CanonicalStoreRef<CK, CT>,
+        evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
+    ) -> bool {
+        self.canonical_root == canonical_root && self.evidence_root == evidence_root
+    }
+
+    pub(in crate::concrete_store) fn ordinary_assembly(
+        &mut self,
+    ) -> RawStoreAssemblyBorrow<'_, O, PP, U> {
+        self.fields.assembly_borrow()
+    }
+
+    pub(in crate::concrete_store) fn try_prepare_frozen(
+        self,
+    ) -> FrozenSuccessPreparationResult<O, PP, U, CK, CT, EK, ET> {
+        let Self {
+            mut fields,
+            proof,
+            canonical_root,
+            evidence_root,
+        } = self;
+        match fields
+            .raw
+            .finish_assembly(RetainedTerminalRequest::FrozenSuccess { proof })
+        {
+            Ok((raw, _control)) => Ok(terminal_output::finite::classify_frozen_success(
+                raw,
+                canonical_root,
+                evidence_root,
+                fields.take_domain(),
+            )),
+            Err(failure) => Err(fields.terminal_error(failure)),
+        }
     }
 
     /// Runs original terminal classification, control, detach and commit exactly once.
@@ -153,6 +215,7 @@ where
             forced_cause: Some(cause),
             evidence_root,
             error: None,
+            original_freeze_control: None,
         }
     }
 
@@ -182,6 +245,7 @@ where
             self.forced_cause,
             self.evidence_root,
             self.error,
+            self.original_freeze_control,
         )
     }
 
@@ -200,11 +264,24 @@ where
             forced_cause,
             evidence_root,
             error,
+            original_freeze_control: None,
         }
     }
 
+    pub(in crate::concrete_store) fn with_original_freeze_control(
+        mut self,
+        control: Option<ControlCause>,
+    ) -> Self {
+        if self.original_freeze_control.is_none() {
+            self.original_freeze_control = control;
+        }
+        self
+    }
+
     pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
-        self.fields.into_request_error(self.error)
+        let mut error = self.fields.into_request_error(self.error);
+        error.attach_original_freeze_control(self.original_freeze_control);
+        error
     }
 
     pub(in crate::concrete_store) fn evidence_loan(
@@ -303,6 +380,7 @@ where
             forced_cause,
             evidence_root: _,
             error,
+            original_freeze_control,
         } = self;
         let validation = match validation {
             Ok(validation) => validation,
@@ -316,6 +394,7 @@ where
                     cause: failure_cause,
                     provenance: ordinary::StoreSuccessFallbackProvenance::EarlyAssemblyLatch,
                     error,
+                    original_freeze_control,
                 });
             }
         };
@@ -326,6 +405,7 @@ where
             evidence_root,
             forced_cause,
             error,
+            original_freeze_control,
         )
     }
 
@@ -346,6 +426,7 @@ where
             state,
             forced_cause,
             error,
+            original_freeze_control,
             ..
         } = self;
         let cause = forced_cause
@@ -357,7 +438,11 @@ where
                 .loan_mut()
                 .record_terminal_cause(cause);
         }
-        fields.prepare_publication_fallback(cause, error)
+        fields.prepare_publication_fallback_with_original_freeze_control(
+            cause,
+            error,
+            original_freeze_control,
+        )
     }
 }
 
@@ -376,6 +461,7 @@ pub(super) fn bind_failure_validation<'inv, O, PP, U, EK, ET>(
     evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
     forced_cause: Option<PreparationFailureCode>,
     error: Option<StorePrepareError>,
+    original_freeze_control: Option<ControlCause>,
 ) -> FiniteStoreFailureValidation<'inv, O, PP, U, EK, ET>
 where
     O: OperationOwner,
@@ -390,6 +476,7 @@ where
                 cause,
                 provenance,
                 error,
+                original_freeze_control,
             });
         }
     };
@@ -399,6 +486,7 @@ where
             cause: PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE),
             provenance: ordinary::StoreSuccessFallbackProvenance::EarlyAssemblyLatch,
             error,
+            original_freeze_control,
         });
     }
     match validation {
@@ -408,6 +496,7 @@ where
                 proof,
                 forced_cause,
                 evidence_root,
+                original_freeze_control,
             })
         }
         RetainedClosureValidation::Rejected { cause } => {
@@ -424,6 +513,7 @@ where
                 forced_cause,
                 evidence_root,
                 error: None,
+                original_freeze_control,
             })
         }
         RetainedClosureValidation::FallbackOnly {
@@ -436,6 +526,7 @@ where
                 activation_containment_required,
             },
             error: None,
+            original_freeze_control,
         }),
     }
 }
@@ -457,11 +548,24 @@ where
             proof,
             forced_cause,
             evidence_root,
+            original_freeze_control: None,
         }
     }
 
+    pub(in crate::concrete_store) fn with_original_freeze_control(
+        mut self,
+        control: Option<ControlCause>,
+    ) -> Self {
+        if self.original_freeze_control.is_none() {
+            self.original_freeze_control = control;
+        }
+        self
+    }
+
     pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
-        self.fields.into_request_error(None)
+        let mut error = self.fields.into_request_error(None);
+        error.attach_original_freeze_control(self.original_freeze_control);
+        error
     }
 
     /// Freezes rich-failure evidence through the original finite terminal preparation.
@@ -484,6 +588,7 @@ where
             proof,
             forced_cause,
             evidence_root,
+            original_freeze_control,
         } = self;
         let request = RetainedTerminalRequest::RichFailure {
             proof,
@@ -492,10 +597,48 @@ where
         };
         match fields.raw.finish_assembly(request) {
             Ok((raw, control)) => Ok((
-                terminal_output::finite::classify_failure(raw, evidence_root, fields.take_domain()),
+                terminal_output::finite::classify_failure(
+                    raw,
+                    evidence_root,
+                    fields.take_domain(),
+                    original_freeze_control,
+                ),
                 control,
             )),
-            Err(failure) => Err(fields.terminal_error(failure)),
+            Err(failure) => {
+                let mut error = fields.terminal_error(failure);
+                error.attach_original_freeze_control(original_freeze_control);
+                Err(error)
+            }
+        }
+    }
+
+    pub(in crate::concrete_store) fn try_prepare_frozen(
+        self,
+    ) -> Result<PreparedFiniteStoreFailureOutcome<EK, ET>, FiniteStoreExitError<O, PP, U>> {
+        let Self {
+            mut fields,
+            proof,
+            forced_cause,
+            evidence_root,
+            original_freeze_control,
+        } = self;
+        let request = RetainedTerminalRequest::FrozenRichFailure {
+            proof,
+            requested_cause: forced_cause.unwrap_or(PreparationFailureCode::domain(0)),
+        };
+        match fields.raw.finish_assembly(request) {
+            Ok((raw, _control)) => Ok(terminal_output::finite::classify_failure(
+                raw,
+                evidence_root,
+                fields.take_domain(),
+                original_freeze_control,
+            )),
+            Err(failure) => {
+                let mut error = fields.terminal_error(failure);
+                error.attach_original_freeze_control(original_freeze_control);
+                Err(error)
+            }
         }
     }
 
@@ -503,11 +646,13 @@ where
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<PreparedFiniteStoreFallback, FiniteStoreExitError<O, PP, U>> {
-        self.fields.prepare_publication_fallback(
-            self.forced_cause
-                .unwrap_or(PreparationFailureCode::domain(0)),
-            None,
-        )
+        self.fields
+            .prepare_publication_fallback_with_original_freeze_control(
+                self.forced_cause
+                    .unwrap_or(PreparationFailureCode::domain(0)),
+                None,
+                self.original_freeze_control,
+            )
     }
 }
 
@@ -528,11 +673,24 @@ where
             cause,
             provenance,
             error,
+            original_freeze_control: None,
         }
     }
 
+    pub(in crate::concrete_store) fn with_original_freeze_control(
+        mut self,
+        control: Option<ControlCause>,
+    ) -> Self {
+        if self.original_freeze_control.is_none() {
+            self.original_freeze_control = control;
+        }
+        self
+    }
+
     pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
-        self.fields.into_request_error(self.error)
+        let mut error = self.fields.into_request_error(self.error);
+        error.attach_original_freeze_control(self.original_freeze_control);
+        error
     }
 
     /// Returns the original retained validation's activation-containment requirement.
@@ -550,30 +708,52 @@ where
         self,
     ) -> Result<PreparedFiniteStoreFallback, FiniteStoreExitError<O, PP, U>> {
         self.fields
-            .prepare_publication_fallback(self.cause, self.error)
+            .prepare_publication_fallback_with_original_freeze_control(
+                self.cause,
+                self.error,
+                self.original_freeze_control,
+            )
     }
 }
 
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFields<'_, O, PP, U> {
     pub(in crate::concrete_store) fn prepare_publication_fallback(
-        mut self,
+        self,
         cause: PreparationFailureCode,
         error: Option<StorePrepareError>,
     ) -> Result<PreparedFiniteStoreFallback, FiniteStoreExitError<O, PP, U>> {
+        self.prepare_publication_fallback_with_original_freeze_control(cause, error, None)
+    }
+
+    pub(in crate::concrete_store) fn prepare_publication_fallback_with_original_freeze_control(
+        mut self,
+        cause: PreparationFailureCode,
+        error: Option<StorePrepareError>,
+        original_freeze_control: Option<ControlCause>,
+    ) -> Result<PreparedFiniteStoreFallback, FiniteStoreExitError<O, PP, U>> {
         if let Some(error) = error {
-            return Err(self.into_error(FiniteStoreExitCause::Finalize(
+            let mut error = self.into_error(FiniteStoreExitCause::Finalize(
                 FiniteStoreFinalizeCause::Publication(error),
-            )));
+            ));
+            error.attach_original_freeze_control(original_freeze_control);
+            return Err(error);
         }
         let request = RetainedTerminalRequest::MinimalFallback {
             requested_cause: cause,
         };
         match self.raw.finish_assembly(request) {
-            Ok((raw, _control)) => Ok(terminal_output::finite::classify_fallback(
-                raw,
-                self.take_domain(),
-            )),
-            Err(failure) => Err(self.terminal_error(failure)),
+            Ok((raw, _control)) => Ok(
+                terminal_output::finite::classify_fallback_with_original_freeze_control(
+                    raw,
+                    self.take_domain(),
+                    original_freeze_control,
+                ),
+            ),
+            Err(failure) => {
+                let mut error = self.terminal_error(failure);
+                error.attach_original_freeze_control(original_freeze_control);
+                Err(error)
+            }
         }
     }
 }

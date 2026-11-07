@@ -7,6 +7,18 @@ cut passed all seven integrated gates; its
 failures, review scopes and the limited layout observation. The finite compiler
 cut remains incomplete.
 
+Latest integrated checkpoint: **full27/source149 passes all seven gates**. The
+actual run has **3,944 workspace PASS** (two slow, six existing manual skips),
+**209 doctests PASS**, **138 asset-consumer PASS** (one existing manual scale skip),
+both strict all-target/all-feature Clippy checks and both format checks. All **1,056**
+before/after/current inputs, **170** frozen files and five current recorded user-note
+identities match. `owned-finite-source149-integrated-association-1.json` binds the
+actual receipts and raw logs. This qualifies the finite freeze/joint structural cut;
+actual Core/Postprocess, layout/allocation/native/heap, local-main and release remain
+HOLD. No absent historical note-baseline identity or performance gain is inferred.
+The independent `owned-finite-source149-integrated-evidence-review-1.md` accepts
+the exact terminal commands, counts, identities and source149 private-alias delta.
+
 The current finite foundation owns fixed numerical rows, phases, progress and
 snapshot staging and shares actual-field work/storage/control/startup kernels.
 Unattached close has concrete dynamic and finite consuming owners. All four dynamic
@@ -18,15 +30,24 @@ and four consuming graph chains are deleted; the bounded runtime/test qualificat
 below records their actual execution and remaining integrated limits.
 Test observation keeps a borrowed classification seam without owner extraction.
 
-The latest integrated attempt is **final25/source140: all seven gates PASS**. It runs
+The historical integrated checkpoint **final25/source140 passes all seven gates**. It runs
 **3,930 workspace tests** (two slow, six existing manual skips), **203 doctests** and
 **138 asset-consumer tests** (one existing manual scale skip), and passes both strict
 all-target/all-feature Clippy checks and both format checks. All **1,049** before/after/
 current inputs, **163** frozen files and five current recorded user-note identities
-match; no equality to an absent older note baseline is inferred. This qualifies the
-final-only finite failure-authoring structural checkpoint. Complete finite success
-freeze/joint/Core/Postprocess and measured layout/allocation/performance acceptance remain
-open. Release and local-main merge stay HOLD.
+match; no equality to an absent older note baseline is inferred. That result qualifies
+the final-only finite failure-authoring structural checkpoint; it does not qualify the
+later freeze/joint or Core/Postprocess cuts. Measured layout/allocation/performance,
+release and local-main acceptance remain HOLD.
+
+The finite success freeze/joint cut now passes 1,388 Operation tests on source148,
+with bounded source and actual required-test review GO. Full26/source148 passes
+3,944 workspace tests (two slow, six existing manual skips) and 209 doctests, then
+fails strict Clippy on three complex private return annotations; four later gates do
+not start. Source149 only introduces three equivalent private return aliases and
+annotations; strict53 passes every Operation target/feature. Full27 passes the
+original seven integrated gates on that frozen source. Actual Core/Postprocess,
+layout/allocation/native/heap qualification and main/release acceptance remain open.
 
 Historical final21/source129 independently passes 3,920 workspace tests, 196 doctests,
 138 consumer tests and all remaining strict/format gates, with 1,046 stable inputs and
@@ -951,7 +972,7 @@ source. Add read-only accessors and the defining finite error/facts files to thi
 do not reconstruct details from a stable code or observe control again.
 
 Required tests use real finite Host owners with unequal nonzero canonical/evidence
-counts, Inline and genuinely promoted storage, paired destination denial, control
+counts, genuinely promoted storage, paired destination denial, control
 interruption, generation exhaustion, foreign/occupied slots or roots, separate capture
 and payload faults, healthy abandonment and forgotten authority. Ready followed by
 cancellation must still commit exact success with original output/proof and unchanged
@@ -962,3 +983,95 @@ replacement. Add matching positive and compile-fail cases for final-only freeze,
 Ordinary/Frozen preparation misuse and mixed finite/dynamic nested-binder seals.
 Core/Postprocess migration and all original convergence targets follow this qualified
 Operation cut; no changed producer algorithm or benchmark boundary is part of it.
+
+The bounded source146 follow-up corrects two fixture premises. Actual finite startup
+fallback attribution already calls `ensure_shared()` before freeze; positive qualified
+administrative cover proves promotion in both scratch variants. These variants do not
+exercise Inline freeze. Existing lower-level Inline qualification remains separate.
+Forgetting a stable permit or an unprepared joint leaves every physical and numerical
+owner in the original Host. Healthy Host cleanup can release that intact graph, just
+as it can recover a forgotten resumed Candidate. Actual outstanding terminal preparation,
+an incomplete body disposition, and destructor faults retain their containment rules.
+Do not add poison or a persistent outstanding flag merely to distinguish a recoverable
+forgotten loan from normal abandonment.
+
+The public freeze interruption cause is a closed metadata type with no user destructor.
+Its generic finite failure adapter still accepts an arbitrary Cause. A bounded internal
+test may move the actual interruption cause into a faulting wrapper, rebind its original
+identity to a real Option, and reuse unchanged Frozen storage/proof to test error cleanup.
+The detailed Some metadata must come from the real original freeze. This is adapter
+coverage, not a claimed public cancellation-plus-user-destructor path or a new API.
+
+## Next bounded cut: actual Core and Postprocess consumers
+
+The two source-grounded consumer designs and the bounded feasibility review are
+`owned-finite-core-consumer-next-cut-design-1.md`,
+`owned-finite-postprocess-consumer-next-cut-design-1.md`, and
+`owned-finite-core-postprocess-consumer-plan-review-1.md` in the private convergence
+review directory. The review is AMEND with one P2, A1; its concrete routing amendment
+is adopted below. Implementation follows the current Operation qualification commit.
+These documents and this contract grant no allocation or native acceptance.
+
+Core adds the concrete `FiniteSceneEditFreezePermit`,
+`consume_finite_scene_edit_freeze_permit`, `PreparedFiniteSceneEditSuccess`,
+`PreparedFiniteSceneEditPublication`, and `FiniteSceneEditPublishedSuccess` in the
+production transaction publication module, with explicit integration exports. Reuse
+`SceneEditHandoffToken::handoff_physical` and the existing planning/lane/validation
+recipes. The consumer admits the original rejection slot and both proven roots after
+Ready, reserves exactly one generation, then opens the matching invariant joint and
+prepares exact finite success. Exhaustion uses the existing Frozen minimal policy;
+generation unwind contains the actual permit before resuming the original panic.
+Handoff moves the original physical stores and sole facts without another generation,
+validation, accounting capture or control observation. Every fallible finite step
+returns the original `FiniteStoreExitError<O, PP, U>`. Import's concrete dynamic
+products and the test-only standalone transform pipeline need no migration.
+
+The bounded Core source write set is the production transaction `publication.rs`,
+a concrete `publication/finite.rs` child and `api/integration.rs`. Core remains generic
+only over existing owner/progress markers. `SceneStorage` gains no facts/backend field.
+Correct ADR 0032's older ordering paragraph to Ready, admission, one generation, joint
+preparation, preserving burn without publication after reservation. Do not reorder
+runtime effects to match the superseded prose.
+
+Postprocess replaces its six dynamic runtime policies and three ledger phase keys with
+actual arrays and finite plans. Preserve semantic ids, total work partition and
+`bounded-normal-actions/v2`. Finite startup admits its one actual fallback part once;
+do not recreate the dynamic two-part terminal record. Migrate both actual selected
+preparation and space-conversion entries, all restored outcomes, the shared final
+dispatcher, genuine diagnostic callers and public failure conversions together.
+Retire their old dynamic-only aliases after the callers move. No backend provider,
+owning union, copied counter model or duplicate geometry/terminal algorithm is needed.
+
+Adopt A1 explicitly: each actual entry records a local `did_attach`, initially false,
+immediately after successful original `startup.attach()`. On `Ok(finish)`, false
+consumes it once through `finish_unattached(final_progress())`; true consumes it once
+through `resume()` and dispatches its original completion. Outer `Err(error)` returns
+that original owned error and ignores the flag. The flag is metadata, owns no resource
+or authority, and does not escape. Do not universally call `resume()`, run both
+finishers, retry restoration or infer attachment from an optional semantic cause.
+Attachment rejection uses existing original Host startup-error collection.
+
+`PostProcessResourceEvidence` owns one `FiniteStoreFacts`; delete its eleven stored
+counter copies and dynamic evidence owner. Getters read the actual fixed header/rows;
+attempted/consumed retain ordinary-plus-terminal semantics. Temporary Debug/equality
+values require no stored cache, and getters may lose const qualification. Preserve
+separate physical custody: keep the original optional evidence-only terminal account
+alongside facts where required; fallback failure keeps fallback then its independent
+account in destruction order. Rich and changed results retain their real physical
+evidence/Scene owners. Unattached completion uses only its actual qualified facts.
+
+Add one public non-generic `PostProcessInvocationFailure` owning the original privately
+specialized finite exit error. Its readonly accessors and Error source borrow that
+owner; markers stay private and no boxed replacement or additional Core error is
+needed. Carry its owning cause alternative through edit/preparation/triangulation/
+normal/tangent/space failure conversions, including existing wildcard matches. Early
+Start/Body errors have no fabricated resource facts. The immutable input Scene still
+returns with the public run failure; actual domain/proof/residue must survive Host and
+source teardown. Replacing this owner with Copy Start/Preparation summaries is invalid.
+
+Qualify real finite changed selected edits and space conversion, unattached unchanged
+and failure, attached evidence-only, restored failures, Ready/non-Ready/generation
+exhaustion, exact facts, and original owned errors after Host/source exit. Keep the
+meaningful existing positive and compile-fail capability checks, then affected serial
+checks and all seven integrated gates on the recorded combined source. Layout,
+allocation, original Windows/GNU ordinary and separate heap convergence still follow.

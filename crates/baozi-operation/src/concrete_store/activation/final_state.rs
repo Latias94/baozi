@@ -385,6 +385,95 @@
 ///     let _ = fallback.prepare_minimal_fallback();
 /// }
 /// ```
+///
+/// Finite success also requires a restored candidate and one invariant joint scope:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalFinal, CanonicalCauseSlot, CanonicalFreezeInterruption,
+///     FiniteCentralCandidate, FiniteCanonicalFreezePermitIssue,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn finish<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     candidate: CanonicalFinal<FiniteCentralCandidate<'inv, O, P, U, (), (), (), (), (), ()>>,
+///     interruption: CanonicalCauseSlot<'inv, CanonicalFreezeInterruption>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     if let Ok(FiniteCanonicalFreezePermitIssue::Ready(permit)) =
+///         candidate.try_issue_freeze_permit(interruption, progress)
+///     {
+///         let _ = permit.bind_joint_commit(|joint, seal| joint.prepare(seal));
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalCauseSlot, CanonicalFreezeInterruption, FiniteCentralCandidate,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn early<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     candidate: FiniteCentralCandidate<'inv, O, P, U, (), (), (), (), (), ()>,
+///     slot: CanonicalCauseSlot<'inv, CanonicalFreezeInterruption>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     let _ = candidate.try_issue_freeze_permit(slot, progress);
+/// }
+/// ```
+///
+/// Frozen and ordinary finite failures accept different terminal operations:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     FiniteValidatedFailureEvidence, FrozenFailureState,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn frozen<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     failure: FiniteValidatedFailureEvidence<'_, O, P, U, (), (), (), FrozenFailureState>,
+/// ) {
+///     let _ = failure.try_prepare_frozen();
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::{
+///     FiniteValidatedFailureEvidence, FrozenFailureState,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn wrong<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     failure: FiniteValidatedFailureEvidence<'_, O, P, U, (), (), (), FrozenFailureState>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     let _ = failure.try_prepare(progress);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteValidatedFailureEvidence;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn wrong<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     failure: FiniteValidatedFailureEvidence<'_, O, P, U, (), (), ()>,
+/// ) {
+///     let _ = failure.try_prepare_frozen();
+/// }
+/// ```
+///
+/// A finite contribution cannot consume the dynamic seal from a different nested binder:
+///
+/// ```compile_fail,E0521
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalFreezePermit, FiniteCanonicalFreezePermit,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn mismatch<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     dynamic: CanonicalFreezePermit<'inv, O, P, U, (), (), (), (), (), ()>,
+///     finite: FiniteCanonicalFreezePermit<'inv, O, P, U, (), (), (), (), (), ()>,
+/// ) {
+///     dynamic.bind_joint_commit(|_, dynamic_seal| {
+///         finite.bind_joint_commit(|joint, _| { let _ = joint.prepare(dynamic_seal); });
+///     });
+/// }
+/// ```
 #[must_use = "the restored canonical state must complete its terminal transition or be dropped"]
 pub struct CanonicalFinal<S> {
     pub(super) state: S,

@@ -134,11 +134,7 @@ use crate::ledger::{LedgerCause, LiveReservation};
 use crate::owner::OperationOwner;
 #[cfg(test)]
 use crate::retained::RetainedAllocationError;
-use crate::retained::{
-    BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermission,
-    RetainedSuccessFreezeContribution, RetainedSuccessFreezePermit,
-    RetainedSuccessFreezePermitIssue,
-};
+use crate::retained::{BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermission};
 use crate::retained::{
     CanonicalLeafInheritanceError, CanonicalRetainedLeafPolicy, CanonicalRetainedRewriteMap,
     CanonicalRetainedSlot, CanonicalSourceBindError, FinalizationContainmentError,
@@ -1824,6 +1820,13 @@ type RawValidatedStoreSuccess<'inv, O, PP, U> = ValidatedRetainedSuccess<
     StoredBlock,
     StoredBlock,
 >;
+type StoreSuccessStorageParts<'inv, O, PP, U, CK, CT, EK, ET> = (
+    RawStoreAssembly<'inv, O, PP, U>,
+    crate::retained::RetainedSuccessClosureProof<StoredBlock, StoredBlock>,
+    CanonicalStoreRef<CK, CT>,
+    OutcomeEvidenceStoreRef<EK, ET>,
+    StoreDomainLoan<'inv>,
+);
 type RawValidatedStoreFailure<'inv, O, PP, U> = ValidatedRetainedFailure<
     'inv,
     O,
@@ -3996,6 +3999,93 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    fn into_storage_parts(
+        self,
+    ) -> StoreSuccessStorageParts<
+        'inv,
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    > {
+        let (assembly, proof) = self.raw.into_storage_parts();
+        (
+            assembly,
+            proof,
+            self.canonical_root,
+            self.evidence_root,
+            self.domain,
+        )
+    }
+
+    fn from_storage_parts(
+        assembly: RawStoreAssembly<'inv, O, PP, U>,
+        proof: crate::retained::RetainedSuccessClosureProof<StoredBlock, StoredBlock>,
+        canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
+        evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+        domain: StoreDomainLoan<'inv>,
+    ) -> Self {
+        Self {
+            raw: ValidatedRetainedSuccess::from_storage_parts(assembly, proof),
+            canonical_root,
+            evidence_root,
+            domain,
+        }
+    }
+
+    pub(super) fn terminal_observation(
+        &self,
+        dimension: StoreDimensionKey,
+    ) -> Option<crate::ledger::DimensionSnapshot> {
+        self.raw.terminal_observation(dimension)
+    }
+
+    pub(super) fn reject_frozen_generation(
+        self,
+        stable_code: u32,
+    ) -> Result<
+        StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
+        FinalizationContainmentError,
+    > {
+        let (mut assembly, _proof, _canonical_root, evidence_root, domain) =
+            self.into_storage_parts();
+        let cause = PreparationFailureCode::domain(stable_code);
+        assembly
+            .loan_mut()
+            .try_discard_canonical_for_rejection(cause)?;
+        Ok(StoreFailureAssembly {
+            raw: assembly.bind_discarded_failure(cause),
+            state: StorePublicationState::default(),
+            forced_cause: Some(cause),
+            evidence_root,
+            domain,
+        })
+    }
+
+    pub(super) fn try_prepare_frozen(
+        self,
+    ) -> Result<
+        PreparedStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
+        FinalizationContainmentError,
+    > {
+        let (assembly, proof, canonical_root, evidence_root, domain) = self.into_storage_parts();
+        let intent =
+            assembly
+                .try_form_frozen_success_intent(proof)
+                .map_err(|error| match error {
+                    RetainedPublicationPrepareError::FinalizationContainment(cause) => cause,
+                })?;
+        Ok(prepared_store_success_from_raw(
+            intent.qualify_and_commit_frozen_exact()?,
+            canonical_root,
+            evidence_root,
+            domain.into_owned(),
+        ))
+    }
+
     pub(super) fn defer_until_body_cleanup(
         self,
     ) -> Result<DeferredStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>, Self>
@@ -4023,77 +4113,6 @@ where
 
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()
-    }
-
-    #[allow(
-        clippy::type_complexity,
-        reason = "the crate-private activation result preserves every linear owner across the exact branch set"
-    )]
-    pub(super) fn try_issue_freeze_permit(
-        self,
-        canonical_dimension: StoreDimensionKey,
-        outcome_evidence_dimension: StoreDimensionKey,
-        final_progress: FinalProgress<PP, U>,
-    ) -> Result<
-        StoreSuccessFreezePermitIssue<
-            'inv,
-            O,
-            PP,
-            U,
-            CanonicalKind,
-            CanonicalTag,
-            EvidenceKind,
-            EvidenceTag,
-        >,
-        FinalizationContainmentError,
-    > {
-        let Self {
-            raw,
-            canonical_root,
-            evidence_root,
-            domain,
-        } = self;
-        match raw.try_issue_freeze_permit(
-            canonical_dimension,
-            outcome_evidence_dimension,
-            final_progress,
-        )? {
-            RetainedSuccessFreezePermitIssue::Ready(raw) => Ok(
-                StoreSuccessFreezePermitIssue::Ready(StoreSuccessFreezePermit {
-                    raw,
-                    canonical_root,
-                    evidence_root,
-                    domain,
-                }),
-            ),
-            RetainedSuccessFreezePermitIssue::RichFailure {
-                failure,
-                cause,
-                control_cause,
-            } => Ok(StoreSuccessFreezePermitIssue::RichFailure {
-                failure: StoreFailureAssembly {
-                    raw: failure,
-                    state: StorePublicationState::default(),
-                    forced_cause: Some(cause),
-                    evidence_root,
-                    domain,
-                },
-                cause,
-                control_cause,
-            }),
-            RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
-                Ok(StoreSuccessFreezePermitIssue::DestinationRejected {
-                    failure: StoreFailureAssembly {
-                        raw: failure,
-                        state: StorePublicationState::default(),
-                        forced_cause: Some(cause),
-                        evidence_root,
-                        domain,
-                    },
-                    cause,
-                })
-            }
-        }
     }
 
     /// Consumes a validated success after a later domain admission rejects canonical publication.
@@ -4144,204 +4163,6 @@ where
             .prepare_minimal_fallback()
             .map(|raw| classify_prepared_fallback(raw, domain.into_owned()))
             .map_err(StorePrepareError::from_raw)
-    }
-}
-
-type RawStoreSuccessFreezePermit<'inv, O, PP, U> = RetainedSuccessFreezePermit<
-    'inv,
-    O,
-    StorePhaseKey,
-    PP,
-    U,
-    StoreDimensionKey,
-    StoreFallbackEnvelope,
-    StoredBlock,
-    StoredBlock,
->;
-
-type RawStoreSuccessFreezeContribution<'inv, O, PP, U> = RetainedSuccessFreezeContribution<
-    'inv,
-    O,
-    StorePhaseKey,
-    PP,
-    U,
-    StoreDimensionKey,
-    StoreFallbackEnvelope,
-    StoredBlock,
-    StoredBlock,
->;
-
-pub(super) struct StoreSuccessFreezePermit<
-    'inv,
-    O,
-    PP,
-    U,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-> where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    raw: RawStoreSuccessFreezePermit<'inv, O, PP, U>,
-    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
-    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreDomainLoan<'inv>,
-}
-
-pub(super) enum StoreSuccessFreezePermitIssue<
-    'inv,
-    O,
-    PP,
-    U,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-> where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    Ready(
-        StoreSuccessFreezePermit<
-            'inv,
-            O,
-            PP,
-            U,
-            CanonicalKind,
-            CanonicalTag,
-            EvidenceKind,
-            EvidenceTag,
-        >,
-    ),
-    RichFailure {
-        failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-        cause: PreparationFailureCode,
-        control_cause: Option<ControlCause>,
-    },
-    DestinationRejected {
-        failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-        cause: PreparationFailureCode,
-    },
-}
-
-pub(super) struct StoreSuccessFreezeContribution<
-    'inv,
-    O,
-    PP,
-    U,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-> where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    raw: RawStoreSuccessFreezeContribution<'inv, O, PP, U>,
-    canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
-    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-    domain: StoreDomainLoan<'inv>,
-}
-
-impl<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-    StoreSuccessFreezePermit<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
-        self.raw.contain_activation_fault()
-    }
-
-    pub(super) fn terminal_observation(
-        &self,
-        dimension: StoreDimensionKey,
-    ) -> Option<crate::ledger::DimensionSnapshot> {
-        self.raw.terminal_observation(dimension)
-    }
-
-    pub(super) fn reject_generation(
-        self,
-        stable_code: u32,
-    ) -> Result<
-        StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-        FinalizationContainmentError,
-    > {
-        let cause = PreparationFailureCode::domain(stable_code);
-        Ok(StoreFailureAssembly {
-            raw: self.raw.reject_generation(cause)?,
-            state: StorePublicationState::default(),
-            forced_cause: Some(cause),
-            evidence_root: self.evidence_root,
-            domain: self.domain,
-        })
-    }
-
-    pub(super) fn into_contribution(
-        self,
-    ) -> StoreSuccessFreezeContribution<
-        'inv,
-        O,
-        PP,
-        U,
-        CanonicalKind,
-        CanonicalTag,
-        EvidenceKind,
-        EvidenceTag,
-    > {
-        StoreSuccessFreezeContribution {
-            raw: self.raw.into_contribution(),
-            canonical_root: self.canonical_root,
-            evidence_root: self.evidence_root,
-            domain: self.domain,
-        }
-    }
-}
-
-impl<'inv, O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
-    StoreSuccessFreezeContribution<
-        'inv,
-        O,
-        PP,
-        U,
-        CanonicalKind,
-        CanonicalTag,
-        EvidenceKind,
-        EvidenceTag,
-    >
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
-        self.raw.contain_activation_fault()
-    }
-
-    pub(super) fn try_prepare(
-        self,
-    ) -> Result<
-        PreparedStoreSuccess<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
-        FinalizationContainmentError,
-    > {
-        let intent = self
-            .raw
-            .try_form_joint_commit_intent()
-            .map_err(|error| match error {
-                RetainedPublicationPrepareError::FinalizationContainment(cause) => cause,
-            })?;
-        Ok(prepared_store_success_from_raw(
-            intent.qualify_and_commit_frozen_exact()?,
-            self.canonical_root,
-            self.evidence_root,
-            self.domain.into_owned(),
-        ))
     }
 }
 

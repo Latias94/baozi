@@ -1,6 +1,7 @@
 //! Finite terminal facts retain the original domain independently of physical output shape.
 
 use super::*;
+use crate::ControlCause;
 use crate::ledger::finite::FiniteLedgerSnapshot;
 use crate::retained::{
     FiniteRetainedOutput, FiniteRetainedOutputPayload, PreparedFiniteRetainedPublication,
@@ -24,6 +25,7 @@ pub struct FiniteStoreFacts {
     snapshot: FiniteLedgerSnapshot<StorePhaseKey, StoreDimensionKey>,
     cause: StoreTerminalCause,
     domain: StoreKeyDomain,
+    original_freeze_control: Option<ControlCause>,
 }
 
 impl FiniteStoreFacts {
@@ -36,6 +38,18 @@ impl FiniteStoreFacts {
             snapshot,
             cause,
             domain,
+            original_freeze_control: None,
+        }
+    }
+
+    /// Borrows the detailed control cause observed by the original finite freeze, if any.
+    pub const fn original_freeze_control(&self) -> Option<&ControlCause> {
+        self.original_freeze_control.as_ref()
+    }
+
+    fn attach_original_freeze_control(&mut self, control: Option<ControlCause>) {
+        if self.original_freeze_control.is_none() {
+            self.original_freeze_control = control;
         }
     }
 
@@ -129,6 +143,7 @@ impl FiniteStoreFacts {
 fn into_parts(
     raw: RawPreparedFiniteStore,
     domain: StoreKeyDomain,
+    original_freeze_control: Option<ControlCause>,
 ) -> (FinitePayload, FiniteStoreFacts) {
     let FiniteRetainedOutput {
         payload,
@@ -141,10 +156,9 @@ fn into_parts(
             StoreTerminalCause::Failure(StorePreparationFailure::from_raw(cause))
         }
     };
-    (
-        payload,
-        FiniteStoreFacts::from_snapshot(facts, cause, domain),
-    )
+    let mut facts = FiniteStoreFacts::from_snapshot(facts, cause, domain);
+    facts.attach_original_freeze_control(original_freeze_control);
+    (payload, facts)
 }
 
 /// Finite outcomes of a success request, including qualified terminal downgrades.
@@ -229,6 +243,13 @@ pub struct PreparedFiniteStoreFallback {
 }
 
 impl PreparedFiniteStoreFallback {
+    pub(in crate::concrete_store) fn attach_original_freeze_control(
+        &mut self,
+        control: Option<ControlCause>,
+    ) {
+        self.facts.attach_original_freeze_control(control);
+    }
+
     pub(in crate::concrete_store) fn quarantine_cause_drop_failure(self) {
         quarantine_coupled_cause_account(&self.terminal_account);
         std::mem::forget(self);
@@ -307,7 +328,7 @@ pub(in crate::concrete_store) fn classify_success<CK, CT, EK, ET>(
     evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
     domain: StoreKeyDomain,
 ) -> PreparedFiniteStoreSuccessOutcome<CK, CT, EK, ET> {
-    let (payload, facts) = into_parts(raw, domain);
+    let (payload, facts) = into_parts(raw, domain, None);
     match payload {
         FinitePayload::Success {
             canonical,
@@ -344,12 +365,40 @@ pub(in crate::concrete_store) fn classify_success<CK, CT, EK, ET>(
     }
 }
 
+pub(in crate::concrete_store) fn classify_frozen_success<CK, CT, EK, ET>(
+    raw: RawPreparedFiniteStore,
+    canonical_root: CanonicalStoreRef<CK, CT>,
+    evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
+    domain: StoreKeyDomain,
+) -> PreparedFiniteStoreSuccess<CK, CT, EK, ET> {
+    let (payload, facts) = into_parts(raw, domain, None);
+    let FinitePayload::Success {
+        canonical,
+        outcome_evidence,
+    } = payload
+    else {
+        unreachable_store_state()
+    };
+    PreparedFiniteStoreSuccess {
+        canonical: PublishedCanonicalStore {
+            raw: canonical,
+            root: canonical_root,
+        },
+        outcome_evidence: PublishedOutcomeEvidenceStore {
+            raw: outcome_evidence,
+            root: evidence_root,
+        },
+        facts,
+    }
+}
+
 pub(in crate::concrete_store) fn classify_failure<EK, ET>(
     raw: RawPreparedFiniteStore,
     evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
     domain: StoreKeyDomain,
+    original_freeze_control: Option<ControlCause>,
 ) -> PreparedFiniteStoreFailureOutcome<EK, ET> {
-    let (payload, facts) = into_parts(raw, domain);
+    let (payload, facts) = into_parts(raw, domain, original_freeze_control);
     match payload {
         FinitePayload::RichFailure(raw) => {
             PreparedFiniteStoreFailureOutcome::RichFailure(PreparedFiniteStoreFailure {
@@ -378,7 +427,7 @@ pub(in crate::concrete_store) fn classify_evidence_only(
     raw: RawPreparedFiniteStore,
     domain: StoreKeyDomain,
 ) -> PreparedFiniteStoreEvidenceOnlyOutcome {
-    let (payload, facts) = into_parts(raw, domain);
+    let (payload, facts) = into_parts(raw, domain, None);
     match payload {
         FinitePayload::EvidenceOnlySuccess { terminal_account } => {
             PreparedFiniteStoreEvidenceOnlyOutcome::Success(
@@ -404,9 +453,27 @@ pub(in crate::concrete_store) fn classify_fallback(
     raw: RawPreparedFiniteStore,
     domain: StoreKeyDomain,
 ) -> PreparedFiniteStoreFallback {
-    match classify_evidence_only(raw, domain) {
-        PreparedFiniteStoreEvidenceOnlyOutcome::MinimalFallback(fallback) => fallback,
-        PreparedFiniteStoreEvidenceOnlyOutcome::Success(_) => unreachable_store_state(),
+    classify_fallback_with_original_freeze_control(raw, domain, None)
+}
+
+pub(in crate::concrete_store) fn classify_fallback_with_original_freeze_control(
+    raw: RawPreparedFiniteStore,
+    domain: StoreKeyDomain,
+    original_freeze_control: Option<ControlCause>,
+) -> PreparedFiniteStoreFallback {
+    let (payload, facts) = into_parts(raw, domain, original_freeze_control);
+    match payload {
+        FinitePayload::MinimalFallback {
+            fallback,
+            terminal_account,
+        } => PreparedFiniteStoreFallback {
+            fallback: PublishedStoreFallbackOutput { raw: fallback },
+            facts,
+            terminal_account,
+        },
+        FinitePayload::Success { .. }
+        | FinitePayload::RichFailure(_)
+        | FinitePayload::EvidenceOnlySuccess { .. } => unreachable_store_state(),
     }
 }
 

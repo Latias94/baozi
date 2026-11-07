@@ -649,118 +649,12 @@ where
         >,
         StoreActivationContainment,
     > {
-        let CanonicalCandidateStoreSession {
-            destinations,
-            owner,
-            _failure_work: failure_work,
-        } = self.state;
-        let (proof, output_owner) = owner.into_parts();
-        let (output, validated) = output_owner.into_parts();
-        if !interruption_slot.is_vacant_for(output.identity()) {
-            let _ = drop_scoped_value(proof);
-            let _ = drop_scoped_value(output);
-            return Err(StoreActivationContainment {
-                cause: validated.contain_activation_fault(),
-            });
-        }
-        let ZeroCommitDestinationFacts {
-            _canonical_dimension: canonical_dimension,
-            canonical_members,
-            _outcome_evidence_dimension: outcome_evidence_dimension,
-            outcome_evidence_members,
-        } = destinations;
-        let issued = match validated.try_issue_freeze_permit(
-            canonical_dimension,
-            outcome_evidence_dimension,
-            final_progress,
-        ) {
-            Ok(issued) => issued,
-            Err(cause) => {
-                let _ = drop_scoped_value(proof);
-                let _ = drop_scoped_value(output);
-                return Err(StoreActivationContainment { cause });
-            }
-        };
-        match issued {
-            StoreSuccessFreezePermitIssue::Ready(store) => {
-                output.freeze_order();
-                Ok(CanonicalFreezePermitIssue::Ready(CanonicalFreezePermit {
-                    owner: PayloadOwner::new(output, PayloadOwner::new(proof, store)),
-                    failure_work,
-                    destinations: ZeroCommitDestinationFacts {
-                        _canonical_dimension: canonical_dimension,
-                        canonical_members,
-                        _outcome_evidence_dimension: outcome_evidence_dimension,
-                        outcome_evidence_members,
-                    },
-                }))
-            }
-            StoreSuccessFreezePermitIssue::RichFailure {
-                failure,
-                cause,
-                control_cause,
-            } => {
-                let proof_drop_failed = drop_scoped_value(proof).is_err();
-                let output_drop_failed = drop_scoped_value(output).is_err();
-                if proof_drop_failed || output_drop_failed {
-                    return Err(StoreActivationContainment {
-                        cause: failure.contain_activation_fault(),
-                    });
-                }
-                let cause = match interruption_slot.place(
-                    CanonicalFreezeInterruption::from_failure_code(cause, control_cause),
-                ) {
-                    Ok(cause) => cause,
-                    Err(cause) => {
-                        let _ = drop_scoped_value(cause);
-                        return Err(StoreActivationContainment {
-                            cause: failure.contain_activation_fault(),
-                        });
-                    }
-                };
-                Ok(CanonicalFreezePermitIssue::Interrupted(
-                    RootedFailureEvidence {
-                        owner: PayloadOwner::new(cause, failure),
-                        failure_work,
-                        outcome_evidence_destination_dimension: outcome_evidence_dimension,
-                        _lifecycle: PhantomData::<FrozenFailureState>,
-                    },
-                ))
-            }
-            StoreSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
-                let proof_drop_failed = drop_scoped_value(proof).is_err();
-                let output_drop_failed = drop_scoped_value(output).is_err();
-                if proof_drop_failed || output_drop_failed {
-                    return Err(StoreActivationContainment {
-                        cause: failure.contain_activation_fault(),
-                    });
-                }
-                let cause = match interruption_slot
-                    .place(CanonicalFreezeInterruption::from_failure_code(cause, None))
-                {
-                    Ok(cause) => cause,
-                    Err(cause) => {
-                        let _ = drop_scoped_value(cause);
-                        return Err(StoreActivationContainment {
-                            cause: failure.contain_activation_fault(),
-                        });
-                    }
-                };
-                Ok(CanonicalFreezePermitIssue::DestinationRejected(
-                    RootedFailureEvidence {
-                        owner: PayloadOwner::new(cause, failure),
-                        failure_work,
-                        outcome_evidence_destination_dimension: outcome_evidence_dimension,
-                        _lifecycle: PhantomData::<OrdinaryFailureState>,
-                    },
-                ))
-            }
-        }
+        super::dynamic_freeze::issue_dynamic(self.state, interruption_slot, final_progress)
     }
 }
 
 impl CanonicalFreezeInterruption {
-    fn from_failure_code(
+    pub(super) fn from_failure_code(
         cause: PreparationFailureCode,
         control_cause: Option<ControlCause>,
     ) -> Self {
@@ -834,8 +728,11 @@ where
         } = self;
         let (output, proof_owner) = owner.into_parts();
         let (proof, store) = proof_owner.into_parts();
-        let _ = drop_scoped_value(output);
-        let _ = drop_scoped_value(proof);
+        let _ = super::freeze_driver::dispose_pair(
+            &mut Some(output),
+            &mut Some(proof),
+            payload_owner::PayloadOrder::OutputBeforeProof,
+        );
         StoreActivationContainment {
             cause: store.contain_activation_fault(),
         }
@@ -853,10 +750,7 @@ where
         if rejection_slot.is_vacant_for(self.owner.value().identity()) {
             Ok((self, inputs))
         } else {
-            let (generation, reject, prepare) = inputs;
-            let _ = drop_scoped_value(generation);
-            let _ = drop_scoped_value(reject);
-            let _ = drop_scoped_value(prepare);
+            super::freeze_driver::dispose_generation_inputs(inputs);
             Err(self.contain_generation_fault())
         }
     }
@@ -892,12 +786,7 @@ where
             .storage()
             .terminal_observation(self.destinations._outcome_evidence_dimension)
             .expect("the sealed outcome-evidence destination remains registered");
-        [canonical, evidence].into_iter().all(|snapshot| {
-            snapshot.pending_publication() == 0
-                && snapshot.committed() == 0
-                && snapshot.committed_canonical_output() == 0
-                && snapshot.published_outcome_evidence() == 0
-        })
+        super::freeze_driver::destinations_are_zero(canonical, evidence)
     }
 
     #[allow(
@@ -933,22 +822,29 @@ where
         let (proof, store) = proof_owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         if !rejection_slot.is_vacant_for(output.identity()) {
-            let _ = drop_scoped_value(proof);
-            let _ = drop_scoped_value(output);
+            let _ = super::freeze_driver::dispose_pair(
+                &mut Some(output),
+                &mut Some(proof),
+                payload_owner::PayloadOrder::ProofBeforeOutput,
+            );
             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
             return Err(StoreActivationContainment {
                 cause: store.contain_activation_fault(),
             });
         }
-        let proof_drop_failed = drop_scoped_value(proof).is_err();
-        let output_drop_failed = drop_scoped_value(output).is_err();
-        if proof_drop_failed || output_drop_failed {
+        if super::freeze_driver::dispose_pair(
+            &mut Some(output),
+            &mut Some(proof),
+            payload_owner::PayloadOrder::ProofBeforeOutput,
+        )
+        .is_err()
+        {
             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
             return Err(StoreActivationContainment {
                 cause: store.contain_activation_fault(),
             });
         }
-        let failure = match store.reject_generation(stable_code) {
+        let failure = match store.reject_frozen_generation(stable_code) {
             Ok(failure) => failure,
             Err(containment) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1016,10 +912,7 @@ where
                 _failure_work: failure_work,
                 _destinations: destinations,
                 joint: PhantomData,
-                owner: PayloadOwner::new(
-                    output,
-                    PayloadOwner::new(proof, store.into_contribution()),
-                ),
+                owner: PayloadOwner::new(output, PayloadOwner::new(proof, store)),
             },
             CanonicalJointSeal { joint: PhantomData },
         )
@@ -1067,7 +960,7 @@ where
         let (output, proof_owner) = owner.into_parts();
         let (proof, store) = proof_owner.into_parts();
         let payloads = PayloadPair::new(output, proof);
-        let store = match store.try_prepare() {
+        let store = match store.try_prepare_frozen() {
             Ok(store) => store,
             Err(cause) => {
                 let _ = drop_scoped_value(payloads);

@@ -78,6 +78,7 @@ where
                         cause: PreparationFailureCode::domain(CONTAINMENT_FALLBACK_CODE),
                         provenance: ordinary::StoreSuccessFallbackProvenance::EarlyAssemblyLatch,
                         error,
+                        original_freeze_control: None,
                     },
                 );
             }
@@ -92,6 +93,7 @@ where
                             provenance:
                                 ordinary::StoreSuccessFallbackProvenance::EarlyAssemblyLatch,
                             error,
+                            original_freeze_control: None,
                         },
                     );
                 }
@@ -112,6 +114,7 @@ where
                 forced_cause,
                 evidence_root,
                 error,
+                original_freeze_control: None,
             }),
             ordinary::StoreSuccessResolution::Interrupted {
                 failure_cause,
@@ -124,6 +127,7 @@ where
                     forced_cause: Some(failure_cause),
                     evidence_root,
                     error,
+                    original_freeze_control: None,
                 },
                 cause,
             },
@@ -133,6 +137,7 @@ where
                     cause,
                     provenance,
                     error,
+                    original_freeze_control: None,
                 })
             }
         }

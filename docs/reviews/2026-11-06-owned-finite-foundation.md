@@ -1,6 +1,66 @@
 # Owned Finite Invocation: Numerical and Control Foundation
 
-Latest checkpoint: **final25/source140 passes all seven integrated gates**:
+Latest integrated checkpoint: **full27/source149 passes all seven gates**:
+**3,944 workspace tests** (two slow, six existing manual skips), **209 doctests**,
+**138 asset-consumer tests** (one existing manual scale skip), both strict
+all-target/all-feature Clippy checks and both format checks. All **1,056** before/
+after/current input hashes, **170** frozen files and five current recorded user-note
+identities match. The exact source/log association is
+`owned-finite-source149-integrated-association-1.json`. Independent terminal review
+`owned-finite-source149-integrated-evidence-review-1.md` accepts those exact seven
+commands, raw counts, identities and source149's equivalent private-alias delta.
+The absent older note baseline
+is not reconstructed. These are structural correctness results; actual Core/Postprocess
+consumers, layout/allocation, native ordinary/heap convergence, main integration and
+release remain open.
+
+The finite freeze/joint cut now passes **1,388 Operation tests**, zero skips, on
+frozen source148 in 43.235 seconds. All 1,056 inputs are stable and 170 frozen source
+files match. Its bounded production review and actual required-test follow-up close
+GO. Full26/source148 passes 3,944 workspace tests (two slow, six existing manual skips)
+and 209 doctests, then fails strict workspace Clippy on three private complex return
+annotations; the four later gates do not start. Source149 only names those equivalent
+private return types, passes strict53 for every Operation target/feature, and passes
+the original seven gates as full27. This is structural
+correctness evidence, with native, allocation, layout, local-main and release HOLD.
+
+Ready retains the original finite Candidate/storage and reuses the existing invariant
+joint seal. Frozen failure preparation does not replay final control or restage its
+evidence. Destination rejection remains Ordinary. Detailed original freeze control
+has independent custody through source/runtime replacement, original owned errors
+and the sole finite facts owner. Old Store/Retained freeze forwarding hierarchies
+are removed; the dynamic and finite concrete guards lend one shared decision kernel.
+
+The new actual dynamic mismatch test exposes a source147 production defect after raw
+containment: an outer assembly loan still has a non-owning operation reference after
+the short reborrow clears all five original physical slots. Its destructor attempts
+containment again and loses the original account anchor. Source148 changes only that
+shared destructor to reuse the exact physical `is_empty()` predicate. Root-owned
+numeric/outstanding cleanup remains in place. The unchanged regression test then
+passes, including a throwing proof destructor and original error preservation.
+
+Required finite tests cover unequal one/two-member roots, true promoted cover,
+second-side destination denial with both original batches empty, late cancellation,
+generation rejection, foreign/occupied slots, both foreign roots, denied-capture
+destructor failure, payload failure during an existing unwind, healthy abandonment
+and recoverable forgotten stable loans. Post-detach rich/minimal errors retain real
+Observer metadata, original domain and uncommitted proof after Host exit. One internal
+generic FaultingCause rebind tests cleanup of an arbitrary cause while preserving the
+actual original freeze metadata and proof; it is not a public user-Drop interruption
+path. Both scratch variants are already promoted by actual startup attribution;
+neither is reported as Inline freeze. Forgotten stable unprepared loans leave complete
+owners in the Host and release healthily; actual outstanding terminal work retains
+its containment contract.
+
+Failed source144 compilation, source145's 1,381 PASS/six fixture failures, source146's
+1,386 PASS/one dynamic setup failure, and source147's 1,387 PASS/one real regression
+remain recorded. Source147 repairs the zero construction/validation fixture budget
+before reaching that production defect. No failed attempt receives source148 credit.
+The bounded follow-up is `owned-finite-source144-freeze-followup-review-1.md`; its final
+association is source148 despite the historical filename. Source148 Operation receipt
+is `owned-finite-test-148/report.json` in the private convergence review directory.
+
+Historical integrated checkpoint: **final25/source140 passes all seven gates**:
 **3,930 workspace tests** (two slow, six existing manual skips), **203 doctests**,
 **138 asset-consumer tests** (one existing manual scale skip), workspace and consumer
 strict all-target/all-feature Clippy, and both format checks. All **1,049** before/after/
@@ -11,9 +71,9 @@ finite source reviews and the source140 test closure close bounded GO. The final
 independent `owned-finite-source140-integrated-evidence-review-1.md` authenticates all
 seven terminal commands, raw logs, source identities, manual skips and counts and
 accepts this structural checkpoint. The earlier
-interim records stay historical. This is a final-only finite failure-authoring structural
-checkpoint. Complete finite success freeze/joint/Core/Postprocess,
-layout/allocation/native/heap qualification, local-main
+interim records stay historical. That result qualifies the final-only finite
+failure-authoring structural checkpoint, without credit for the later freeze/joint
+or Core/Postprocess cuts. Layout/allocation/native/heap qualification, local-main
 merge and release remain open.
 
 Historical final21/source129 independently passes 3,920 workspace tests, 196 doctests,

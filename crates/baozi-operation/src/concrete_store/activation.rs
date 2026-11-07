@@ -31,11 +31,9 @@ use super::{
     StoreDimensionKey, StoreDomainLoan, StoreEvidenceValidationSession, StoreFailureAssembly,
     StoreFailureEvidenceLoan, StoreFailureValidation, StoreFallbackOnly, StoreInvocation,
     StoreInvocationLayout, StorePhaseKey, StorePlanError, StorePrepareError, StorePublicationLoan,
-    StorePublicationState, StoreRuntimeError, StoreSuccessFreezeContribution,
-    StoreSuccessFreezePermit, StoreSuccessFreezePermitIssue, StoreValidationSession,
-    StoreWorkError, StoredBlock, StoredScalar, Utf8Block, Utf8Plan, Utf8Writer,
-    ValidatedStoreFailure, ValidatedStoreSuccess, classify_prepared_fallback,
-    map_publication_error, map_writer_error,
+    StorePublicationState, StoreRuntimeError, StoreValidationSession, StoreWorkError, StoredBlock,
+    StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
+    classify_prepared_fallback, map_publication_error, map_writer_error,
 };
 use crate::control::{ControlCause, ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
 use crate::coordinator::FinalProgress;
@@ -53,9 +51,12 @@ use crate::retained::{
 mod canonical;
 mod canonical_validation;
 mod central_driver;
+mod dynamic_freeze;
+mod freeze_driver;
 pub use canonical::finite::{
-    FiniteCanonicalCentralValidationOutcome, FiniteCentralCandidate, FiniteCentralFailure,
-    FiniteCentralFallback,
+    FiniteCanonicalCentralValidationOutcome, FiniteCanonicalFreezePermit,
+    FiniteCanonicalFreezePermitIssue, FiniteCanonicalJointCommit, FiniteCanonicalJointSuccess,
+    FiniteCentralCandidate, FiniteCentralFailure, FiniteCentralFallback,
 };
 mod failure_evidence;
 pub(in crate::concrete_store) use failure_evidence::run_failure_evidence_build;
@@ -2630,19 +2631,11 @@ type CandidatePayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET> = PayloadOw
 
 type FrozenPayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET> = PayloadOwner<
     PayloadLoan<'inv, T>,
-    PayloadOwner<
-        PayloadLoan<'inv, Proof>,
-        StoreSuccessFreezePermit<'inv, O, PP, U, CK, CT, EK, ET>,
-    >,
+    PayloadOwner<PayloadLoan<'inv, Proof>, ValidatedStoreSuccess<'inv, O, PP, U, CK, CT, EK, ET>>,
 >;
 
-type JointPayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET> = PayloadOwner<
-    PayloadLoan<'inv, T>,
-    PayloadOwner<
-        PayloadLoan<'inv, Proof>,
-        StoreSuccessFreezeContribution<'inv, O, PP, U, CK, CT, EK, ET>,
-    >,
->;
+type JointPayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET> =
+    FrozenPayloadOwner<'inv, O, PP, U, T, Proof, CK, CT, EK, ET>;
 
 /// Candidate after central semantic validation. It contains no writable or raw store seam.
 ///
@@ -3226,10 +3219,11 @@ type FiniteFailureBuildResult<'host, O, PP, U, Cause, EK, ET> = Result<
     FiniteFailureEvidenceOutcome<'host, O, PP, U, Cause, EK, ET>,
     crate::concrete_store::finite::FiniteStoreExitError<O, PP, U>,
 >;
-type FiniteFailureValidationResult<'host, O, PP, U, Cause, EK, ET> = Result<
-    FiniteRootedFailureValidation<'host, O, PP, U, Cause, EK, ET>,
-    crate::concrete_store::finite::FiniteStoreExitError<O, PP, U>,
->;
+type FiniteFailureValidationResult<'host, O, PP, U, Cause, EK, ET, State = OrdinaryFailureState> =
+    Result<
+        FiniteRootedFailureValidation<'host, O, PP, U, Cause, EK, ET, State>,
+        crate::concrete_store::finite::FiniteStoreExitError<O, PP, U>,
+    >;
 
 /// Exact post-activation rejection cause coupled to its evidence-only continuation.
 #[derive(Debug, Clone, PartialEq, Eq)]
