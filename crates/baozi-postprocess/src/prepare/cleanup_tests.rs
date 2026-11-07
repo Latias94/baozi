@@ -610,7 +610,8 @@ fn assert_failure(control: PostProcessControl, branch: Branch, expected: Expecte
         .expect("the real fallback retains its ledger");
     assert_eq!(resources.committed_canonical_bytes(), 0);
     assert_eq!(resources.published_outcome_evidence_bytes(), 0);
-    assert_eq!(resources.published_terminal_evidence_records(), 2);
+    // Finite publication owns one admitted fallback part; facts do not allocate another record.
+    assert_eq!(resources.published_terminal_evidence_records(), 1);
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);
     trace

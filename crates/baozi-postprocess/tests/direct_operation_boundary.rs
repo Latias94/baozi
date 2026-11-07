@@ -92,6 +92,7 @@ fn expired_deadline_returns_the_original_scene_and_terminal_control_evidence() {
             .resources()
             .expect("deadline rejection must retain real terminal evidence"),
     );
+    assert_eq!(failure.resources().unwrap().peak_administrative_bytes(), 0);
 }
 
 #[test]
@@ -131,7 +132,10 @@ fn public_direct_operation_types_preserve_thread_transfer_contracts() {
     assert_send_sync::<PostProcessControlCause>();
     assert_send_sync::<PostProcessReport>();
     assert_send_sync::<PostProcessResourceEvidence>();
-    assert_send_sync::<PostProcessRunError>();
+    // Failure owners retain invocation-local cells and Send-only control extensions.
+    // They transfer intact between threads; detached reports and facts remain shared.
+    assert_send::<baozi_postprocess::PostProcessInvocationFailure>();
+    assert_send::<PostProcessRunError>();
     assert_send_sync::<TriangulationCause>();
     assert_send_sync::<TriangulationFailure>();
     assert_send_sync::<TriangulationRemap>();
@@ -245,7 +249,6 @@ fn assert_no_canonical_write(resources: &PostProcessResourceEvidence) {
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);
     assert_eq!(resources.committed_canonical_bytes(), 0);
-    assert!(resources.peak_administrative_bytes() > 0);
     assert_eq!(resources.published_outcome_evidence_bytes(), 0);
     assert_eq!(resources.published_terminal_evidence_records(), 0);
     assert!(resources.peak_administrative_bytes() >= resources.current_administrative_bytes());

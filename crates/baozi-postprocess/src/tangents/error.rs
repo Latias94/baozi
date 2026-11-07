@@ -3,9 +3,7 @@ use crate::direct_error::FailureOwner;
 use crate::error::project_control_cause;
 use crate::{PostProcessControlCause, PostProcessResourceEvidence};
 use baozi_core::SceneLookupError;
-use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
-use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
-use baozi_operation::{ControlCause, StorePrepareError, StoreRuntimeError};
+use baozi_operation::{ControlCause, StoreRuntimeError};
 use std::fmt;
 use thiserror::Error;
 
@@ -43,11 +41,6 @@ pub enum TangentCause {
     },
     #[error("operation control stopped final publication")]
     FinalControl,
-    #[error("the same-account edit operation could not start: {source}")]
-    Start {
-        #[source]
-        source: RetainedStoreStartError,
-    },
     #[error("tangent generation storage or work admission failed: {source}")]
     Runtime {
         #[source]
@@ -63,16 +56,6 @@ pub enum TangentCause {
     CentralValidation,
     #[error("the geometry edit could not acquire or bind its final generation")]
     Publication,
-    #[error("the geometry edit requires fail-closed containment: {source}")]
-    Containment {
-        #[source]
-        source: StoreActivationContainment,
-    },
-    #[error("final geometry-edit preparation requires containment: {source}")]
-    Preparation {
-        #[source]
-        source: StorePrepareError,
-    },
 }
 
 impl From<StoreRuntimeError> for TangentCause {
@@ -95,6 +78,7 @@ impl TangentCause {
 /// A typed direct-operation error and the actual published terminal evidence, when available.
 ///
 /// Startup and fatal containment have no fabricated ordinary terminal resource snapshot.
+/// Invocation failures are returned by the outer run boundary with their original owner.
 pub struct TangentFailure {
     cause: TangentCause,
     resources: Option<PostProcessResourceEvidence>,
@@ -154,8 +138,8 @@ impl std::error::Error for TangentFailure {
         Some(&self.cause)
     }
 }
-impl From<crate::scene_edit::EditFailure> for TangentFailure {
-    fn from(failure: crate::scene_edit::EditFailure) -> Self {
+impl From<crate::scene_edit::EditSemanticFailure> for TangentFailure {
+    fn from(failure: crate::scene_edit::EditSemanticFailure) -> Self {
         use crate::scene_edit::EditCause;
         let cause = match failure.cause {
             EditCause::Runtime { source } => TangentCause::Runtime { source },
@@ -167,8 +151,6 @@ impl From<crate::scene_edit::EditFailure> for TangentFailure {
             EditCause::SpaceIssue { .. } => TangentCause::CoreRejected,
             EditCause::CentralValidation => TangentCause::CentralValidation,
             EditCause::Publication => TangentCause::Publication,
-            EditCause::Containment { source } => TangentCause::Containment { source },
-            EditCause::Preparation { source } => TangentCause::Preparation { source },
         };
         Self {
             cause,

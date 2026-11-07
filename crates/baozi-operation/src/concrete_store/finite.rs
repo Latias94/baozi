@@ -3,8 +3,8 @@
 use super::*;
 use crate::retained::operation::finite_root::{
     FiniteAttachmentFailure, FiniteDeferredUnattachedBinding, FiniteEntryAdmission,
-    FiniteInvocationRoot, FiniteInvocationRootFields, FinitePendingRetainedAttachment,
-    FiniteRootUnattachedFailure,
+    FiniteInvocationRemainder, FiniteInvocationRoot, FiniteInvocationRootFields,
+    FinitePendingRetainedAttachment, FiniteRootTerminalRejection, FiniteRootUnattachedFailure,
 };
 
 #[cfg(test)]
@@ -23,6 +23,16 @@ pub use publication::{
 };
 
 type RawFiniteStoreRoot<O, PP, U> = FiniteInvocationRoot<
+    O,
+    StorePhaseKey,
+    PP,
+    U,
+    StoreDimensionKey,
+    StoreFallbackEnvelope,
+    StoredBlock,
+    StoredBlock,
+>;
+type RawFiniteStoreRemainder<O, PP, U> = FiniteInvocationRemainder<
     O,
     StorePhaseKey,
     PP,
@@ -126,9 +136,68 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreInvocatio
     pub(super) fn into_error(self, cause: FiniteStoreExitCause) -> FiniteStoreExitError<O, PP, U> {
         FiniteStoreExitError {
             cause,
-            residue: Some(self),
-            unattached: None,
-            terminal: None,
+            state: FiniteStoreExitState::Rooted {
+                root: Some(self),
+                failure: None,
+            },
+            rejected_domain: None,
+            original_freeze_control: None,
+        }
+    }
+
+    fn into_extracted_remainder(mut self) -> FiniteStoreRemainder<O, PP, U> {
+        let domain = scopeguard::guard(self.domain.take(), std::mem::forget);
+        let raw = self.raw.fields().into_owned().into_extracted_remainder();
+        FiniteStoreRemainder {
+            raw,
+            domain: scopeguard::ScopeGuard::into_inner(domain),
+            startup: self.startup.take(),
+        }
+    }
+
+    pub(in crate::concrete_store) fn into_unattached_error(
+        self,
+        failure: StoreUnattachedFailure<O, PP, U>,
+    ) -> FiniteStoreExitError<O, PP, U> {
+        let state = match failure {
+            StoreUnattachedFailure::Rejected(binding) => FiniteStoreExitState::Rooted {
+                root: Some(self),
+                failure: Some(StoreRootedFailure::Unattached { _binding: binding }),
+            },
+            failure @ StoreUnattachedFailure::Owned(_) => FiniteStoreExitState::Unattached {
+                remainder: self.into_extracted_remainder(),
+                failure,
+            },
+        };
+        FiniteStoreExitError {
+            cause: FiniteStoreExitCause::Finalize(FiniteStoreFinalizeCause::Unattached),
+            state,
+            rejected_domain: None,
+            original_freeze_control: None,
+        }
+    }
+
+    fn into_terminal_error(
+        self,
+        cause: FiniteStoreExitCause,
+        failure: operation::StoreTerminalFailure<O, PP, U>,
+    ) -> FiniteStoreExitError<O, PP, U> {
+        let state = match failure {
+            operation::StoreTerminalFailure::Rejected(rejection) => FiniteStoreExitState::Rooted {
+                root: Some(self),
+                failure: Some(StoreRootedFailure::Terminal {
+                    _rejection: rejection,
+                }),
+            },
+            failure @ (operation::StoreTerminalFailure::Detach { .. }
+            | operation::StoreTerminalFailure::Commit { .. }) => FiniteStoreExitState::Terminal {
+                remainder: self.into_extracted_remainder(),
+                failure,
+            },
+        };
+        FiniteStoreExitError {
+            cause,
+            state,
             rejected_domain: None,
             original_freeze_control: None,
         }
@@ -147,15 +216,39 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> Drop
     for FiniteStoreInvocationRoot<O, PP, U>
 {
     fn drop(&mut self) {
+        let domain = scopeguard::guard(self.domain.take(), std::mem::forget);
         let startup_uncertain = self
             .startup
             .as_ref()
-            .is_some_and(|failure| failure.startup.is_some() || failure.retained.is_some());
+            .is_some_and(StoreAttachmentFailure::has_residue);
         // Independent startup containment protects its actual graph before common retirement.
         drop(self.startup.take());
         self.raw.cleanup_owned_state();
-        if startup_uncertain || self.raw.must_retain_domain() {
-            let _domain = std::mem::ManuallyDrop::new(self.domain.take());
+        if !startup_uncertain && !self.raw.must_retain_domain() {
+            let _domain = scopeguard::ScopeGuard::into_inner(domain);
+        }
+    }
+}
+
+struct FiniteStoreRemainder<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> {
+    raw: RawFiniteStoreRemainder<O, PP, U>,
+    domain: Option<StoreKeyDomain>,
+    startup: Option<StoreAttachmentFailure<O>>,
+}
+
+impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> Drop
+    for FiniteStoreRemainder<O, PP, U>
+{
+    fn drop(&mut self) {
+        let domain = scopeguard::guard(self.domain.take(), std::mem::forget);
+        let startup_uncertain = self
+            .startup
+            .as_ref()
+            .is_some_and(StoreAttachmentFailure::has_residue);
+        drop(self.startup.take());
+        self.raw.cleanup_owned_state();
+        if !startup_uncertain && !self.raw.must_retain_domain() {
+            let _domain = scopeguard::ScopeGuard::into_inner(domain);
         }
     }
 }
@@ -173,16 +266,19 @@ pub(in crate::concrete_store) struct FiniteStoreFinalFields<
 }
 
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFields<'_, O, PP, U> {
-    pub(in crate::concrete_store) fn into_error(
-        self,
-        cause: FiniteStoreExitCause,
-    ) -> FiniteStoreExitError<O, PP, U> {
+    fn into_owned(self) -> FiniteStoreInvocationRoot<O, PP, U> {
         FiniteStoreInvocationRoot {
             raw: self.raw.into_owned(),
             domain: self.domain.take(),
             startup: self.startup.take(),
         }
-        .into_error(cause)
+    }
+
+    pub(in crate::concrete_store) fn into_error(
+        self,
+        cause: FiniteStoreExitCause,
+    ) -> FiniteStoreExitError<O, PP, U> {
+        self.into_owned().into_error(cause)
     }
 
     pub(in crate::concrete_store) fn into_request_error(
@@ -243,12 +339,38 @@ impl fmt::Display for FiniteStoreExitCause {
     }
 }
 
+enum StoreRootedFailure {
+    Unattached {
+        _binding: FiniteDeferredUnattachedBinding,
+    },
+    Terminal {
+        _rejection: FiniteRootTerminalRejection,
+    },
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "original numerical failure owners remain inline without failure-path allocation"
+)]
+enum FiniteStoreExitState<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> {
+    Rooted {
+        root: Option<FiniteStoreInvocationRoot<O, PP, U>>,
+        failure: Option<StoreRootedFailure>,
+    },
+    Unattached {
+        remainder: FiniteStoreRemainder<O, PP, U>,
+        failure: StoreUnattachedFailure<O, PP, U>,
+    },
+    Terminal {
+        remainder: FiniteStoreRemainder<O, PP, U>,
+        failure: operation::StoreTerminalFailure<O, PP, U>,
+    },
+}
+
 /// An owned failure: no callback, host/account loan, retry or deferred drain is required.
 pub struct FiniteStoreExitError<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> {
     cause: FiniteStoreExitCause,
-    residue: Option<FiniteStoreInvocationRoot<O, PP, U>>,
-    unattached: Option<StoreUnattachedFailure<O, PP, U>>,
-    terminal: Option<operation::StoreTerminalFailure<O, PP, U>>,
+    state: FiniteStoreExitState<O, PP, U>,
     rejected_domain: Option<StoreKeyDomain>,
     original_freeze_control: Option<ControlCause>,
 }
@@ -257,9 +379,10 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError
     pub(in crate::concrete_store) fn spent(cause: FiniteStoreExitCause) -> Self {
         Self {
             cause,
-            residue: None,
-            unattached: None,
-            terminal: None,
+            state: FiniteStoreExitState::Rooted {
+                root: None,
+                failure: None,
+            },
             rejected_domain: None,
             original_freeze_control: None,
         }
@@ -284,24 +407,31 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError
 
     /// Borrows the original domain even when startup never produced qualified facts.
     pub fn domain(&self) -> Option<&StoreKeyDomain> {
-        self.residue
-            .as_ref()
-            .and_then(|root| root.domain.as_ref())
-            .or(self.rejected_domain.as_ref())
+        let domain = match &self.state {
+            FiniteStoreExitState::Rooted { root, .. } => {
+                root.as_ref().and_then(|root| root.domain.as_ref())
+            }
+            FiniteStoreExitState::Unattached { remainder, .. }
+            | FiniteStoreExitState::Terminal { remainder, .. } => remainder.domain.as_ref(),
+        };
+        domain.or(self.rejected_domain.as_ref())
     }
 
     /// Returns whether this error owns an original root or low-level failure residue.
     pub fn has_residue(&self) -> bool {
-        self.residue.is_some() || self.unattached.is_some() || self.terminal.is_some()
+        match &self.state {
+            FiniteStoreExitState::Rooted { root, failure } => root.is_some() || failure.is_some(),
+            FiniteStoreExitState::Unattached { .. } | FiniteStoreExitState::Terminal { .. } => true,
+        }
     }
 
     #[cfg(test)]
     pub(in crate::concrete_store) fn test_uncommitted_cover_observation(
         &mut self,
     ) -> Option<(u64, u64, u64, usize)> {
-        match self.terminal.as_mut()? {
-            crate::retained::operation::finite_root::FiniteRootTerminalFailure::Commit {
-                proof,
+        match &mut self.state {
+            FiniteStoreExitState::Terminal {
+                failure: operation::StoreTerminalFailure::Commit { proof, .. },
                 ..
             } => proof.test_cover_observation(),
             _ => None,
@@ -309,20 +439,27 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreExitError
     }
 
     pub(in crate::concrete_store) fn record_payload_failure(&mut self, code: u32) {
-        if let Some(root) = self.residue.as_mut() {
+        if let FiniteStoreExitState::Rooted {
+            root: Some(root), ..
+        } = &mut self.state
+        {
             root.record_payload_failure(code);
         }
     }
 
     pub(in crate::concrete_store) fn contain_payload_failure(&mut self) {
-        if let Some(root) = self.residue.as_mut() {
-            root.contain_payload_failure();
+        match &mut self.state {
+            FiniteStoreExitState::Rooted {
+                root: Some(root), ..
+            } => {
+                root.contain_payload_failure();
+            }
+            FiniteStoreExitState::Unattached { remainder, .. }
+            | FiniteStoreExitState::Terminal { remainder, .. } => {
+                remainder.raw.contain_payload_failure();
+            }
+            FiniteStoreExitState::Rooted { root: None, .. } => {}
         }
-    }
-
-    pub(super) fn with_unattached(mut self, failure: StoreUnattachedFailure<O, PP, U>) -> Self {
-        self.unattached = Some(failure);
-        self
     }
 
     pub(in crate::concrete_store) fn with_rejected_domain(
@@ -364,10 +501,30 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> Drop
     for FiniteStoreExitError<O, PP, U>
 {
     fn drop(&mut self) {
-        // The root contains physical owners before independent numerical failure owners retire.
-        drop(self.residue.take());
-        drop(self.unattached.take());
-        drop(self.terminal.take());
+        let state = std::mem::replace(
+            &mut self.state,
+            FiniteStoreExitState::Rooted {
+                root: None,
+                failure: None,
+            },
+        );
+        match state {
+            FiniteStoreExitState::Rooted { root, failure } => {
+                let failure = scopeguard::guard(failure, std::mem::forget);
+                drop(root);
+                let _failure = scopeguard::ScopeGuard::into_inner(failure);
+            }
+            FiniteStoreExitState::Unattached { remainder, failure } => {
+                let failure = scopeguard::guard(failure, std::mem::forget);
+                drop(remainder);
+                drop(scopeguard::ScopeGuard::into_inner(failure));
+            }
+            FiniteStoreExitState::Terminal { remainder, failure } => {
+                let failure = scopeguard::guard(failure, std::mem::forget);
+                drop(remainder);
+                drop(scopeguard::ScopeGuard::into_inner(failure));
+            }
+        }
     }
 }
 

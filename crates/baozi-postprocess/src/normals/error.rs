@@ -2,9 +2,7 @@ use crate::direct_error::FailureOwner;
 use crate::error::project_control_cause;
 use crate::{PostProcessControlCause, PostProcessResourceEvidence};
 use baozi_core::SceneLookupError;
-use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
-use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
-use baozi_operation::{ControlCause, StorePrepareError, StoreRuntimeError};
+use baozi_operation::{ControlCause, StoreRuntimeError};
 use std::fmt;
 use thiserror::Error;
 
@@ -95,11 +93,6 @@ pub enum NormalCause {
     },
     #[error("operation control stopped final publication")]
     FinalControl,
-    #[error("the same-account edit operation could not start: {source}")]
-    Start {
-        #[source]
-        source: RetainedStoreStartError,
-    },
     #[error("normal generation storage or work admission failed: {source}")]
     Runtime {
         #[source]
@@ -115,16 +108,6 @@ pub enum NormalCause {
     CentralValidation,
     #[error("the geometry edit could not acquire or bind its final generation")]
     Publication,
-    #[error("the geometry edit requires fail-closed containment: {source}")]
-    Containment {
-        #[source]
-        source: StoreActivationContainment,
-    },
-    #[error("final geometry-edit preparation requires containment: {source}")]
-    Preparation {
-        #[source]
-        source: StorePrepareError,
-    },
 }
 
 impl From<StoreRuntimeError> for NormalCause {
@@ -147,6 +130,7 @@ impl NormalCause {
 /// A typed direct-operation error and the actual published terminal evidence, when available.
 ///
 /// Startup and fatal containment have no fabricated ordinary terminal resource snapshot.
+/// Invocation failures are returned by the outer run boundary with their original owner.
 pub struct NormalFailure {
     cause: NormalCause,
     resources: Option<PostProcessResourceEvidence>,
@@ -206,8 +190,8 @@ impl std::error::Error for NormalFailure {
         Some(&self.cause)
     }
 }
-impl From<crate::scene_edit::EditFailure> for NormalFailure {
-    fn from(failure: crate::scene_edit::EditFailure) -> Self {
+impl From<crate::scene_edit::EditSemanticFailure> for NormalFailure {
+    fn from(failure: crate::scene_edit::EditSemanticFailure) -> Self {
         use crate::scene_edit::EditCause;
         let cause = match failure.cause {
             EditCause::Runtime { source } => NormalCause::Runtime { source },
@@ -219,8 +203,6 @@ impl From<crate::scene_edit::EditFailure> for NormalFailure {
             EditCause::SpaceIssue { .. } => NormalCause::CoreRejected,
             EditCause::CentralValidation => NormalCause::CentralValidation,
             EditCause::Publication => NormalCause::Publication,
-            EditCause::Containment { source } => NormalCause::Containment { source },
-            EditCause::Preparation { source } => NormalCause::Preparation { source },
         };
         Self {
             cause,

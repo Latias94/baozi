@@ -8,9 +8,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use baozi_operation::__retained_store_integration::activation::CanonicalInvocationOutcome;
-use baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication;
-use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
+use baozi_operation::__retained_store_integration::activation::{
+    FiniteCanonicalInvocationOutcome, FiniteCanonicalOperationPublication, StoreInvocationError,
+};
+use baozi_operation::__retained_store_integration::authority::PreparedFiniteStoreEvidenceOnlyOutcome;
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, CounterClass, LedgerCause,
     StorePreparationFailureClass, StoreTerminalCause,
@@ -46,7 +47,7 @@ impl From<StoreRuntimeError> for TestError {
 fn with_operation<T>(
     polls: &Arc<AtomicUsize>,
     body: impl for<'inv> FnMut(&mut EditOperation<'inv>, RuntimeKeys, u64) -> T,
-) -> (CanonicalOperationPublication, T) {
+) -> (FiniteCanonicalOperationPublication, T) {
     with_operation_and_cancel_at(polls, &Arc::new(AtomicUsize::new(usize::MAX)), body)
 }
 
@@ -54,7 +55,7 @@ fn with_operation_and_cancel_at<T>(
     polls: &Arc<AtomicUsize>,
     cancel_at: &Arc<AtomicUsize>,
     mut body: impl for<'inv> FnMut(&mut EditOperation<'inv>, RuntimeKeys, u64) -> T,
-) -> (CanonicalOperationPublication, T) {
+) -> (FiniteCanonicalOperationPublication, T) {
     let scene = test_fixtures::canonical_triangle_scene();
     let control = PostProcessControl::default().with_cancellation_signal(CountPolls {
         polls: Arc::clone(polls),
@@ -62,8 +63,9 @@ fn with_operation_and_cancel_at<T>(
     });
     with_test_operation(&scene, control, move |operation, keys| {
         let initial = operation
-            .producer_host()
-            .dimension_state(keys.work)
+            .with_exclusive_execution::<_, StoreInvocationError>(|active| {
+                active.dimension_state(keys.work)
+            })
             .unwrap();
         assert_eq!(initial.attempted(), initial.consumed());
         let completed = initial.consumed();
@@ -72,28 +74,29 @@ fn with_operation_and_cancel_at<T>(
 }
 
 fn assert_failed_prefix(
-    operation: CanonicalOperationPublication,
+    operation: FiniteCanonicalOperationPublication,
     keys: RuntimeKeys,
     class: StorePreparationFailureClass,
     attempted: u64,
     consumed: u64,
 ) {
     // An ignored adapter failure must still refuse success and retain usable evidence.
-    let CanonicalOperationPublication::Unchanged(prepared) = operation else {
+    let FiniteCanonicalOperationPublication::EvidenceOnly(prepared) = operation else {
         panic!("the fixture must preserve its unchanged request");
     };
-    let PreparedStoreEvidenceOnlyOutcome::MinimalFallback(fallback) = prepared else {
+    let PreparedFiniteStoreEvidenceOnlyOutcome::MinimalFallback(fallback) = prepared else {
         panic!("unfinished or rejected runtime work must prevent success");
     };
-    let evidence = fallback.handoff().ledger_evidence;
-    let StoreTerminalCause::Failure(cause) = evidence.header().terminal_cause() else {
+    let handoff = fallback.handoff();
+    let facts = &handoff.facts;
+    let StoreTerminalCause::Failure(cause) = facts.header().terminal_cause() else {
         panic!("the terminal owner must retain its failure");
     };
     assert_eq!(cause.class(), class);
-    let work = evidence.dimension(keys.work).unwrap();
+    let work = facts.dimension(keys.work).unwrap();
     assert_eq!((work.attempted(), work.consumed()), (attempted, consumed));
-    assert_eq!(evidence.header().current_live_bytes(), 0);
-    assert_eq!(evidence.header().active_reservations(), 0);
+    assert_eq!(facts.header().current_live_bytes(), 0);
+    assert_eq!(facts.header().active_reservations(), 0);
 }
 
 #[test]
@@ -267,7 +270,7 @@ fn idle_success_and_known_error_explicitly_close_without_abandonment() {
             plan_selected_runtime(writer, crate::PostProcessBudgets::default()).unwrap();
         let mut host = EditHost::new();
         let mut initial = 0;
-        let finish = baozi_core::__scene_integration::integration::run_scene_edit_body(
+        let finish = baozi_core::__scene_integration::integration::run_finite_scene_edit_body(
             &mut host,
             &scene,
             control.into_runtime(),
@@ -276,8 +279,9 @@ fn idle_success_and_known_error_explicitly_close_without_abandonment() {
             |parts, disposition| {
                 let mut operation = parts.startup.attach().unwrap();
                 let baseline = operation
-                    .producer_host()
-                    .dimension_state(keys.work)
+                    .with_exclusive_execution::<_, StoreInvocationError>(|active| {
+                        active.dimension_state(keys.work)
+                    })
                     .unwrap();
                 assert_eq!(baseline.attempted(), baseline.consumed());
                 initial = baseline.consumed();
@@ -318,42 +322,43 @@ fn idle_success_and_known_error_explicitly_close_without_abandonment() {
                 } else {
                     operation.request_unchanged(disposition).unwrap();
                 }
+                Ok(())
             },
         )
         .unwrap();
-        let CanonicalInvocationOutcome::Operation(operation) = finish
-            .into_attached()
-            .unwrap_or_else(|_| panic!("the body attached its original operation"))
-            .resume()
-            .outcome
+        let FiniteCanonicalInvocationOutcome::Operation(operation) =
+            finish.resume().unwrap().outcome
         else {
             panic!("the body must preserve its explicit terminal request");
         };
-        let evidence = match (known_error, operation.finish(final_progress()).unwrap()) {
-            (
-                false,
-                CanonicalOperationPublication::Unchanged(
-                    PreparedStoreEvidenceOnlyOutcome::Success(success),
-                ),
-            ) => success.handoff().ledger_evidence,
-            (true, CanonicalOperationPublication::MinimalFallback(fallback)) => {
-                let evidence = fallback.handoff().ledger_evidence;
-                let StoreTerminalCause::Failure(cause) = evidence.header().terminal_cause() else {
-                    panic!("a handled semantic error retains its requested failure");
-                };
-                assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
-                assert_eq!(cause.code(), 41);
-                evidence
-            }
-            _ => panic!("resolved success and handled failure must not become abandonment"),
-        };
+        let (facts, _terminal_account) =
+            match (known_error, operation.finish(final_progress()).unwrap()) {
+                (
+                    false,
+                    FiniteCanonicalOperationPublication::EvidenceOnly(
+                        PreparedFiniteStoreEvidenceOnlyOutcome::Success(success),
+                    ),
+                ) => {
+                    let handoff = success.handoff();
+                    (handoff.facts, handoff.terminal_account)
+                }
+                (true, FiniteCanonicalOperationPublication::MinimalFallback(fallback)) => {
+                    let handoff = fallback.handoff();
+                    let StoreTerminalCause::Failure(cause) =
+                        handoff.facts.header().terminal_cause()
+                    else {
+                        panic!("a handled semantic error retains its requested failure");
+                    };
+                    assert_eq!(cause.class(), StorePreparationFailureClass::Requested);
+                    assert_eq!(cause.code(), 41);
+                    (handoff.facts, handoff.terminal_account)
+                }
+                _ => panic!("resolved success and handled failure must not become abandonment"),
+            };
         if !known_error {
-            assert_eq!(
-                evidence.header().terminal_cause(),
-                StoreTerminalCause::Success
-            );
+            assert_eq!(facts.header().terminal_cause(), StoreTerminalCause::Success);
         }
-        let work = evidence.dimension(keys.work).unwrap();
+        let work = facts.dimension(keys.work).unwrap();
         assert_eq!(
             (work.attempted(), work.consumed()),
             (initial + 3, initial + 3)
@@ -584,14 +589,14 @@ fn scratch_share_between_leaves_keeps_one_authority_and_releases_physical_storag
         assert!(!after.poisoned());
         (keys, initial)
     });
-    let CanonicalOperationPublication::Unchanged(prepared) = operation else {
+    let FiniteCanonicalOperationPublication::EvidenceOnly(prepared) = operation else {
         panic!("the fixture must preserve its unchanged request");
     };
-    let PreparedStoreEvidenceOnlyOutcome::Success(success) = prepared else {
+    let PreparedFiniteStoreEvidenceOnlyOutcome::Success(success) = prepared else {
         panic!("scratch sharing must not abandon the idle producer sequence");
     };
-    let evidence = success.handoff().ledger_evidence;
-    let work = evidence.dimension(keys.work).unwrap();
+    let handoff = success.handoff();
+    let work = handoff.facts.dimension(keys.work).unwrap();
     assert_eq!(
         (work.attempted(), work.consumed()),
         (initial + 5, initial + 5)
@@ -774,4 +779,147 @@ fn weighted_next_action_polls_before_reading_and_idle_error_cleanup_adds_no_poll
         initial + 2,
         initial + 2,
     );
+}
+
+#[test]
+fn mapping_scratch_observes_entry_reservation_and_exit_control_before_returning_ownership() {
+    use baozi_core::__scene_integration::integration::SceneGeometryPlanStorage;
+
+    // The ordinary allocation boundary intentionally checks entry, reservation and exit.
+    for (count, foreign_phase, cancel_poll) in [
+        (0, false, usize::MAX),
+        (0, false, 1),
+        (usize::MAX, true, 1),
+        (0, false, 2),
+        (1, false, 3),
+    ] {
+        let scene = test_fixtures::canonical_triangle_scene();
+        let (writer, _, _) = SceneEditBootstrap::try_new().unwrap().into_parts();
+        let (keys, ledger, start) =
+            plan_selected_runtime(writer, crate::PostProcessBudgets::default()).unwrap();
+        let (foreign, _, _) =
+            plan_selected_runtime(writer, crate::PostProcessBudgets::default()).unwrap();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let cancel_at = Arc::new(AtomicUsize::new(usize::MAX));
+        let control = crate::PostProcessControl::default().with_cancellation_signal(CountPolls {
+            polls: Arc::clone(&polls),
+            cancel_at: Arc::clone(&cancel_at),
+        });
+        let mut host = EditHost::new();
+        let observed = std::cell::Cell::new(false);
+        let finish = baozi_core::__scene_integration::integration::run_finite_scene_edit_body(
+            &mut host,
+            &scene,
+            control.into_runtime(),
+            ledger,
+            start,
+            |parts, disposition| {
+                let mut operation = parts.startup.attach().unwrap();
+                let before = operation.physical_storage_snapshot();
+                polls.store(0, Ordering::Relaxed);
+                cancel_at.store(cancel_poll, Ordering::Relaxed);
+                let entered = std::cell::Cell::new(false);
+                let result = with_execution(&mut operation, keys, |runtime| {
+                    entered.set(true);
+                    SceneGeometryPlanStorage::try_new(
+                        runtime,
+                        if foreign_phase {
+                            foreign.planning
+                        } else {
+                            keys.planning
+                        },
+                        keys.scratch,
+                        count,
+                    )
+                });
+                match result {
+                    Err(StoreRuntimeError::Control(ControlCause::Cancelled {
+                        origin: CancellationOrigin::Signal,
+                    })) if cancel_poll != usize::MAX => {
+                        assert_eq!(entered.get(), cancel_poll != 1);
+                    }
+                    Ok(owner) if cancel_poll == usize::MAX => {
+                        assert!(entered.get());
+                        drop(owner);
+                    }
+                    _ => panic!("the actual mapping boundary must retain control precedence"),
+                }
+                assert_eq!(polls.load(Ordering::Relaxed), cancel_poll.min(3));
+                let after = operation.physical_storage_snapshot();
+                assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+                assert_eq!(
+                    after.live_retained_allocations(),
+                    before.live_retained_allocations()
+                );
+                assert!(!after.poisoned());
+                observed.set(true);
+                operation.request_unchanged(disposition).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+        let FiniteCanonicalInvocationOutcome::Operation(operation) =
+            finish.resume().unwrap().outcome
+        else {
+            panic!("the actual mapping witness must retain its original finite request");
+        };
+        let _publication = operation.finish(final_progress()).unwrap();
+        assert!(observed.get());
+    }
+}
+
+#[test]
+fn invocation_classification_leaves_the_original_error_owned_after_host_and_source_exit() {
+    let (error, keys) = {
+        let scene = test_fixtures::canonical_triangle_scene();
+        let (writer, requirements, _) = SceneEditBootstrap::try_new().unwrap().into_parts();
+        let mut requirements = Some(requirements);
+        let (keys, ledger, start) =
+            plan_selected_runtime(writer, crate::PostProcessBudgets::default()).unwrap();
+        let (foreign, _, _) =
+            plan_selected_runtime(writer, crate::PostProcessBudgets::default()).unwrap();
+        let mut host = EditHost::new();
+        let body = baozi_core::__scene_integration::integration::run_finite_scene_edit_body(
+            &mut host,
+            &scene,
+            PostProcessControl::default().into_runtime(),
+            ledger,
+            start,
+            |parts, _| {
+                let operation = parts.startup.attach().unwrap();
+                match operation.into_session_outcome_owner(
+                    foreign.session_policy(),
+                    writer,
+                    requirements.take().expect("the body runs at most once"),
+                ) {
+                    Err(error) => Err(error),
+                    Ok(_) => panic!("a foreign policy cannot own the original invocation"),
+                }
+            },
+        );
+        let error = match body {
+            Err(error) => error,
+            Ok(_) => panic!("the body must return its actual foreign-policy error"),
+        };
+        (error, keys)
+    };
+    let mut destination = None;
+    let status = crate::scene_edit::EditFailure::invocation(error, &mut destination);
+    assert!(matches!(status, crate::scene_edit::EditFailure::Invocation));
+    drop(status);
+    let error = destination
+        .take()
+        .expect("dropping the classification cannot retire the entry-owned error");
+    assert!(error.has_residue());
+    assert_eq!(
+        error
+            .domain()
+            .unwrap()
+            .try_admit_dimension(keys.work.semantic_id()),
+        Some(keys.work),
+    );
+    assert!(error.original_freeze_control().is_none());
+    let public = crate::PostProcessInvocationFailure::new(error);
+    assert!(public.has_residue());
+    assert!(std::error::Error::source(&public).is_some());
 }

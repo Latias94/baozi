@@ -10,12 +10,12 @@ pub use error::{SpaceConversionCause, SpaceConversionFailure};
 pub use report::SpaceConversionReport;
 
 use baozi_core::__scene_integration::integration::{
-    SceneEditBootstrap, SceneEditEvidence, resolve_scene_space_conversion, run_scene_edit_body,
+    SceneEditBootstrap, SceneEditEvidence, resolve_scene_space_conversion,
+    run_finite_scene_edit_body,
 };
 use baozi_core::{TargetSpace, ValidatedScene};
-use baozi_operation::__retained_store_integration::activation::CanonicalBoundBodyError;
 
-use crate::operation::runtime::{REJECTION_CODE, plan_runtime, run_unit};
+use crate::operation::runtime::{EditInvocationError, REJECTION_CODE, plan_runtime, run_unit};
 use crate::scene_edit::{
     EditCanonicalSlots, EditCause, EditFailure, EditTerminal, PreparedEdit, validate_changed,
 };
@@ -66,28 +66,22 @@ pub fn convert_scene_space(
     let bootstrap = match SceneEditBootstrap::try_new() {
         Ok(value) => value,
         Err(_) => {
-            return Err(PostProcessRunFailure::new(
-                input,
-                PostProcessRunError::ResourcePolicyInitialization,
-            ));
+            return crate::error::reject_resource_policy(input);
         }
     };
     let (writer_limits, failure_requirements, admission) = bootstrap.into_parts();
     let Some((keys, ledger, start)) = plan_runtime(writer_limits) else {
-        return Err(PostProcessRunFailure::new(
-            input,
-            PostProcessRunError::ResourcePolicyInitialization,
-        ));
+        return crate::error::reject_resource_policy(input);
     };
     let mut invocation_host = crate::operation::runtime::EditHost::new();
     let source_generation = input.generation();
     let mut body_cause = None;
-    let mut body_containment = None;
+    let did_attach = std::cell::Cell::new(false);
     let source = &input;
     let local_cause = &mut body_cause;
-    let containment = &mut body_containment;
+    let attached = &did_attach;
     let mut activation = Some((admission, failure_requirements));
-    let body = run_scene_edit_body(
+    let body = run_finite_scene_edit_body(
         &mut invocation_host,
         source,
         control.into_runtime(),
@@ -110,29 +104,27 @@ pub fn convert_scene_space(
                     if let Err(source) = startup.request_failure(disposition, REJECTION_CODE) {
                         *local_cause = Some(source.into());
                     }
-                    return;
+                    return Ok(());
                 }
                 Err(source) => {
                     *local_cause = Some(source.into());
                     if let Err(source) = startup.request_failure(disposition, REJECTION_CODE) {
                         *local_cause = Some(source.into());
                     }
-                    return;
+                    return Ok(());
                 }
             };
             if resolved.is_unchanged() {
                 if let Err(source) = startup.request_unchanged(disposition) {
                     *local_cause = Some(source.into());
                 }
-                return;
+                return Ok(());
             }
             let operation = match startup.attach() {
                 Ok(operation) => operation,
-                Err(source) => {
-                    *local_cause = Some(SpaceConversionCause::Start { source });
-                    return;
-                }
+                Err(_source) => return Ok(()),
             };
+            attached.set(true);
             let (admission, failure_requirements) = activation
                 .take()
                 .expect("the retained edit body activates at most once");
@@ -143,11 +135,10 @@ pub fn convert_scene_space(
             ) {
                 Ok(owner) => owner,
                 Err(source) => {
-                    *containment = Some(source);
-                    return;
+                    return Err(source);
                 }
             };
-            *containment = validate_changed(
+            validate_changed(
                 source,
                 owner,
                 EditCanonicalSlots {
@@ -160,30 +151,38 @@ pub fn convert_scene_space(
                 PreparedEdit::Space { resolved },
                 disposition,
             )
-            .err();
         },
     );
+    let mut invocation_error = None;
     let result = match body {
-        Ok(finish) => crate::scene_edit::finish_bound_edit(finish),
-        Err(CanonicalBoundBodyError::Start(source)) => {
-            return Err(failure(
-                input,
-                SpaceConversionFailure::new(SpaceConversionCause::Start { source }),
-            ));
+        Ok(finish) => {
+            crate::scene_edit::finish_bound_edit(finish, did_attach.get(), &mut invocation_error)
         }
-        Err(CanonicalBoundBodyError::Body(error)) => {
-            if let Some(source) = error.containment().copied().or(body_containment) {
-                Err(EditFailure::new(EditCause::Containment { source }))
-            } else {
-                return Err(failure(
-                    input,
-                    SpaceConversionFailure::new(
-                        body_cause.unwrap_or(SpaceConversionCause::Publication),
-                    ),
-                ));
-            }
-        }
+        Err(error) => Err(EditFailure::invocation(error, &mut invocation_error)),
     };
+    finish_conversion(
+        input,
+        options,
+        source_generation,
+        result,
+        invocation_error,
+        body_cause,
+    )
+}
+
+// Build the public result after materialization releases its nested stack frames.
+#[expect(
+    clippy::result_large_err,
+    reason = "the public failure owns its original Scene and invocation residue without allocating"
+)]
+fn finish_conversion(
+    input: ValidatedScene,
+    options: SpaceConversionOptions,
+    source_generation: baozi_core::SceneGenerationId,
+    result: Result<EditTerminal, EditFailure>,
+    mut invocation_error: Option<EditInvocationError>,
+    body_cause: Option<SpaceConversionCause>,
+) -> Result<PostProcessRunOutcome, PostProcessRunFailure> {
     match result {
         Ok(EditTerminal::Unchanged { resources }) => {
             let report = PostProcessReport::space_conversion(
@@ -214,7 +213,17 @@ pub fn convert_scene_space(
             input,
             SpaceConversionFailure::new(SpaceConversionCause::Publication),
         )),
-        Err(error) => {
+        Err(EditFailure::Invocation) => Err(PostProcessRunFailure::new(
+            input,
+            PostProcessRunError::Invocation {
+                failure: crate::PostProcessInvocationFailure::new(
+                    invocation_error
+                        .take()
+                        .expect("the entry owns its original invocation error"),
+                ),
+            },
+        )),
+        Err(EditFailure::Semantic(error)) => {
             let error = match body_cause {
                 Some(cause) => local_failure(cause, error),
                 None => error.into(),
@@ -228,8 +237,11 @@ fn failure(input: ValidatedScene, failure: SpaceConversionFailure) -> PostProces
     PostProcessRunFailure::new(input, PostProcessRunError::SpaceConversion { failure })
 }
 
-fn local_failure(cause: SpaceConversionCause, error: EditFailure) -> SpaceConversionFailure {
-    let EditFailure {
+fn local_failure(
+    cause: SpaceConversionCause,
+    error: crate::scene_edit::EditSemanticFailure,
+) -> SpaceConversionFailure {
+    let crate::scene_edit::EditSemanticFailure {
         cause: terminal_cause,
         resources,
         owner,
@@ -241,7 +253,7 @@ fn local_failure(cause: SpaceConversionCause, error: EditFailure) -> SpaceConver
             _ => SpaceConversionCause::FinalControl,
         },
         cause => {
-            return EditFailure {
+            return crate::scene_edit::EditSemanticFailure {
                 cause,
                 resources,
                 owner,

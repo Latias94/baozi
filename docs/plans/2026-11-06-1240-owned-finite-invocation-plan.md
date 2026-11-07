@@ -1,13 +1,23 @@
 # Own Finite Invocation State at the Actual Root
 
-Status: in progress; release HOLD. The architectural contract and its terminal/error
-amendments have bounded independent plan approval. The completed dynamic compiler
-cut passed all seven integrated gates; its
-[report](../reviews/2026-11-06-owned-dynamic-invocation.md) records exact source,
-failures, review scopes and the limited layout observation. The finite compiler
-cut remains incomplete.
+Status: Core/Postprocess finite consumer cut qualified; release and native convergence
+HOLD. The architectural contract and terminal/error amendments have independent
+bounded approval. The dynamic compiler cut and finite freeze/joint foundation retain
+their historical qualification below.
 
-Latest integrated checkpoint: **full27/source149 passes all seven gates**. The
+Latest integrated checkpoint: **full29/source172 passes all seven gates**. The actual
+run has **3,956 workspace PASS** (two slow, six existing manual skips), **218 doctests
+PASS**, **138 asset-consumer PASS** (one existing scale skip), both strict all-target/
+all-feature Clippy checks and both format checks. All five original Postprocess1MiB
+cases and the two previously failing real CLI comparisons pass on this same source.
+All **1,058** before/after/current inputs, **192** frozen files and five current recorded
+user-note identities match. `owned-finite-source172-integrated-association-1.json`
+binds the actual source, commands and logs. Independent final evidence review remains
+a separate receipt. Native Windows/GNU timing, whole-child memory and separate heap
+campaigns, local-main integration and release remain HOLD; these correctness results
+are not performance convergence.
+
+Historical integrated checkpoint: **full27/source149 passes all seven gates**. The
 actual run has **3,944 workspace PASS** (two slow, six existing manual skips),
 **209 doctests PASS**, **138 asset-consumer PASS** (one existing manual scale skip),
 both strict all-target/all-feature Clippy checks and both format checks. All **1,056**
@@ -1075,3 +1085,282 @@ exhaustion, exact facts, and original owned errors after Host/source exit. Keep 
 meaningful existing positive and compile-fail capability checks, then affected serial
 checks and all seven integrated gates on the recorded combined source. Layout,
 allocation, original Windows/GNU ordinary and separate heap convergence still follow.
+
+The actual consumer cut exposes two additional seams during compilation. Selection
+mapping scratch still took a dynamic owning body-operation type. Its constructor now
+accepts the existing `StoreActionExecution` loan and reuses its retained reservation
+and resize operations; the three genuine dynamic Core test callers use that same
+loan. This adds the mapping storage file and its caller tests to the Core write set,
+without another allocator or backend interface.
+
+Original dirty finite errors retain local Cells and Send-only control extensions.
+The public invocation failure and cause families therefore preserve intact `Send`
+transfer rather than claiming `Sync`. Reports and the detached fixed facts remain
+`Send + Sync`. The unattached deferred token owns no resource or pointer access; its
+private identity is an opaque address value used only for exact equality against
+the still-borrowed root and entry. This removes a raw-pointer auto-trait obstruction
+without unsafe Send/Sync implementations, fabricated owners or locks added solely
+for the old Copy-error sharing contract. Actual cross-thread Result transfer remains
+a required positive boundary test. Source152 passes the combined Core/Postprocess
+all-target/all-feature compile check; runtime and integrated gates remain pending.
+
+
+### Measured consumer stack correction
+
+Source152 all-target/all-feature Core/Postprocess compilation passes, but the actual
+combined nextest run fails: 884 PASS, 135 FAIL, six existing skips; doctests do not
+start. Many public Postprocess paths abort on the Windows stack. Preserve this failed
+attempt. Actual linked debug sizes are 18,256 bytes for the owning invocation failure,
+18,272 bytes for PreparationCause, and 21,568 bytes for the public run failure/Result.
+Selected unoptimized function prologues reserve 479,824 bytes in prepare::run, 510,304
+in its body closure, 456,432 in the semantic failure dispatcher, and 450,688 in
+publish_candidate. These are measured local frames, not a complete call-chain peak
+or ordinary native performance. Fixed facts remain 976 bytes and resource evidence
+992 bytes; those are not the leading measured layout cost.
+
+This evidence supersedes the per-operation owning Invocation variants specified
+above. Algorithm semantic causes cannot receive the original invocation root, so
+carrying that large owner inside every normal/tangent/triangulation/space and
+PreparationCause expands unrelated inner Result temporaries. Keep their semantic
+errors small. The actual original error moves once into the top-level
+PostProcessRunError::Invocation at the outer run boundary, before semantic conversion
+or generic failure dispatch. A private EditFailure explicitly distinguishes that
+original invocation owner from semantic terminal failure with real facts/physical
+custody. Preserve the input, source chain, first cause, domain, metadata and original
+residue; do not box, copy, discard or allocate a substitute error. Semantic causes
+regain Send + Sync; the owning top-level error remains Send and retains its actual
+local state. This is an intentional public classification change, allowed before
+release, and must be qualified rather than attributed to compatibility.
+
+Independently, the original remaining root can coexist with either an unattached
+extraction failure or an attached terminal failure. Those two extraction paths never
+run on the same original error. Replace their separate inline Option slots with one
+private None/Unattached/Terminal enum while keeping the root's independent owner.
+Do not make root and extracted proof alternatives. Drop the original physical root
+before the selected numerical failure, preserving live cover, startup, domain and
+all returned-error containment duties. No failure-path allocation is introduced.
+Measure the new real sizes/frames and rerun actual public operations on their existing
+stack; never infer stack acceptance from the representation change alone.
+
+The shared mapping allocator intentionally adopts the ordinary action region's
+entry, reservation and successful-exit control observations. Cancellation can precede
+an empty/invalid mapping plan, and exit cancellation destroys the new scratch before
+returning the original control error. Semantic action units remain unchanged and
+there is no Ready/terminal replay. The bounded Core P2 is resolved by this explicit
+contract and a focused real finite-entry test for zero rows, a competing foreign
+phase/overflow plan, each checkpoint, and exact physical release. Actual execution
+of that oracle remains required after source qualification.
+
+
+Source153 confirms the semantic-cause correction but does not pass consumer stack
+qualification: 996 tests pass,24 fail, six existing skips; doctests do not start.
+Five unchanged explicit1MiB tests still overflow. Actual owning error is14768 bytes,
+while PreparationCause returns to144 bytes. The same measured local frames fall to
+311584 bytes for prepare::run,173312 for finish_bound_edit and259824 for
+publish_candidate. These are diagnostic facts, not stack or native acceptance.
+
+The next bounded representation correction keeps the actual common beside startup
+failure. Cross-plane rejection and retained-construction rejection arise in successive
+startup stages, so FiniteAttachmentFailure keeps one None/CrossPlane/Retained residue
+payload behind the original cause. Its destructor still owns the original failed
+stage's physical state; raw common, domain retention and original cleanup remain
+independent. Do not merge common with startup or drop the root remainder after detach.
+
+The independently reviewed next finish boundary keeps all public Operation contracts
+and the body's actual owning Result unchanged. Only after run_finite_scene_edit_body
+returns, one entry-owned Option holds the original invocation error through all
+private finalization calls. EditFailure::Invocation carries classification alone;
+the shared checked installer moves the actual owner into that empty slot before
+returning the classification. Nested functions immediately propagate it; the entry
+takes the original owner exactly once into PostProcessRunError::Invocation. Semantic
+rails keep their existing facts, fallback/account custody, first freeze-control cause
+and body-cause precedence. A private classification can be dropped or forgotten
+without retiring the independently owned error. This is not a substitute for the
+Host's returned-error guard during body, capture, payload or admission teardown.
+No error allocation, boxing, larger stack or compiler-profile exception is allowed.
+
+The same mapping-control witness now uses one real mapping row for exit cancellation,
+so its original before/after physical counters also check nonzero scratch release.
+Actual execution and the unchanged five1MiB tests remain required on the next source.
+
+
+Source156's actual Core/Postprocess run passes1010 tests and fails11, with six
+existing skips; doctests do not start. All seven new Core finite-publication tests,
+the original-owner classification witness, and the nonzero mapping-exit witness
+pass. The unchanged five1MiB tests still overflow. The invocation error is13856 bytes;
+actual local frames are286768 bytes for prepare::run,97504 for finish_bound_edit and
+155040 for publish_candidate. Smaller finalization frames are insufficient evidence.
+
+A separate Windows CDB run of the unchanged source156 normal-generation1MiB binary
+stops on first-chance overflow inside selected geometry materialization, before
+finalization. The printed unwind SP distances include286784 bytes for prepare::run,
+162512 for the Host body runner and125328 for validate_changed. Keep the raw image
+hash and debugger log, including unavailable exception-context/TEB diagnostics; this
+is stack attribution, not a native benchmark or accepted full peak measurement.
+The next correction extracts final public report/error assembly into private finish
+functions called only after body and terminal processing end. Move the exact original
+input, semantic result, optional original error and body cause into that later phase;
+preserve every branch, cause precedence and destructor duty. Do not reserve all final
+public Result construction temporaries in the body caller's debug frame. Do not
+replace actual error ownership or force stack/compiler settings. Measure and execute
+the unchanged tests before making any stack-acceptance claim.
+
+
+Source157 passes1016 Core/Postprocess tests and fails only the five unchanged1MiB
+stack tests, with six existing skips. The normal semantic-prefix/denial/poll oracles
+and the path-specific administration assertions now pass. Doctests do not start.
+A second CDB run of the unchanged normal stack test shows the body completing; the
+first overflow is now during the Ready publication path. Printed SP distances include
+166224 bytes for prepare::run,248480 for Core permit consumption,137840 for
+finish_edit,155056 for publish_candidate and97520 for finish_bound_edit. Keep this
+failed attempt and diagnostic image identity; moving the failure is not acceptance.
+
+The remaining private finalization callers reserve separate large Operation Result
+temporaries for mutually exclusive rails. One private finish_step invokes a FnOnce
+returning the concrete EditInvocationError, installs its original Err directly in the
+same entry slot, and returns only the smaller semantic result/classification. Its
+callers lend the existing finite permission through that closure; they do not evaluate
+the large result first. The existing fallback resolver likewise invokes its original
+preparation inside its own frame. This preserves actual method calls, ordering,
+control observations, payload guards, ownerless status and immediate error propagation.
+No body callback contract, public Operation API, numerical owner or error layout changes.
+Qualify the next frozen source and retain all earlier stack failures.
+
+
+Source159 passes strict all-target/all-feature Core/Postprocess Clippy in13.82s.
+Operation test159 separately fails before execution on three stale private startup
+fixture fields. Source160 changes only those assertions to match the original
+Retained residue owner and preserves root/account coexistence; all1388 Operation
+tests then pass in46.025s, zero skips. None of this qualifies later source161.
+
+The next independently reviewed cut removes a redundant *location* from extracted
+errors. Before extraction, Rooted preserves the complete original root and exact
+rejected binding/preparation/stamp metadata. Only actual Owned unattached extraction
+or terminal Detach/Commit can move original physical/domain/startup remainder beside
+its actual independent numerical failure. The raw converter checks common absent
+before transferring the real physical fields; no numerical failure internals, live
+cover, recovered state, admission or domain are replaced by facts. The shared cleanup
+kernel can borrow an optional original numerical slot; a remainder has no slot to
+poll, close or recreate. The actual contained reference remains armed before callbacks.
+
+A local guard must own the original Store domain before startup/raw cleanup and
+before an extracted conversion can unwind. It retains by default; only completed
+healthy cleanup permits normal domain release, even during an unrelated outer unwind.
+Keep physical root/remainder retirement before the selected numerical failure/proof.
+Copying the old destructor's trailing conditional would skip retention if cleanup
+unwinds and does not meet this contract. Preserve rejected authority metadata and the
+old has_residue predicate, including ownerless rejected tokens. No public API,
+error-path allocation, Box, stack size, compiler profile or common/startup union changes.
+The new raw and Store slices require compilation, actual ownership/unwind oracles,
+unchanged1MiB tests and independent source/evidence review before acceptance.
+
+Source164 passes1,391 Operation tests with zero skips in44.827s, but the affected
+consumer run still passes1,016 and fails the five original1MiB tests, with six
+existing skips and no doctest execution. The actual error shrinks to10,464 bytes;
+prepare::run is135,664 bytes. The fourth separate CDB trace reaches the original
+numerical detach. Exact primary frames remain190,800 bytes in Core generation-source
+consumption,105,632 in raw finish_assembly,55,952 in raw finish_deferred,66,704 in
+terminal detach,82,640 in numerical detach and1,184 in the projection writer.
+The named source164 owner association binds this evidence and both bounded source
+reviews; none of those measurements is ordinary native convergence or stack GO.
+
+Source165 separates the existing small preparation/classification phase from its
+owning numerical failure result. The raw ownership-failure constructor returns the
+original small pre-extraction rejection; finish_assembly wraps it once, after its
+short preparation loan ends, then calls the unchanged numerical finish. Strict success
+classification still rejects before fallback; original control and contained arming
+are preserved. No Core transport implementation is included in source165.
+
+The cheaper raw-only experiment passes the original normal-generation1MiB test on
+source165: one PASS, four filtered tests, build48.86s and test0.034s, all1,058 inputs
+stable. Full affected qualification is running. The separately reviewed Core
+owning-error-slot proposal remains unimplemented while this smaller change is tested;
+do not expand Core merely because that design has GO. The other four stack tests,
+doctests, strict/integrated gates and native/heap comparison still require execution.
+
+The full source165 run passes1,020 tests and fails only the original camera/light1MiB
+case, with six existing skips and unstarted doctests. Normal generation, whole-Scene
+conversion, deformation/animation and tangent1MiB cases all pass on that source.
+The remaining separate CDB trace reaches FiniteDetachGuard cleanup and retains a
+190,816-byte printed SP distance in Core consumption. This supplies the measured
+reason to implement the independently reviewed Core transport rather than expanding
+it before the raw-only experiment.
+
+Source166 retains the public Core owning Result and generation-source seam, the same
+two original admissions, reserve callback, exhaustion fallback, panic containment and
+invariant joint seal. One entry Option owns the original returned error; synchronous
+private steps construct each original Operation result and move Err into that checked
+empty slot after Operation cleanup returns. Private unit status propagates immediately;
+the entry returns the original error once. No body contract, public error family,
+allocation or numerical algorithm changes. The original camera/light1MiB test then
+passes alone on166: one PASS, four filtered, build9.89s and test0.060s,1,058 stable
+inputs. A complete same-source five-case run remains required.
+
+Source166 strict consumer Clippy fails on three explicit drops of non-Drop domain/
+rejection metadata and one complex raw common-slot signature. Source167 uses ordinary
+scope bindings to release those guards and one private equivalent type alias; original
+owner transfer and cleanup ordering remain unchanged. No lint suppression is added.
+Strict, full runtime/docs and original integrated gates remain pending on167.
+
+
+Final28/source167 passes3,956 workspace tests (two slow, six existing skips), all five
+original Postprocess1MiB tests,218 doctests and strict workspace Clippy. It then fails
+the independent consumer:136 PASS,2 main-thread stack overflows,1 existing scale skip;
+consumer Clippy and both format gates do not start. Both CLI failures are retained,
+not waived by workspace stack passes. The completed failed receipt has1,058 stable
+inputs. Independent evidence review authenticates the failed run and retains the
+prepared commit-scope document freshness issue until final documents are rebound.
+
+Actual CDB6 locates a207,872-byte consumer comparison measure_inner frame beneath
+finite terminal extraction. The first local preparation-phase extraction (168) and
+larger planning/summary split (169) each pass9 comparison tests and fail the original
+missing-normal worker. They are recorded as insufficient experiments; only verified
+own edits are replaced with the exact original167 comparison bytes. CDB7 records the
+169 caller/helper split of112,384+70,992 bytes, not a native performance result.
+
+Source170 extracts exactly the four existing cold resource-policy failure constructors
+from prepare/space into one private function returning the identical public owning
+Result. Original Scene, cause and cleanup remain. Actual entry frames become89,360
+and89,200 bytes, but the original consumer still fails two tests. Its bounded source
+review has GO; source GO does not imply stack acceptance.
+
+Source171 keeps one original FiniteDetachGuard in the consuming entry and runs its
+unchanged projection, detach, discard/poison checks, shared recovery/restoration and
+original-common retirement through a shorter mutable preparation method. The method
+returns only the existing failure kind. The entry then consumes that same guard once
+into the original proof or owned failure; no numeric owner/counter is copied. The
+original consumer now passes9 comparison tests and fails shared glTF only. CDB8
+locates that remaining overflow during glTF provenance sorting in import, before
+Postprocess, under the comparison caller's still207,872-byte multi-stage frame.
+
+Source172 therefore reintroduces only the minimal private preparation-phase helper.
+Its targets, options, control, report destruction and targets destruction are identical;
+the prepare clock still encloses them, and pipeline object teardown and clock end are
+unchanged. Import no longer reserves the later public preparation Result temporaries
+in the same frame. The extra169 planning/summary helpers remain removed. All ten
+unchanged comparison tests pass on172 in2.574s; no larger stack or benchmark/schema
+change is used. Operation strict lint also passes in10.55s. Original Final29 is running
+on172; same-source workspace, doctest, consumer, strict and format qualification still
+must finish, followed by actual evidence review and refreshed scoped commit identity.
+
+
+Final29/source172 completes the original seven gates:3,956 workspace PASS (two slow,
+six existing manual skips),218 doctests PASS,138 independent consumer PASS (one
+existing scale skip), both strict Clippy and both format gates. All1,058 inputs and
+192 frozen files match before/after/current checks; five user notes match their current
+recorded baseline. Every original1MiB case and both real CLI regressions pass together.
+Keep Final28/source167's failed consumer result and all earlier experiments unchanged.
+The selected actual172 normal-debug frames are89,360 bytes for prepare::run,50,168
+for raw finish_assembly,33,232 for numerical detach and11,552 for its borrowed prepare;
+Core entry/private prepare are42,016/27,824. Exact artifact/fingerprint binding is in
+`owned-finite-terminal-primary-frames-4.json`. These local frames do not establish a
+simultaneous stack peak or ordinary native/heap improvement. The separately retained
+diagnostic2 used a stale feature fingerprint and remains explicitly unverified.
+
+Next qualify the new immutable candidate with the unchanged14-case/110-lane Windows
+and GNU protocol (three warmups and20 retained AB/BA pairs), same semantic observations,
+whole-child memory and separate heap attribution. Build only in this repository's
+existing target; measurement copies may live on the measured native filesystem.
+Refresh final documentation and the exact37-path commit scope after evidence review;
+never stage the five user notes. Local-main/native/release acceptance remains closed
+until its actual required evidence supports the disposition.

@@ -8,7 +8,14 @@ use crate::retained::{
     RetainedPublicationAssemblyLoan, RetainedPublicationBorrowFailure, RetainedTerminalRequest,
 };
 
-/// Original numerical owners returned by a normal finite terminal rejection.
+/// Original rejected authority before numerical extraction has taken place.
+pub(crate) enum FiniteRootTerminalRejection {
+    RejectedPreparation(DeferredAttachedTerminal),
+    RejectedStamp(AttachedTerminalStamp),
+    Preparation(RetainedPublicationPrepareError),
+}
+
+/// Before-extraction metadata or the actual extracted numerical owner, never both.
 #[expect(
     clippy::large_enum_variant,
     reason = "typed detach and commit failures retain their original owners inline without allocating during failure"
@@ -21,9 +28,7 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    RejectedPreparation(DeferredAttachedTerminal),
-    RejectedStamp(AttachedTerminalStamp),
-    Preparation(RetainedPublicationPrepareError),
+    Rejected(FiniteRootTerminalRejection),
     Detach {
         cause: FinalizationContainmentError,
         residue: FiniteTypedFreezeDetachError<O, P, PP, U, D>,
@@ -44,11 +49,18 @@ where
 {
     pub(crate) fn cause(&self) -> Option<&FinalizationContainmentError> {
         match self {
-            Self::RejectedPreparation(_) | Self::RejectedStamp(_) => None,
-            Self::Preparation(RetainedPublicationPrepareError::FinalizationContainment(cause))
+            Self::Rejected(FiniteRootTerminalRejection::RejectedPreparation(_))
+            | Self::Rejected(FiniteRootTerminalRejection::RejectedStamp(_)) => None,
+            Self::Rejected(FiniteRootTerminalRejection::Preparation(
+                RetainedPublicationPrepareError::FinalizationContainment(cause),
+            ))
             | Self::Detach { cause, .. }
             | Self::Commit { cause, .. } => Some(cause),
         }
+    }
+
+    fn preparation(cause: RetainedPublicationPrepareError) -> Self {
+        Self::Rejected(FiniteRootTerminalRejection::Preparation(cause))
     }
 }
 
@@ -148,7 +160,7 @@ where
         }
     }
 
-    fn ownership_failure(&mut self) -> FiniteRootTerminalFailure<O, P, PP, U, D> {
+    fn ownership_failure(&mut self) -> FiniteRootTerminalRejection {
         let reason = AccountPoisonReason::OwnershipGraphUnverified;
         let account = self
             .terminal
@@ -167,7 +179,7 @@ where
             .expect("an attached finite terminal retains its original account anchor");
         let poisoned = account.record_poison(reason);
         *self.contained = true;
-        FiniteRootTerminalFailure::Preparation(
+        FiniteRootTerminalRejection::Preparation(
             RetainedPublicationPrepareError::FinalizationContainment(
                 FinalizationContainmentError::new(poisoned, reason),
             ),
@@ -179,7 +191,9 @@ where
         prepared: DeferredAttachedTerminal,
     ) -> PreparedResult<O, P, PP, U, D, F, CB, EB> {
         let Some(retained) = self.retained.as_mut() else {
-            return Err(FiniteRootTerminalFailure::RejectedPreparation(prepared));
+            return Err(FiniteRootTerminalFailure::Rejected(
+                FiniteRootTerminalRejection::RejectedPreparation(prepared),
+            ));
         };
         let mut fields = FiniteTerminalRootFields::new(
             self.common,
@@ -190,7 +204,11 @@ where
         );
         let stamp = match fields.install_terminal_preparation(prepared) {
             Ok(stamp) => stamp,
-            Err(prepared) => return Err(FiniteRootTerminalFailure::RejectedPreparation(prepared)),
+            Err(prepared) => {
+                return Err(FiniteRootTerminalFailure::Rejected(
+                    FiniteRootTerminalRejection::RejectedPreparation(prepared),
+                ));
+            }
         };
         let commit = match fields.try_detach_terminal(stamp) {
             Ok(Ok(commit)) => commit,
@@ -200,7 +218,11 @@ where
                     residue: error.residue,
                 });
             }
-            Err(stamp) => return Err(FiniteRootTerminalFailure::RejectedStamp(stamp)),
+            Err(stamp) => {
+                return Err(FiniteRootTerminalFailure::Rejected(
+                    FiniteRootTerminalRejection::RejectedStamp(stamp),
+                ));
+            }
         };
         commit
             .try_into_prepared()
@@ -215,11 +237,13 @@ where
         final_progress: FinalProgress<PP, U>,
     ) -> PreparedResult<O, P, PP, U, D, F, CB, EB> {
         let Some(operation) = self.loan() else {
-            return Err(self.ownership_failure());
+            return Err(FiniteRootTerminalFailure::Rejected(
+                self.ownership_failure(),
+            ));
         };
         let prepared = operation
             .prepare_evidence_only_deferred(final_progress)
-            .map_err(FiniteRootTerminalFailure::Preparation)?;
+            .map_err(FiniteRootTerminalFailure::preparation)?;
         self.finish_deferred(prepared)
     }
 
@@ -228,11 +252,13 @@ where
         cause: PreparationFailureCode,
     ) -> PreparedResult<O, P, PP, U, D, F, CB, EB> {
         let Some(operation) = self.loan() else {
-            return Err(self.ownership_failure());
+            return Err(FiniteRootTerminalFailure::Rejected(
+                self.ownership_failure(),
+            ));
         };
         let prepared = operation
             .prepare_minimal_fallback_deferred(cause)
-            .map_err(FiniteRootTerminalFailure::Preparation)?;
+            .map_err(FiniteRootTerminalFailure::preparation)?;
         self.finish_deferred(prepared)
     }
 
@@ -240,23 +266,32 @@ where
         &mut self,
         request: RetainedTerminalRequest<CB, EB, PP, U>,
     ) -> PreparedWithControlResult<O, P, PP, U, D, F, CB, EB> {
+        let (prepared, control) = self
+            .prepare_assembly_terminal(request)
+            .map_err(FiniteRootTerminalFailure::Rejected)?;
+        Ok((self.finish_deferred(prepared)?, control))
+    }
+
+    fn prepare_assembly_terminal(
+        &mut self,
+        request: RetainedTerminalRequest<CB, EB, PP, U>,
+    ) -> Result<(DeferredAttachedTerminal, Option<ControlCause>), FiniteRootTerminalRejection> {
         let strict_success = matches!(&request, RetainedTerminalRequest::FrozenSuccess { .. });
         let Some(assembly) = self.assembly_loan() else {
             return Err(self.ownership_failure());
         };
         let classification = assembly
             .try_classify_terminal_preparation(request)
-            .map_err(FiniteRootTerminalFailure::Preparation)?;
+            .map_err(FiniteRootTerminalRejection::Preparation)?;
         let classification = if strict_success {
             classification
                 .require_success()
-                .map_err(FiniteRootTerminalFailure::Preparation)?
+                .map_err(FiniteRootTerminalRejection::Preparation)?
         } else {
             classification
         };
-        let (prepared, control) = classification
+        classification
             .finish_deferred()
-            .map_err(FiniteRootTerminalFailure::Preparation)?;
-        Ok((self.finish_deferred(prepared)?, control))
+            .map_err(FiniteRootTerminalRejection::Preparation)
     }
 }

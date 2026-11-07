@@ -1,30 +1,15 @@
 use std::fmt;
 
-use baozi_operation::StoreLedgerEvidence;
+use baozi_operation::{FiniteStoreFacts, PhysicalStorageAccount, StoreDimensionSnapshot};
 
 use super::runtime::{RuntimeDimension, dimension_semantic};
 
-#[derive(Debug, PartialEq, Eq)]
-struct Counters {
-    live: u64,
-    peak: u64,
-    reservations: u64,
-    attempted: u64,
-    consumed: u64,
-    staging: u64,
-    canonical: u64,
-    evidence: u64,
-    peak_evidence: u64,
-    published_evidence: u64,
-    terminal_records: u64,
-}
-
-/// Bounded, lifetime-owned resource evidence for an invocation.
+/// Bounded resource facts owned independently of the invocation and its Host.
 ///
-/// Equality compares the public counters. The private frozen ledger remains owned until drop.
+/// Equality compares the public counters. Tableless evidence keeps its actual account alive.
 pub struct PostProcessResourceEvidence {
-    counters: Counters,
-    _ledger: StoreLedgerEvidence,
+    facts: baozi_operation::FiniteStoreFacts,
+    _terminal_account: Option<baozi_operation::PhysicalStorageAccount>,
 }
 
 impl PostProcessResourceEvidence {
@@ -33,80 +18,98 @@ impl PostProcessResourceEvidence {
         super::runtime::WORK_ACTION_CONTRACT
     }
 
-    pub(crate) fn from_store(raw: StoreLedgerEvidence) -> Self {
-        let header = raw.header();
-        let dimension = |kind| {
-            raw.dimension_by_semantic(dimension_semantic(kind))
-                .expect("the frozen direct-operation dimension catalog is complete")
-        };
-        let ordinary = dimension(RuntimeDimension::Work);
-        let terminal = dimension(RuntimeDimension::FailureTerminalWork);
-        let counters = Counters {
-            live: header.current_live_bytes(),
-            peak: header.peak_live_bytes(),
-            reservations: header.active_reservations(),
-            attempted: ordinary.attempted() + terminal.attempted(),
-            consumed: ordinary.consumed() + terminal.consumed(),
-            staging: dimension(RuntimeDimension::ScratchBytes).peak_live_bytes(),
-            canonical: dimension(RuntimeDimension::CanonicalBytes).committed_canonical_output(),
-            evidence: header.current_administrative_bytes(),
-            peak_evidence: header.peak_administrative_bytes(),
-            published_evidence: dimension(RuntimeDimension::OutcomeEvidenceBytes)
-                .published_outcome_evidence(),
-            terminal_records: dimension(RuntimeDimension::TerminalEvidenceRecords)
-                .published_outcome_evidence(),
-        };
+    pub(crate) fn from_facts(facts: FiniteStoreFacts) -> Self {
         Self {
-            counters,
-            _ledger: raw,
+            facts,
+            _terminal_account: None,
         }
     }
 
+    pub(crate) fn from_evidence_only(
+        facts: FiniteStoreFacts,
+        account: PhysicalStorageAccount,
+    ) -> Self {
+        Self {
+            facts,
+            _terminal_account: Some(account),
+        }
+    }
+
+    fn dimension(&self, kind: RuntimeDimension) -> StoreDimensionSnapshot {
+        self.facts
+            .dimension_by_semantic(dimension_semantic(kind))
+            .expect("the frozen direct-operation dimension catalog is complete")
+    }
+
+    fn counter_values(&self) -> [u64; 11] {
+        [
+            self.current_live_bytes(),
+            self.peak_live_bytes(),
+            self.active_reservations(),
+            self.attempted_work_actions(),
+            self.consumed_work_actions(),
+            self.peak_staging_bytes(),
+            self.committed_canonical_bytes(),
+            self.current_administrative_bytes(),
+            self.peak_administrative_bytes(),
+            self.published_outcome_evidence_bytes(),
+            self.published_terminal_evidence_records(),
+        ]
+    }
+
     /// Returns operation-live bytes at the terminal boundary.
-    pub const fn current_live_bytes(&self) -> u64 {
-        self.counters.live
+    pub fn current_live_bytes(&self) -> u64 {
+        self.facts.header().current_live_bytes()
     }
 
     /// Returns the invocation's operation-live high-water mark.
-    pub const fn peak_live_bytes(&self) -> u64 {
-        self.counters.peak
+    pub fn peak_live_bytes(&self) -> u64 {
+        self.facts.header().peak_live_bytes()
     }
 
     /// Returns live linear reservations at the terminal boundary.
-    pub const fn active_reservations(&self) -> u64 {
-        self.counters.reservations
+    pub fn active_reservations(&self) -> u64 {
+        self.facts.header().active_reservations()
     }
 
     /// Returns representable attempted semantic actions, including denied admission and
     /// protected terminal work. Delegated core/share actions retain their defined units.
-    pub const fn attempted_work_actions(&self) -> u64 {
-        self.counters.attempted
+    pub fn attempted_work_actions(&self) -> u64 {
+        self.dimension(RuntimeDimension::Work).attempted()
+            + self
+                .dimension(RuntimeDimension::FailureTerminalWork)
+                .attempted()
     }
 
     /// Returns normally returned semantic actions, including semantic-error returns and
     /// protected terminal work. It does not count successful normal tuples or control credits.
-    pub const fn consumed_work_actions(&self) -> u64 {
-        self.counters.consumed
+    pub fn consumed_work_actions(&self) -> u64 {
+        self.dimension(RuntimeDimension::Work).consumed()
+            + self
+                .dimension(RuntimeDimension::FailureTerminalWork)
+                .consumed()
     }
 
     /// Returns the temporary staging capacity high-water mark.
-    pub const fn peak_staging_bytes(&self) -> u64 {
-        self.counters.staging
+    pub fn peak_staging_bytes(&self) -> u64 {
+        self.dimension(RuntimeDimension::ScratchBytes)
+            .peak_live_bytes()
     }
 
     /// Returns newly committed canonical capacity.
-    pub const fn committed_canonical_bytes(&self) -> u64 {
-        self.counters.canonical
+    pub fn committed_canonical_bytes(&self) -> u64 {
+        self.dimension(RuntimeDimension::CanonicalBytes)
+            .committed_canonical_output()
     }
 
     /// Returns retained ledger evidence capacity at the terminal boundary.
-    pub const fn current_administrative_bytes(&self) -> u64 {
-        self.counters.evidence
+    pub fn current_administrative_bytes(&self) -> u64 {
+        self.facts.header().current_administrative_bytes()
     }
 
     /// Returns the ledger evidence capacity high-water mark.
-    pub const fn peak_administrative_bytes(&self) -> u64 {
-        self.counters.peak_evidence
+    pub fn peak_administrative_bytes(&self) -> u64 {
+        self.facts.header().peak_administrative_bytes()
     }
 
     /// Returns newly published domain outcome-evidence capacity, including retained remaps.
@@ -114,13 +117,15 @@ impl PostProcessResourceEvidence {
     /// Publication transfers this capacity out of the operation's live reservations. The returned
     /// value is the terminal publication total; it is not a counter that changes as owners drop.
     /// Terminal ledger records and fallback envelopes are counted separately.
-    pub const fn published_outcome_evidence_bytes(&self) -> u64 {
-        self.counters.published_evidence
+    pub fn published_outcome_evidence_bytes(&self) -> u64 {
+        self.dimension(RuntimeDimension::OutcomeEvidenceBytes)
+            .published_outcome_evidence()
     }
 
     /// Returns the number of published terminal ledger records and fallback envelopes.
-    pub const fn published_terminal_evidence_records(&self) -> u64 {
-        self.counters.terminal_records
+    pub fn published_terminal_evidence_records(&self) -> u64 {
+        self.dimension(RuntimeDimension::TerminalEvidenceRecords)
+            .published_outcome_evidence()
     }
 }
 
@@ -129,14 +134,14 @@ impl fmt::Debug for PostProcessResourceEvidence {
         formatter
             .debug_struct("PostProcessResourceEvidence")
             .field("work_action_contract", &self.work_action_contract())
-            .field("counters", &self.counters)
+            .field("counters", &self.counter_values())
             .finish_non_exhaustive()
     }
 }
 
 impl PartialEq for PostProcessResourceEvidence {
     fn eq(&self, other: &Self) -> bool {
-        self.counters == other.counters
+        self.counter_values() == other.counter_values()
     }
 }
 

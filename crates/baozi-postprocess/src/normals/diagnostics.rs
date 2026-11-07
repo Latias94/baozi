@@ -95,8 +95,8 @@ fn sample<P: PositionSource>(label: &str, positions: P, indices: &[u32], groups:
     reason = "the diagnostic measures the real host with its inline accounting and control causes"
 )]
 fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
-    use baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication;
-    use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
+    use baozi_operation::__retained_store_integration::activation::FiniteCanonicalOperationPublication;
+    use baozi_operation::__retained_store_integration::authority::PreparedFiniteStoreEvidenceOnlyOutcome;
 
     use crate::operation::runtime;
 
@@ -109,15 +109,14 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
             &scene,
             crate::PostProcessControl::default(),
             |operation, keys| {
-                let initial = operation
-                    .producer_host()
-                    .dimension_state(keys.work)
-                    .expect("initial work state");
-                let elapsed = {
+                let (state, elapsed) = {
                     operation
                         .with_action_execution::<_, baozi_operation::StoreRuntimeError>(
                             keys.work,
                             |actions| {
+                                let initial = actions
+                                    .work_counters(keys.work)
+                                    .expect("initial work state");
                                 let start = Instant::now();
                                 for _ in 0..ACTIONS {
                                     actions.begin_action(1)?;
@@ -126,32 +125,33 @@ fn observed_unit_protocol_with_empty_actions_preserves_exact_work_evidence() {
                                 }
                                 let elapsed = start.elapsed().as_nanos();
                                 actions.checkpoint()?;
-                                Ok(elapsed)
+                                let state = actions
+                                    .work_counters(keys.work)
+                                    .expect("completed work state");
+                                assert_eq!(state.0, initial.0 + ACTIONS);
+                                assert_eq!(state.1, initial.1 + ACTIONS);
+                                assert_eq!(state.2, 0);
+                                Ok((state, elapsed))
                             },
                         )
                         .expect("every actual empty-action prefix resolves")
                 };
-                let state = operation
-                    .producer_host()
-                    .dimension_state(keys.work)
-                    .expect("completed work state");
-                assert_eq!(state.attempted(), initial.attempted() + ACTIONS);
-                assert_eq!(state.consumed(), initial.consumed() + ACTIONS);
                 (keys, state, elapsed)
             },
         );
-        let CanonicalOperationPublication::Unchanged(prepared) = publication else {
+        let FiniteCanonicalOperationPublication::EvidenceOnly(prepared) = publication else {
             panic!("every observed unit resolved before its unchanged publication");
         };
-        let PreparedStoreEvidenceOnlyOutcome::Success(prepared) = prepared else {
+        let PreparedFiniteStoreEvidenceOnlyOutcome::Success(prepared) = prepared else {
             panic!("the unchanged empty-action operation must publish success");
         };
-        let evidence = prepared.handoff().ledger_evidence;
-        assert_eq!(evidence.header().current_live_bytes(), 0);
-        assert_eq!(evidence.header().active_reservations(), 0);
-        let terminal = evidence.dimension(keys.work).expect("final ordinary work");
-        assert_eq!(terminal.attempted(), state.attempted());
-        assert_eq!(terminal.consumed(), state.consumed());
+        let handoff = prepared.handoff();
+        let facts = &handoff.facts;
+        assert_eq!(facts.header().current_live_bytes(), 0);
+        assert_eq!(facts.header().active_reservations(), 0);
+        let terminal = facts.dimension(keys.work).expect("final ordinary work");
+        assert_eq!(terminal.attempted(), state.0);
+        assert_eq!(terminal.consumed(), state.1);
         if iteration >= 3 {
             samples.push(elapsed);
         }

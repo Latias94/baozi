@@ -3,6 +3,13 @@
 //! Core admits the actual proven roots before reserving a generation and owns every terminal
 //! branch. Published evidence keeps the remap leaves alive independently of the new Scene.
 
+mod finite;
+pub use finite::{
+    FiniteSceneEditFreezePermit, FiniteSceneEditPublishedSuccess,
+    PreparedFiniteSceneEditPublication, PreparedFiniteSceneEditSuccess,
+    consume_finite_scene_edit_freeze_permit,
+};
+
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalCauseSlot, CanonicalFreezePermit, CanonicalJointSuccess, StoreActivationContainment,
     StoreCanonicalRejection,
@@ -706,7 +713,9 @@ mod tests {
         }
     }
 
-    fn finite_scene_edit_plans() -> (
+    pub(super) fn finite_scene_edit_plans(
+        reject_evidence: bool,
+    ) -> (
         FiniteStoreLedgerPlan,
         FiniteRetainedStoreStartPlan,
         [StoreDimensionKey; 6],
@@ -741,21 +750,27 @@ mod tests {
                 .unwrap()
         });
         let requirement =
-            RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_members(1).unwrap();
-        let failure = RetainedStoreFailureTerminalWorkPlan::new(
+            RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(4, 4096, 4096)
+                .unwrap();
+        let failure = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
             dimensions[5],
-            1,
-            1280 + requirement.attempted_work_limit(),
-            1280 + requirement.consumed_work_limit(),
+            4,
+            4096,
+            4096,
+            (5 << 20) + requirement.attempted_work_limit(),
+            (5 << 20) + requirement.consumed_work_limit(),
         )
         .unwrap();
         let mut policies = dimensions.map(|dimension| {
             (
                 dimension,
-                DimensionPolicy::reservable_bytes(256, 256, 256, 1 << 20)
-                    .with_published_outcome_evidence_limit(256),
+                DimensionPolicy::reservable_bytes(1 << 20, 1 << 20, 1 << 20, 8 << 20)
+                    .with_published_outcome_evidence_limit(1 << 20),
             )
         });
+        if reject_evidence {
+            policies[4].1 = policies[4].1.with_published_outcome_evidence_limit(1);
+        }
         policies[5].1 = requirement.dimension_policy();
         let ledger =
             FiniteStoreLedgerPlan::try_new(domain, 8 << 20, 8 << 20, policies, phases).unwrap();
@@ -793,7 +808,7 @@ mod tests {
                 })
                 .unwrap();
                 let scene = crate::ValidatedScene::from_node_scene(source.scene);
-                let (ledger, plan, dimensions, _) = finite_scene_edit_plans();
+                let (ledger, plan, dimensions, _) = finite_scene_edit_plans(false);
                 let mut host = FiniteCanonicalInvocationHost::<
                     crate::canonical_scene::store::construction::SceneConstructionOwner,
                     SceneConstructionPhase,
@@ -875,7 +890,7 @@ mod tests {
             })
             .unwrap();
             let scene = crate::ValidatedScene::from_node_scene(source.scene);
-            let (ledger, plan, dimensions, phases) = finite_scene_edit_plans();
+            let (ledger, plan, dimensions, phases) = finite_scene_edit_plans(false);
             let foreign_domain =
                 StoreKeyDomain::try_new(dimensions[2].semantic_id().catalog()).unwrap();
             let foreign_dimension = foreign_domain

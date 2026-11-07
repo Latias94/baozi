@@ -35,7 +35,8 @@ pub use error::{
     PostProcessRunFailure,
 };
 pub use operation::{
-    PostProcessCancellationToken, PostProcessControl, PostProcessResourceEvidence,
+    PostProcessCancellationToken, PostProcessControl, PostProcessInvocationFailure,
+    PostProcessResourceEvidence,
 };
 pub use remap::{
     PrimitiveCorner, PrimitiveFace, PrimitiveVertex, TriangulationRemap, TriangulationRemapError,

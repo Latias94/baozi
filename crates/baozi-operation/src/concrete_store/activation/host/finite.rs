@@ -17,9 +17,11 @@ use super::super::{
     CanonicalActivationSessionPolicy, CanonicalFailureRequirements, FiniteSessionOutcomeOwner,
 };
 use super::*;
+#[cfg(test)]
+use crate::concrete_store::finite::FiniteStoreFinalizeCause;
 use crate::concrete_store::finite::{
     FiniteBoundStoreOperation, FiniteStoreExitCause, FiniteStoreExitError,
-    FiniteStoreFinalizeCause, FiniteStoreInvocationRoot, bind_finite_store,
+    FiniteStoreInvocationRoot, bind_finite_store,
 };
 use crate::concrete_store::{
     CanonicalInheritanceSource, FiniteRetainedStoreOperation, FiniteRetainedStoreStartPlan,
@@ -1146,8 +1148,12 @@ where
                 Ok(facts)
             }
             Err(failure) => {
-                let cause = FiniteStoreExitCause::Finalize(FiniteStoreFinalizeCause::Unattached);
-                Err(self.host.take_error(cause).with_unattached(failure))
+                let store = self
+                    .host
+                    .store
+                    .take()
+                    .expect("failed unattached finite finish transfers its original root");
+                Err(store.into_unattached_error(failure))
             }
         }
     }

@@ -202,6 +202,158 @@ fn finite_store_root_start_body_terminal_ownership() {
 }
 
 #[test]
+fn finite_unattached_extraction_keeps_original_domain_in_the_physical_remainder() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let mut reservation = None;
+    let (mut error, dimensions) = {
+        let (ledger, start, dimensions, phases) = plans();
+        let mut host = Host::new();
+        let finish = host
+            .run_bound_body(
+                OperationControl::default(),
+                ledger,
+                &account,
+                start,
+                |mut parts, disposition| {
+                    reservation = Some(
+                        parts
+                            .startup
+                            .with_exclusive_execution(|context| {
+                                context
+                                    .ordinary_storage()
+                                    .reserve(phases[0], dimensions[0], 7)
+                                    .map_err(StoreInvocationError::from)
+                            })
+                            .unwrap(),
+                    );
+                    parts.startup.request_unchanged(disposition).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let actual = finish
+            .host
+            .store
+            .as_ref()
+            .unwrap()
+            .raw
+            .terminal_catalog()
+            .unwrap();
+        assert_eq!(actual.planning_state().current_live_bytes(), 7);
+        assert_eq!(actual.planning_state().active_reservations(), 1);
+        let error = finish
+            .finish_unattached(progress())
+            .err()
+            .expect("the original live reservation must return an extracted numerical failure");
+        assert!(host.store.is_none());
+        (error, dimensions)
+    };
+    assert!(matches!(
+        error.cause(),
+        FiniteStoreExitCause::Finalize(FiniteStoreFinalizeCause::Unattached)
+    ));
+    assert!(error.domain().unwrap().owns_dimension(dimensions[0]));
+    let FiniteStoreExitState::Unattached {
+        remainder,
+        failure: StoreUnattachedFailure::Owned(_),
+    } = &error.state
+    else {
+        panic!("only actual numerical extraction may select the physical remainder state");
+    };
+    assert!(remainder.raw.test_has_started());
+    assert!(remainder.raw.must_retain_domain());
+    assert!(remainder.startup.is_none());
+    assert!(
+        remainder
+            .domain
+            .as_ref()
+            .unwrap()
+            .owns_dimension(dimensions[0])
+    );
+    let physical = account.snapshot();
+    assert!(physical.poisoned());
+    assert_eq!(physical.live_retained_bytes(), 0);
+    assert_eq!(physical.live_retained_allocations(), 0);
+    error.record_payload_failure(991);
+    error.contain_payload_failure();
+    assert_eq!(account.snapshot(), physical);
+    drop(error);
+    assert_eq!(account.snapshot(), physical);
+    assert_eq!(reservation.as_ref().unwrap().raw.bytes(), 7);
+    drop(reservation);
+}
+
+#[test]
+fn finite_rejected_unattached_binding_keeps_the_complete_root_and_original_token() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let mut source = FiniteStoreInvocationRoot::<TestOwner, TestProgress, TestUnit>::new();
+    let mut source_entry = FiniteEntryAdmission::new(&account);
+    let (ledger, start, _, _) = plans();
+    let binding = bind_finite_store(
+        &mut source,
+        &mut source_entry,
+        &mut Some(OperationControl::default()),
+        ledger,
+        None,
+        start,
+        FreshStoreLineage { _private: () },
+    )
+    .unwrap()
+    .defer_unattached(None)
+    .unwrap();
+    let mut target = FiniteStoreInvocationRoot::<TestOwner, TestProgress, TestUnit>::new();
+    let mut target_entry = FiniteEntryAdmission::new(&account);
+    let (ledger, start, dimensions, _) = plans();
+    let _target_binding = bind_finite_store(
+        &mut target,
+        &mut target_entry,
+        &mut Some(OperationControl::default()),
+        ledger,
+        None,
+        start,
+        FreshStoreLineage { _private: () },
+    )
+    .unwrap()
+    .defer_unattached(None)
+    .unwrap();
+    let identity = target.raw.terminal_catalog().unwrap().identity();
+    let physical = account.snapshot();
+    let failure = target
+        .finish_unattached(binding, &mut target_entry, progress())
+        .err()
+        .expect("a foreign binding must reject before numerical extraction");
+    let mut error = target.into_unattached_error(failure);
+    assert!(error.domain().unwrap().owns_dimension(dimensions[0]));
+    let FiniteStoreExitState::Rooted {
+        root,
+        failure: Some(StoreRootedFailure::Unattached { .. }),
+    } = &mut error.state
+    else {
+        panic!("a rejected binding must keep its complete original target root");
+    };
+    let actual = root.as_ref().unwrap();
+    assert_eq!(actual.raw.terminal_catalog().unwrap().identity(), identity);
+    assert!(!actual.raw.must_retain_domain());
+    assert_eq!(account.snapshot(), physical);
+    drop(root.take());
+    assert!(error.has_residue());
+    let FiniteStoreExitState::Rooted { failure, .. } = &mut error.state else {
+        unreachable!();
+    };
+    let Some(StoreRootedFailure::Unattached { _binding: binding }) = failure.take() else {
+        panic!("the ownerless rejected token must remain recoverable");
+    };
+    assert!(!error.has_residue());
+    let facts = source
+        .finish_unattached(binding, &mut source_entry, progress())
+        .unwrap_or_else(|_| panic!("the original rejected binding must still finish its source"));
+    assert_eq!(facts.header().dimension_count(), 6);
+    assert_eq!(account.snapshot(), physical);
+}
+
+#[test]
 fn finite_body_error_moves_original_domain_and_nonzero_work_after_host_end() {
     let (error, dimensions) = {
         let factory = test_factory();
@@ -234,13 +386,14 @@ fn finite_body_error_moves_original_domain_and_nonzero_work_after_host_end() {
     };
     assert!(matches!(error.cause(), FiniteStoreExitCause::Body(_)));
     assert!(error.domain().unwrap().owns_dimension(dimensions[2]));
-    let actual = error
-        .residue
-        .as_ref()
-        .unwrap()
-        .raw
-        .terminal_catalog()
-        .unwrap();
+    let FiniteStoreExitState::Rooted {
+        root: Some(root),
+        failure: None,
+    } = &error.state
+    else {
+        panic!("the body error must retain its complete original root");
+    };
+    let actual = root.raw.terminal_catalog().unwrap();
     assert_eq!(
         actual
             .dimension_evidence(dimensions[2])
@@ -313,7 +466,13 @@ fn finite_returned_body_error_keeps_healthy_original_owner_and_cleans_foreign_ho
         assert!(original_error.has_residue());
         let original_cause = format!("{:?}", original_error.cause());
         let (original_identity, original_work, original_phases) = {
-            let root = original_error.residue.as_ref().unwrap();
+            let FiniteStoreExitState::Rooted {
+                root: Some(root),
+                failure: None,
+            } = &original_error.state
+            else {
+                panic!("the original body error must retain its complete root");
+            };
             assert!(root.raw.has_started());
             assert!(!root.raw.must_retain_domain());
             assert!(root.startup.is_none());
@@ -383,8 +542,6 @@ fn finite_returned_body_error_keeps_healthy_original_owner_and_cleans_foreign_ho
 
         assert_eq!(format!("{:?}", error.cause()), original_cause);
         assert!(error.has_residue());
-        assert!(error.unattached.is_none());
-        assert!(error.terminal.is_none());
         assert!(error.rejected_domain.is_none());
         let domain = error.domain().unwrap();
         for dimension in dimensions {
@@ -399,7 +556,13 @@ fn finite_returned_body_error_keeps_healthy_original_owner_and_cleans_foreign_ho
         for phase in host_phases {
             assert!(!domain.owns_phase(phase));
         }
-        let root = error.residue.as_ref().unwrap();
+        let FiniteStoreExitState::Rooted {
+            root: Some(root),
+            failure: None,
+        } = &error.state
+        else {
+            panic!("the returned body error must preserve its complete original root");
+        };
         assert!(root.raw.has_started());
         assert!(!root.raw.must_retain_domain());
         assert!(root.startup.is_none());
@@ -454,15 +617,14 @@ fn finite_start_error_retains_original_domain_without_fabricating_facts() {
     };
     assert!(matches!(error.cause(), FiniteStoreExitCause::Start(_)));
     assert!(error.domain().unwrap().owns_dimension(dimensions[0]));
-    assert!(
-        error
-            .residue
-            .as_ref()
-            .unwrap()
-            .raw
-            .terminal_catalog()
-            .is_none()
-    );
+    let FiniteStoreExitState::Rooted {
+        root: Some(root),
+        failure: None,
+    } = &error.state
+    else {
+        panic!("the rejected start must retain its complete original root");
+    };
+    assert!(root.raw.terminal_catalog().is_none());
 }
 
 #[test]
@@ -863,13 +1025,14 @@ fn finite_publication_open_error_owns_original_domain_and_nonzero_work_after_roo
     ));
     assert!(error.has_residue());
     assert!(error.domain().unwrap().owns_dimension(dimensions[2]));
-    let actual = error
-        .residue
-        .as_ref()
-        .unwrap()
-        .raw
-        .terminal_catalog()
-        .unwrap();
+    let FiniteStoreExitState::Rooted {
+        root: Some(root),
+        failure: None,
+    } = &error.state
+    else {
+        panic!("publication open rejection must preserve its complete original root");
+    };
+    let actual = root.raw.terminal_catalog().unwrap();
     let work = actual.dimension_evidence(dimensions[4]).unwrap();
     assert_eq!((work.attempted(), work.consumed()), (1, 1));
     drop(error);
@@ -949,6 +1112,26 @@ fn finite_failure_evidence_reborrow_preserves_containment_latch_and_original_err
     assert!(error.has_residue());
     assert!(error.domain().unwrap().owns_dimension(dimensions[0]));
     assert!(account.snapshot().poisoned());
+    let FiniteStoreExitState::Rooted {
+        root: Some(root),
+        failure:
+            Some(StoreRootedFailure::Terminal {
+                _rejection:
+                    FiniteRootTerminalRejection::Preparation(
+                        crate::retained::RetainedPublicationPrepareError::FinalizationContainment(
+                            cause,
+                        ),
+                    ),
+            }),
+    } = &error.state
+    else {
+        panic!("preparation containment must retain its complete root and original rejection");
+    };
+    assert!(root.raw.terminal_catalog().is_some());
+    assert_eq!(
+        cause.reason(),
+        account.snapshot().first_poison_evidence().unwrap().reason()
+    );
 }
 
 #[test]

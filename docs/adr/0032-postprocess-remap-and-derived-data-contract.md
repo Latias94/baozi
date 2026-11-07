@@ -140,16 +140,17 @@ persisted as Scene identity, converted into `SceneGenerationId`, used for Scene 
 validation proof. The report brand plus typed path prevents staged per-step remap endpoints from being
 confused while avoiding public identities for states that never had a queryable Scene.
 
-After final central validation, preparation reserves exactly one `ReservedSceneGeneration` for the
-final Scene. Exhaustion or collision rejection leaves the generation domain unchanged and precedes
-attribution freeze; the postprocess operation preserves the input and classifies ordinary rich
-failure with no candidate output generation. Only failure to prepare that rich evidence requires its
-minimal fallback. Only after that reservation succeeds may preparation freeze attribution. Exact
-`PreparedSuccess` owns the single reservation and staged report. Cancellation, caught unwind, or prepared
-drop after that point burns one invisible never-reused gap and publishes no generation, proof, or
-remap. A freeze, ledger, or product-graph preparation failure after successful reservation has the
-same burn-without-publication result. Final handoff converts the one reservation into the only public
-output generation, constructs the only new `ValidatedScene` proof, and atomically exposes the report.
+After final central validation, preparation freezes the exact destination pair and final control
+into Ready. Admission of the original rejection slot and both proven roots precedes generation
+execution. Core then reserves exactly one `ReservedSceneGeneration` for the final Scene, before
+opening the invariant joint-commit binder. Exhaustion or collision rejection leaves the generation
+domain unchanged and returns the existing Frozen minimal fallback without another control poll or
+evidence staging. This failure publishes no candidate output generation and preserves the input.
+Exact prepared success owns the single reservation and staged report. A caught unwind, failed joint
+preparation, or prepared drop after reservation burns one invisible never-reused gap and publishes
+no generation, proof, or remap. Cancellation requested after Ready does not reopen final control or
+invalidate an otherwise exact frozen success. Final handoff converts the one reservation into the
+only public output generation, constructs the new `ValidatedScene`, and atomically exposes the report.
 No API exposes a private candidate Scene or a partial generation identity.
 
 ### First F Increment: Direct Single-Primitive Triangulation

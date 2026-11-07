@@ -187,14 +187,34 @@ where
         batches: TypedTerminalBatches<'_, O, P, D>,
     ) -> FiniteDetachResult<O, P, PP, U, D> {
         let mut guard = FiniteDetachGuard::new(self);
-        let common = guard
+        match guard.prepare(last_completed_phase, batches) {
+            Ok(()) => Ok(guard.into_proof()),
+            Err(kind) => Err(guard.into_error(kind)),
+        }
+    }
+}
+
+impl<O, P, PP, U, D> FiniteDetachGuard<O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn prepare(
+        &mut self,
+        last_completed_phase: Option<P>,
+        batches: TypedTerminalBatches<'_, O, P, D>,
+    ) -> Result<(), TypedFreezeDetachErrorKind> {
+        let common = self
             .invocation
             .as_mut()
             .expect("the original finite invocation stays guarded");
         let known = common.known_administrative_bytes();
         let raw = common.terminal_ledger_mut();
         let identity = raw.identity;
-        guard.projection = Some(raw.take_typed_terminal_projection(
+        self.projection = Some(raw.take_typed_terminal_projection(
             last_completed_phase,
             batches.canonical,
             batches.evidence,
@@ -202,30 +222,29 @@ where
         ));
         let unexpected_discard =
             batches.discard_canonical.is_some() || batches.discard_evidence.is_some();
-        guard
-            .batches
+        self.batches
             .detach_in_place(batches, raw.storage.shared(), identity);
         if unexpected_discard {
-            return Err(guard.into_error(TypedFreezeDetachErrorKind::UnexpectedDiscardOwner));
+            return Err(TypedFreezeDetachErrorKind::UnexpectedDiscardOwner);
         }
         if raw
             .storage
             .shared()
             .is_some_and(|shared| shared.is_poisoned())
         {
-            return Err(guard.into_error(TypedFreezeDetachErrorKind::PoisonedLedger));
+            return Err(TypedFreezeDetachErrorKind::PoisonedLedger);
         }
         match std::mem::replace(&mut raw.storage, FiniteStorage::Inline(None)) {
             FiniteStorage::Inline(state) => {
-                guard.inline = state;
+                self.inline = state;
                 assert!(
-                    guard.inline.is_some(),
+                    self.inline.is_some(),
                     "the actual inline state stays installed"
                 );
             }
             FiniteStorage::Shared(shared) => {
-                guard.recovered = Some(SharedStorageRecovery::new(shared));
-                let recovery = guard
+                self.recovered = Some(SharedStorageRecovery::new(shared));
+                let recovery = self
                     .recovered
                     .as_mut()
                     .expect("the original shared shell stays guarded");
@@ -237,20 +256,20 @@ where
                                 .take_shared()
                                 .expect("refused recovery retains the original shared shell"),
                         );
-                        return Err(guard.into_error(TypedFreezeDetachErrorKind::SharedLedgerOwner));
+                        return Err(TypedFreezeDetachErrorKind::SharedLedgerOwner);
                     }
                     Err(SharedStorageRecoveryError::Poisoned) => {
                         // Its actual recovered promoted state cannot be installed as fixed inline
                         // rows. The owned error keeps that same state beside the original owner.
-                        return Err(guard.into_error(TypedFreezeDetachErrorKind::PoisonedLedger));
+                        return Err(TypedFreezeDetachErrorKind::PoisonedLedger);
                     }
                 }
             }
         }
         // Fixed source catalogs and progress own no heap backing. Control owners were closed
         // before Ready; only the original live storage and detached batches remain.
-        drop(guard.invocation.take());
-        Ok(guard.into_proof())
+        drop(self.invocation.take());
+        Ok(())
     }
 }
 

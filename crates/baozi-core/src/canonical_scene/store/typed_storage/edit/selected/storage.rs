@@ -1,10 +1,8 @@
 //! Unique metered storage for one selection's immutable mapping rows.
 
 use super::{EditResult, LocalMapping, TypedStorageBuildControl, TypedStorageBuildError};
-use baozi_operation::__retained_store_integration::activation::CanonicalBodyOperation;
-use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, RetainedStoreReservation,
-};
+use baozi_operation::__retained_store_integration::activation::StoreActionExecution;
+use baozi_operation::__retained_store_integration::authority::RetainedStoreReservation;
 use baozi_operation::{
     CapacityPlan, OperationOwner, ProgressPhase, ProgressUnit, StoreDimensionKey, StorePhaseKey,
     StoreRuntimeError,
@@ -66,8 +64,10 @@ impl<O: OperationOwner> SceneGeometryPlanStorage<O> {
         clippy::result_large_err,
         reason = "rejection retains the existing inline operation failure"
     )]
+    /// Uses the ordinary action region's entry, reservation and successful-exit checkpoints.
+    /// Cancellation can reject even an empty mapping before allocation or a competing plan error.
     pub fn try_new<PP: ProgressPhase, U: ProgressUnit>(
-        operation: &mut CanonicalBodyOperation<'_, O, PP, U, CanonicalInheritanceSource>,
+        operation: &mut StoreActionExecution<'_, O, PP, U>,
         phase: StorePhaseKey,
         scratch_dimension: StoreDimensionKey,
         count: usize,
@@ -77,12 +77,8 @@ impl<O: OperationOwner> SceneGeometryPlanStorage<O> {
         let bytes = plan
             .envelope_delta_bytes()
             .map_err(|cause| StoreRuntimeError::Plan(cause.into()))?;
-        let mut reservation = operation.reserve_retained_storage(
-            phase,
-            scratch_dimension,
-            bytes,
-            u64::from(bytes != 0),
-        )?;
+        let mut reservation =
+            operation.reserve_retained(phase, scratch_dimension, bytes, u64::from(bytes != 0))?;
         let mut mappings = Vec::new();
         if mappings
             .try_reserve_exact(plan.allocator_additional())
@@ -98,10 +94,7 @@ impl<O: OperationOwner> SceneGeometryPlanStorage<O> {
                 return Err(StoreRuntimeError::Plan(cause.into()));
             }
         };
-        if let Err(cause) = operation
-            .control_checkpoint()
-            .resize(&mut reservation, actual)
-        {
+        if let Err(cause) = operation.resize(&mut reservation, actual) {
             reservation.release_storage(mappings);
             return Err(cause);
         }

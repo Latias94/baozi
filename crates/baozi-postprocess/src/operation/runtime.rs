@@ -7,20 +7,21 @@ use baozi_core::__scene_integration::integration::{
     SceneEditOutput, SceneEditRejection, SceneEditValidationProof,
 };
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationSessionPolicy, CanonicalBodyOperation, CanonicalBoundInvocationFinish,
-    CanonicalDispositionSlot, CanonicalInvocationFinish, CanonicalInvocationHost,
-    CanonicalMaterializationRole, CanonicalValidationRole, RetainedStoreWriterRole,
-    StoreActionExecution,
+    CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
+    FiniteCanonicalBodyOperation, FiniteCanonicalBoundInvocationFinish,
+    FiniteCanonicalDispositionSlot, FiniteCanonicalInvocationCompletion,
+    FiniteCanonicalInvocationHost, RetainedStoreWriterRole, StoreActionExecution,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, RetainedStoreReservation, RetainedStoreSharePlan,
-    RetainedStoreStartPlan, RetainedStoreWriterPlan,
+    CanonicalInheritanceSource, FiniteRetainedStoreStartPlan, FiniteStoreExitError,
+    FiniteStoreLedgerPlan, RetainedStoreReservation, RetainedStoreSharePlan,
+    RetainedStoreWriterPlan,
 };
 use baozi_operation::{
-    CapacityPlan, DimensionPolicy, FinalProgress, LedgerLimits, RecordBlock,
-    RetainedStoreBatchLimits, RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerPlan,
-    StorePhaseKey, StorePhaseSemanticId, StoreRuntimeError, StoreSemanticCatalogId,
+    CapacityPlan, DimensionPolicy, FinalProgress, RecordBlock, RetainedStoreBatchLimits,
+    RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey, StoreDimensionSemanticId,
+    StoreFallbackEnvelope, StoreKeyDomain, StorePhaseKey, StorePhaseSemanticId, StoreRuntimeError,
+    StoreSemanticCatalogId,
 };
 
 use super::{PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit};
@@ -43,7 +44,7 @@ pub(crate) enum RuntimeDimension {
     TerminalEvidenceRecords = 6,
 }
 
-pub(crate) type EditHost = CanonicalInvocationHost<
+pub(crate) type EditHost = FiniteCanonicalInvocationHost<
     PostProcessOwner,
     PostProcessProgressPhase,
     PostProcessProgressUnit,
@@ -58,7 +59,7 @@ pub(crate) type EditHost = CanonicalInvocationHost<
     SceneEditEvidenceTag,
 >;
 
-pub(crate) type EditDisposition<'inv> = CanonicalDispositionSlot<
+pub(crate) type EditDisposition<'inv> = FiniteCanonicalDispositionSlot<
     'inv,
     RecordBlock,
     SceneCanonicalRootTag,
@@ -66,7 +67,7 @@ pub(crate) type EditDisposition<'inv> = CanonicalDispositionSlot<
     SceneEditEvidenceTag,
 >;
 
-pub(crate) type EditFinish<'inv> = CanonicalInvocationFinish<
+pub(crate) type EditCompletion<'inv> = FiniteCanonicalInvocationCompletion<
     'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
@@ -82,7 +83,7 @@ pub(crate) type EditFinish<'inv> = CanonicalInvocationFinish<
     SceneEditEvidenceTag,
 >;
 
-pub(crate) type EditBoundFinish<'inv, 'account> = CanonicalBoundInvocationFinish<
+pub(crate) type EditBoundFinish<'inv, 'account> = FiniteCanonicalBoundInvocationFinish<
     'inv,
     'account,
     PostProcessOwner,
@@ -99,7 +100,7 @@ pub(crate) type EditBoundFinish<'inv, 'account> = CanonicalBoundInvocationFinish
     SceneEditEvidenceTag,
 >;
 
-pub(crate) type EditOperation<'inv> = CanonicalBodyOperation<
+pub(crate) type EditOperation<'inv> = FiniteCanonicalBodyOperation<
     'inv,
     PostProcessOwner,
     PostProcessProgressPhase,
@@ -107,40 +108,45 @@ pub(crate) type EditOperation<'inv> = CanonicalBodyOperation<
     CanonicalInheritanceSource,
 >;
 
+pub(crate) type EditInvocationError =
+    FiniteStoreExitError<PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit>;
+
 #[cfg(test)]
+#[expect(
+    clippy::result_large_err,
+    reason = "the real finite body test uses the original inline owning error contract without allocating on failure"
+)]
 pub(crate) fn with_test_operation<T>(
     scene: &baozi_core::ValidatedScene,
     control: crate::PostProcessControl,
     mut body: impl for<'inv> FnMut(&mut EditOperation<'inv>, RuntimeKeys) -> T,
 ) -> (
-    baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication,
+    baozi_operation::__retained_store_integration::activation::FiniteCanonicalOperationPublication,
     T,
 ) {
-    use baozi_operation::__retained_store_integration::activation::CanonicalInvocationOutcome;
-
+    use baozi_operation::__retained_store_integration::activation::FiniteCanonicalInvocationOutcome;
     let (writer, _, _) = SceneEditBootstrap::try_new().unwrap().into_parts();
     let (keys, ledger, plan) =
         plan_selected_runtime(writer, crate::PostProcessBudgets::default()).unwrap();
-    let mut inputs = Some((control, ledger, plan));
     let mut result = None;
-    let result_slot = &mut result;
     let mut host = EditHost::new();
-    let finish = host
-        .run_body(move |parts, disposition| {
-            let (control, ledger, plan) = inputs.take().expect("one test operation body");
-            let mut operation =
-                baozi_core::__scene_integration::integration::try_start_scene_edit_operation::<
-                    PostProcessOwner,
-                    _,
-                    _,
-                >(parts.startup, scene, control.into_runtime(), ledger, plan)
-                .unwrap();
-            *result_slot = Some(body(&mut operation, keys));
+    let finish = baozi_core::__scene_integration::integration::run_finite_scene_edit_body(
+        &mut host,
+        scene,
+        control.into_runtime(),
+        ledger,
+        plan,
+        |parts, disposition| {
+            let mut operation = parts.startup.attach().unwrap();
+            result = Some(body(&mut operation, keys));
             operation.request_unchanged(disposition).unwrap();
-        })
-        .unwrap();
-    let CanonicalInvocationOutcome::Operation(operation) = finish.resume().outcome else {
-        panic!("the bounded execution fixture must restore its actual operation");
+            Ok(())
+        },
+    )
+    .unwrap();
+    let FiniteCanonicalInvocationOutcome::Operation(operation) = finish.resume().unwrap().outcome
+    else {
+        panic!("the bounded execution fixture must restore its actual finite operation");
     };
     (
         operation.finish(final_progress()).unwrap(),
@@ -174,7 +180,11 @@ impl RuntimeKeys {
 
 pub(crate) fn plan_runtime(
     writer_limits: RetainedStoreBatchLimits,
-) -> Option<(RuntimeKeys, StoreLedgerPlan, RetainedStoreStartPlan)> {
+) -> Option<(
+    RuntimeKeys,
+    FiniteStoreLedgerPlan,
+    FiniteRetainedStoreStartPlan,
+)> {
     // The whole-Scene transaction uses the common four-slot publication table, while its
     // two-member evidence has a fixed field count and needs no input-derived allowance.
     plan_runtime_with_members(
@@ -187,7 +197,11 @@ pub(crate) fn plan_runtime(
 pub(crate) fn plan_selected_runtime(
     writer_limits: RetainedStoreBatchLimits,
     budgets: crate::PostProcessBudgets,
-) -> Option<(RuntimeKeys, StoreLedgerPlan, RetainedStoreStartPlan)> {
+) -> Option<(
+    RuntimeKeys,
+    FiniteStoreLedgerPlan,
+    FiniteRetainedStoreStartPlan,
+)> {
     plan_runtime_with_members(
         writer_limits,
         budgets,
@@ -199,7 +213,11 @@ fn plan_runtime_with_members(
     writer_limits: RetainedStoreBatchLimits,
     budgets: crate::PostProcessBudgets,
     max_evidence_members: usize,
-) -> Option<(RuntimeKeys, StoreLedgerPlan, RetainedStoreStartPlan)> {
+) -> Option<(
+    RuntimeKeys,
+    FiniteStoreLedgerPlan,
+    FiniteRetainedStoreStartPlan,
+)> {
     let domain = StoreKeyDomain::try_new(CATALOG).ok()?;
     let phase =
         |local| domain.try_admit_phase(StorePhaseSemanticId::new(CATALOG, NonZeroU64::new(local)?));
@@ -224,50 +242,43 @@ fn plan_runtime_with_members(
         budgets.max_work_actions,
     )
     .ok()?;
-    let limits = LedgerLimits::new(
-        budgets.storage_bytes,
-        [
-            (
-                keys.work,
-                DimensionPolicy::counter(
-                    terminal_work.ordinary_attempted_work_limit(),
-                    terminal_work.ordinary_consumed_work_limit(),
-                    0,
-                ),
+    let policies = [
+        (
+            keys.work,
+            DimensionPolicy::counter(
+                terminal_work.ordinary_attempted_work_limit(),
+                terminal_work.ordinary_consumed_work_limit(),
+                0,
             ),
-            (
-                keys.scratch,
-                DimensionPolicy::reservable_bytes(0, 0, 0, budgets.storage_bytes),
-            ),
-            (
-                keys.canonical,
-                DimensionPolicy::reservable_bytes(
-                    0,
-                    0,
-                    budgets.storage_bytes,
-                    budgets.storage_bytes,
-                ),
-            ),
-            (
-                keys.evidence,
-                DimensionPolicy::reservable_bytes(0, 0, 0, budgets.storage_bytes)
-                    .with_published_outcome_evidence_limit(budgets.storage_bytes),
-            ),
-            (terminal, terminal_work.requirement().dimension_policy()),
-            (
-                terminal_records,
-                DimensionPolicy::counter(0, 0, 0).with_published_outcome_evidence_limit(2),
-            ),
-        ],
-    )
-    .ok()?;
-    let ledger = StoreLedgerPlan::try_new(
+        ),
+        (
+            keys.scratch,
+            DimensionPolicy::reservable_bytes(0, 0, 0, budgets.storage_bytes),
+        ),
+        (
+            keys.canonical,
+            DimensionPolicy::reservable_bytes(0, 0, budgets.storage_bytes, budgets.storage_bytes),
+        ),
+        (
+            keys.evidence,
+            DimensionPolicy::reservable_bytes(0, 0, 0, budgets.storage_bytes)
+                .with_published_outcome_evidence_limit(budgets.storage_bytes),
+        ),
+        (terminal, terminal_work.requirement().dimension_policy()),
+        (
+            terminal_records,
+            DimensionPolicy::counter(0, 0, 0).with_published_outcome_evidence_limit(2),
+        ),
+    ];
+    let ledger = FiniteStoreLedgerPlan::try_new(
         domain,
-        limits,
-        &[keys.planning, keys.validation, keys.publication],
+        budgets.storage_bytes,
+        budgets.storage_bytes,
+        policies,
+        [keys.planning, keys.validation, keys.publication],
     )
     .ok()?;
-    let start = RetainedStoreStartPlan::new(
+    let start = FiniteRetainedStoreStartPlan::new(
         RetainedStoreWriterPlan::new(
             keys.publication,
             keys.evidence,
@@ -276,8 +287,6 @@ fn plan_runtime_with_members(
         ),
         RetainedStoreSharePlan::new(keys.work, keys.work),
         StoreFallbackEnvelope::new(REJECTION_CODE),
-        terminal_records,
-        1,
         terminal_records,
         1,
         terminal_work,

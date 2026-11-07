@@ -1,6 +1,16 @@
 # Owned Finite Invocation: Numerical and Control Foundation
 
-Latest integrated checkpoint: **full27/source149 passes all seven gates**:
+Latest integrated checkpoint: **full29/source172 passes all seven gates**:
+**3,956 workspace tests** (two slow, six existing manual skips), **218 doctests**,
+**138 asset-consumer tests** (one existing scale skip), both strict Clippy checks and
+both format checks. The five original Postprocess1MiB tests and both prior real CLI
+stack failures pass on the same source. All **1,058** before/after/current inputs,
+**192** frozen files and five current recorded user-note identities match. The actual
+receipt/source/log association is `owned-finite-source172-integrated-association-1.json`.
+This qualifies the actual Core/Postprocess finite consumer cut; ordinary Windows/GNU
+comparison, whole-child/heap evidence, local-main integration and release remain HOLD.
+
+Historical integrated checkpoint: **full27/source149 passes all seven gates**:
 **3,944 workspace tests** (two slow, six existing manual skips), **209 doctests**,
 **138 asset-consumer tests** (one existing manual scale skip), both strict
 all-target/all-feature Clippy checks and both format checks. All **1,056** before/
@@ -1636,3 +1646,93 @@ dynamic ledger retained only for getters. Full integrated correctness, strict Cl
 formatting, consumer, layout and allocation qualification then precede the unchanged
 Windows/GNU ordinary and separate heap campaigns. No timing or memory improvement is
 inferred from the structural changes or these test counts.
+
+## Core and Postprocess consumer qualification boundary
+
+The later source149 foundation is committed as `00b54f4` with all seven integrated
+gates passing: 3,944 workspace tests, 209 doctests, 138 consumer tests, both strict
+Clippy and both format checks. Its two slow tests, six workspace manual skips and
+one consumer scale skip remain recorded. That checkpoint predates the actual
+Core/Postprocess consumer migration and does not qualify its later source.
+
+The consumer cut uses the real finite Host, fixed six policies and three phases,
+one fallback part and the original Core Ready/admission/generation joint. Resources
+own one FiniteStoreFacts plus any original independent terminal account; the eleven
+stored scalar mirrors and getter-only dynamic ledger are removed. Original owning
+invocation errors remain available after Host/source teardown and are classified
+at the public run boundary. Semantic algorithm causes retain their smaller vocabulary.
+
+Source152 compiles but fails135 runtime tests. Source153 passes996 with24 failures.
+Source156 passes1010 with11 failures; all seven new Core publication tests, the actual
+original-owner classification witness and nonzero mapping-exit witness pass. The
+Core fixture's startup writer `(4,2)` disagreed with its Bootstrap `(5,4)` limits;
+using the same actual Bootstrap limits corrects the test without weakening production
+admission. Source157 and158 each pass1016 tests and fail the same five original
+explicit1MiB tests, with six existing skips. Doctests do not start in these failed
+runs. All failed attempts, including new-test compilation defects, remain preserved.
+
+Separate CDB diagnostics identify source156 overflow during geometry materialization,
+source157 during Ready publication and source158 in finite joint/detach. They bind
+the normal debug image and raw logs, including unavailable debugger context. Printed
+SP distances and selected local prologues establish attribution rather than a full
+peak or native performance. Source158's private finalization frames are smaller,
+but none of the five original stack tests passes. No stack setting, error boxing,
+failure-path allocation or compiler-profile exception is used.
+
+Source159 passes all-target/all-feature strict Core/Postprocess Clippy in13.82s.
+Operation159 separately fails before execution on three stale startup fixture field
+references. Source160 updates those assertions to inspect the actual Retained owner;
+all1,388 Operation tests pass in46.025s, zero skips. The source160 qualification
+association is `owned-finite-consumer-source160-qualified-boundaries-1.json`.
+These scoped passes do not replace a fresh integrated run or qualify source161.
+
+The independently reviewed next representation keeps before-extraction failures with
+the complete original root and rejected metadata. Actual extracted numerical failures
+retain the original physical/domain/startup remainder beside their proof or residue,
+without reserving another empty common location. Cleanup must retain the actual domain
+on an internal unwind and retire physical ownership before numerical cover. Its new
+implementation, ordinary-stack acceptance, integrated gates and original native/heap
+comparisons remain open. Local main, release and native acceptance remain HOLD.
+
+The actual source164 error is10,464 bytes after the extracted-owner cut, with a
+135,664-byte prepare entry frame. Its1,391 Operation tests pass, but consumer runtime
+still has five stack failures. Exact attribution identifies a105,632-byte raw
+finish_assembly frame: several small preparation errors are separately widened into
+the owning numerical error before extraction. Source165 keeps that preparation phase
+small and widens once at the existing consuming boundary. Its full affected run
+passes1,020 tests and fails only camera/light1MiB, with six existing skips and no
+doctest execution. The other four original1MiB cases pass on165.
+
+The remaining camera/light trace still carries a190,816-byte printed SP distance in
+Core generation/commit consumption. Source166 implements the independently reviewed
+single entry-owned original-error slot and synchronous private call steps. Its five
+original Operation calls, pre-generation admissions, reserve callback, exhaustion
+fallback, panic contract, joint seal and public Result stay intact. The unchanged
+camera/light1MiB test then passes alone on166; four tests are filtered. Independent
+source reviews close GO for both the raw small-error boundary and exact Core change,
+with runtime and machine-level-copy limits retained.
+
+Source167 only uses equivalent scope bindings and a private type alias to resolve
+four strict Clippy diagnostics. Both scoped all-target/all-feature strict gates pass:
+Core/Postprocess in20.73s and Operation in11.37s. The two-file style delta also has
+bounded independent GO. The original seven-gate integrated Final28 run is live on167;
+no same-source full runtime, doctest, consumer, final format, or native result is
+inferred from the earlier scoped results. Source and all unchanged1MiB cases must
+qualify together before this consumer cut is considered ready for a scoped commit.
+
+
+Final29/source172 closes the integrated correctness/lint/format cut:3,956 workspace
+PASS (two slow, six manual skips),218 doctest PASS,138 independent consumer PASS (one
+scale skip), both strict checks and both format checks. The actual run retains1,058
+stable inputs and192 matching frozen files, with five unchanged current user notes.
+All five original Postprocess1MiB tests and both failed CLI comparison workflows pass
+on172. Final28/source167 remains FAILED after136/138 consumer passes; no historical
+run is relabeled. The original seven-gate counts and raw logs are bound by
+`owned-finite-source172-integrated-association-1.json`; independent final receipt
+review is separate from each bounded source GO.
+
+The remaining work is measured convergence. The helper boundary in the comparison
+consumer preserves original stage clocks, object lifetimes, semantic work and schema;
+its protocol review does not imply timing parity. New Windows/GNU110-lane ordinary,
+whole-child memory and separate heap campaigns remain required. Builds stay in this
+repository's existing target. Main, native and release acceptance remain HOLD.

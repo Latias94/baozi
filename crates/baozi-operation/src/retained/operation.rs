@@ -562,11 +562,8 @@ where
                 .map(RetainedOperationFieldsLoan::from),
             &mut self.assembly,
             TerminalPhysicalSlot::Dynamic(&mut self.terminal),
-            InvocationLoan {
-                common: InvocationSlot::Dynamic(&mut self.common),
-                contained: &mut self.contained,
-                not_send_or_sync: PhantomData,
-            },
+            Some(InvocationSlot::Dynamic(&mut self.common)),
+            &mut self.contained,
         );
         if retain {
             std::mem::forget(self.assembly.take());
@@ -1307,7 +1304,8 @@ fn cleanup_retained_root_graph<O, P, PP, U, D, F, CB, EB>(
     mut retained: Option<RetainedOperationFieldsLoan<'_, O, P, D, F, CB, EB>>,
     assembly: &mut super::PublicationAssemblySlot<O, P, D, CB, EB>,
     mut terminal: TerminalPhysicalSlot<'_, P, D, F, CB, EB>,
-    mut common: InvocationLoan<'_, O, P, PP, U, D>,
+    mut common: Option<InvocationSlot<'_, O, P, PP, U, D>>,
+    contained: &mut bool,
 ) -> bool
 where
     O: OperationOwner,
@@ -1319,11 +1317,15 @@ where
     CB: Send + Sync + 'static,
     EB: Send + Sync + 'static,
 {
-    let quarantine = *common.contained || common.terminal_is_outstanding();
+    let installed = common.as_ref().is_some_and(InvocationSlot::is_installed);
+    let quarantine = *contained
+        || common
+            .as_ref()
+            .is_some_and(|common| common.is_installed() && common.lifecycle().terminal_outstanding);
     if quarantine {
-        *common.contained = true;
-        if common.common.is_installed() {
-            let view = common.view();
+        *contained = true;
+        if let Some(common) = common.as_mut().filter(|common| common.is_installed()) {
+            let view = common.reborrow().into_view();
             StoreExecutionState::stop(
                 &view.lifecycle.execution_state,
                 StoreExecutionState::KnownError,
@@ -1336,9 +1338,10 @@ where
     }
     if let Some(fields) = assembly.as_mut()
         && !fields.is_empty()
-        && (quarantine || (retained.is_some() && common.common.is_installed()))
+        && (quarantine || (retained.is_some() && installed))
     {
-        let operation = if common.common.is_installed() {
+        let operation = if let Some(common) = common.as_mut().filter(|common| common.is_installed())
+        {
             retained.as_mut().map(|retained| RetainedOperationLoan {
                 retained: retained.reborrow(),
                 assembly: None,
@@ -1346,7 +1349,11 @@ where
                     TerminalPhysicalSlot::Dynamic(slot) => TerminalPhysicalSlot::Dynamic(slot),
                     TerminalPhysicalSlot::Finite(slot) => TerminalPhysicalSlot::Finite(slot),
                 },
-                common: common.reborrow(),
+                common: InvocationLoan {
+                    common: common.reborrow(),
+                    contained,
+                    not_send_or_sync: PhantomData,
+                },
             })
         } else {
             None

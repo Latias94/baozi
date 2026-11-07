@@ -54,6 +54,12 @@ pub enum PostProcessControlCause {
     reason = "the failure owns terminal evidence inline without allocating on the rejection path"
 )]
 pub enum PostProcessRunError {
+    /// The invocation could not complete and retains its original owned failure state.
+    #[error("post-process invocation failed: {failure}")]
+    Invocation {
+        #[source]
+        failure: crate::PostProcessInvocationFailure,
+    },
     /// The bounded resource policy could not be prepared before operation startup.
     #[error("post-process resource policy could not be initialized")]
     ResourcePolicyInitialization,
@@ -128,6 +134,20 @@ impl PostProcessRunFailure {
     pub fn into_parts(self) -> (ValidatedScene, PostProcessRunError) {
         (self.input, self.error)
     }
+}
+
+// Construct the public owning error only on the initialization rejection path.
+#[expect(
+    clippy::result_large_err,
+    reason = "initialization failure returns the original Scene without allocating an error owner"
+)]
+pub(crate) fn reject_resource_policy(
+    input: ValidatedScene,
+) -> Result<crate::PostProcessRunOutcome, PostProcessRunFailure> {
+    Err(PostProcessRunFailure::new(
+        input,
+        PostProcessRunError::ResourcePolicyInitialization,
+    ))
 }
 
 impl fmt::Display for PostProcessRunFailure {

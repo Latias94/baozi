@@ -1,4 +1,194 @@
 //! Hidden cross-crate integration boundary for canonical Scene transactions.
+//!
+//! A restored finite Core Candidate issues one freeze decision and hands its Ready permit
+//! to the concrete consumer. Both non-Ready branches preserve the existing minimal policy:
+//!
+//! ```
+//! use baozi_core::{ValidatedScene, __scene_integration::integration::{
+//!     FiniteSceneEditFreezePermit, FiniteSceneEditPublishedSuccess, PreparedFiniteSceneEditPublication,
+//!     PreparedFiniteSceneEditSuccess, SceneCanonicalRootTag, SceneEditEvidence,
+//!     SceneEditEvidenceTag, SceneEditGenerationRejection, SceneEditOutput,
+//!     SceneEditValidationProof, consume_finite_scene_edit_freeze_permit,
+//! }};
+//! use baozi_operation::__retained_store_integration::{
+//!     activation::{CanonicalFinal, CanonicalGenerationSlots, FiniteCentralCandidate,
+//!         FiniteCanonicalFreezePermitIssue},
+//!     authority::FiniteStoreExitError,
+//! };
+//! use baozi_operation::{FinalProgress, FiniteStoreFacts, OperationOwner, ProgressPhase,
+//!     ProgressUnit, RecordBlock};
+//!
+//! type Candidate<'inv, O, P, U> = CanonicalFinal<FiniteCentralCandidate<
+//!     'inv, O, P, U, SceneEditOutput, SceneEditValidationProof,
+//!     RecordBlock, SceneCanonicalRootTag, RecordBlock, SceneEditEvidenceTag,
+//! >>;
+//!
+//! fn prepare<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+//!     candidate: Candidate<'inv, O, P, U>,
+//!     generation: CanonicalGenerationSlots<'inv, SceneEditGenerationRejection>,
+//!     progress: FinalProgress<P, U>,
+//! ) -> Result<PreparedFiniteSceneEditPublication, FiniteStoreExitError<O, P, U>> {
+//!     match candidate.try_issue_freeze_permit(generation.interruption, progress)? {
+//!         FiniteCanonicalFreezePermitIssue::Ready(permit) => {
+//!             let permit: FiniteSceneEditFreezePermit<'inv, O, P, U> = permit;
+//!             consume_finite_scene_edit_freeze_permit(permit, generation.rejection)
+//!         }
+//!         FiniteCanonicalFreezePermitIssue::Interrupted(failure) => {
+//!             let (store, _) = failure.prepare_minimal_fallback()?.into_parts();
+//!             Ok(PreparedFiniteSceneEditPublication::MinimalFallback { store })
+//!         }
+//!         FiniteCanonicalFreezePermitIssue::DestinationRejected(failure) => {
+//!             let (store, _) = failure.prepare_minimal_fallback()?.into_parts();
+//!             Ok(PreparedFiniteSceneEditPublication::MinimalFallback { store })
+//!         }
+//!     }
+//! }
+//!
+//! fn handoff(prepared: PreparedFiniteSceneEditSuccess)
+//!     -> (ValidatedScene, SceneEditEvidence, FiniteStoreFacts)
+//! {
+//!     let published: FiniteSceneEditPublishedSuccess = prepared.handoff();
+//!     published.into_parts()
+//! }
+//! ```
+//!
+//! The body Candidate retains its original unprepared capability:
+//!
+//! ```compile_fail,E0599
+//! use baozi_core::__scene_integration::integration::{SceneCanonicalRootTag,
+//!     SceneEditEvidenceTag, SceneEditOutput, SceneEditValidationProof};
+//! use baozi_operation::__retained_store_integration::activation::{CanonicalCauseSlot,
+//!     CanonicalFreezeInterruption, FiniteCentralCandidate};
+//! use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock};
+//! fn freeze_early<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+//!     candidate: FiniteCentralCandidate<'inv, O, P, U, SceneEditOutput,
+//!         SceneEditValidationProof, RecordBlock, SceneCanonicalRootTag,
+//!         RecordBlock, SceneEditEvidenceTag>,
+//!     slot: CanonicalCauseSlot<'inv, CanonicalFreezeInterruption>,
+//!     progress: FinalProgress<P, U>,
+//! ) {
+//!     let _ = candidate.try_issue_freeze_permit(slot, progress);
+//! }
+//! ```
+//!
+//! The dynamic permit cannot substitute for the finite permit:
+//!
+//! ```compile_fail,E0308
+//! use baozi_core::__scene_integration::integration::{SceneEditFreezePermit,
+//!     SceneEditGenerationRejection, consume_finite_scene_edit_freeze_permit};
+//! use baozi_operation::__retained_store_integration::activation::{CanonicalCauseSlot,
+//!     StoreCanonicalRejection};
+//! use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+//! fn substitute<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+//!     permit: SceneEditFreezePermit<'inv, O, P, U>,
+//!     slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<SceneEditGenerationRejection>>,
+//! ) {
+//!     let _ = consume_finite_scene_edit_freeze_permit(permit, slot);
+//! }
+//! ```
+//!
+//! Each nested finite/dynamic joint must consume its own invariant seal:
+//!
+//! ```compile_fail
+//! use baozi_core::__scene_integration::integration::{FiniteSceneEditFreezePermit,
+//!     SceneEditFreezePermit};
+//! use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+//! fn mix<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+//!     finite: FiniteSceneEditFreezePermit<'inv, O, P, U>,
+//!     dynamic: SceneEditFreezePermit<'inv, O, P, U>,
+//! ) {
+//!     finite.bind_joint_commit(|finite_joint, finite_seal| {
+//!         dynamic.bind_joint_commit(|dynamic_joint, dynamic_seal| {
+//!             let _ = finite_joint.prepare(dynamic_seal);
+//!             let _ = dynamic_joint.prepare(finite_seal);
+//!         })
+//!     })
+//! }
+//! ```
+//!
+//! Prepared finite success keeps the matching token and physical store private:
+//!
+//! ```compile_fail,E0616
+//! use baozi_core::__scene_integration::integration::PreparedFiniteSceneEditSuccess;
+//! fn extract_token(prepared: PreparedFiniteSceneEditSuccess) { let _ = prepared.token; }
+//! fn extract_store(prepared: PreparedFiniteSceneEditSuccess) { let _ = prepared.store; }
+//! ```
+//!
+//! Its handoff consumes the sole prepared owner:
+//!
+//! ```compile_fail,E0382
+//! use baozi_core::__scene_integration::integration::PreparedFiniteSceneEditSuccess;
+//! fn handoff_twice(prepared: PreparedFiniteSceneEditSuccess) {
+//!     let _ = prepared.handoff();
+//!     let _ = prepared.handoff();
+//! }
+//! ```
+//!
+//! A finite Ready permit cannot outlive its original Host loan:
+//!
+//! ```compile_fail
+//! use baozi_core::__scene_integration::integration::FiniteSceneEditFreezePermit;
+//! use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+//! fn escape<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+//!     permit: FiniteSceneEditFreezePermit<'inv, O, P, U>,
+//! ) -> FiniteSceneEditFreezePermit<'static, O, P, U> {
+//!     permit
+//! }
+//! ```
+//!
+//! The bound finite entry preserves both its original Host and source loans:
+//!
+//! ```
+//! use baozi_core::{ValidatedScene,
+//!     __scene_integration::integration::run_finite_scene_edit_body};
+//! use baozi_operation::__retained_store_integration::{
+//!     activation::{FiniteCanonicalBoundInvocationFinish, FiniteCanonicalInvocationHost},
+//!     authority::{FiniteRetainedStoreStartPlan, FiniteStoreExitError, FiniteStoreLedgerPlan},
+//! };
+//! use baozi_operation::{OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
+//! type Finish<'host, 'source, O, P, U> = FiniteCanonicalBoundInvocationFinish<
+//!     'host, 'source, O, P, U, (), (), (), (), (), (), (), (), (),
+//! >;
+//! fn bind<'host, 'source, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+//!     host: &'host mut FiniteCanonicalInvocationHost<O, P, U, (), ()>,
+//!     scene: &'source ValidatedScene,
+//!     control: OperationControl<P, U>,
+//!     ledger: FiniteStoreLedgerPlan,
+//!     plan: FiniteRetainedStoreStartPlan,
+//! ) -> Result<Finish<'host, 'source, O, P, U>, FiniteStoreExitError<O, P, U>> {
+//!     run_finite_scene_edit_body(host, scene, control, ledger, plan, |parts, disposition| {
+//!         parts.startup.request_unchanged(disposition).unwrap();
+//!         Ok(())
+//!     })
+//! }
+//! ```
+//!
+//! That same entry cannot turn the source borrow into a static finish:
+//!
+//! ```compile_fail
+//! use baozi_core::{ValidatedScene,
+//!     __scene_integration::integration::run_finite_scene_edit_body};
+//! use baozi_operation::__retained_store_integration::{
+//!     activation::{FiniteCanonicalBoundInvocationFinish, FiniteCanonicalInvocationHost},
+//!     authority::{FiniteRetainedStoreStartPlan, FiniteStoreExitError, FiniteStoreLedgerPlan},
+//! };
+//! use baozi_operation::{OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
+//! type Finish<'host, 'source, O, P, U> = FiniteCanonicalBoundInvocationFinish<
+//!     'host, 'source, O, P, U, (), (), (), (), (), (), (), (), (),
+//! >;
+//! fn escape<'host, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+//!     host: &'host mut FiniteCanonicalInvocationHost<O, P, U, (), ()>,
+//!     scene: &ValidatedScene,
+//!     control: OperationControl<P, U>,
+//!     ledger: FiniteStoreLedgerPlan,
+//!     plan: FiniteRetainedStoreStartPlan,
+//! ) -> Result<Finish<'host, 'static, O, P, U>, FiniteStoreExitError<O, P, U>> {
+//!     run_finite_scene_edit_body(host, scene, control, ledger, plan, |parts, disposition| {
+//!         parts.startup.request_unchanged(disposition).unwrap();
+//!         Ok(())
+//!     })
+//! }
+//! ```
 
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalCauseSlot, StoreCanonicalRejection,
@@ -10,14 +200,17 @@ use baozi_operation::{
 
 pub use super::super::construction::node_scene::edit::SceneEditCompileError;
 pub use super::super::construction::node_scene::edit::transaction::{
+    FiniteSceneEditFreezePermit, FiniteSceneEditPublishedSuccess,
+    PreparedFiniteSceneEditPublication, PreparedFiniteSceneEditSuccess,
     ResolvedSceneSpaceConversion, SceneEditAdmission, SceneEditBootstrap, SceneEditBootstrapError,
     SceneEditEvidence, SceneEditEvidenceTag, SceneEditFailureEvidence, SceneEditFreezePermit,
     SceneEditGenerationRejection, SceneEditOutput, SceneEditPlan, SceneEditPostflight,
     SceneEditPublication, SceneEditPublicationError, SceneEditPublishedSuccess, SceneEditRejection,
     SceneEditTarget, SceneEditTransaction, SceneEditValidationProof, SceneGeometryCornerOriginsTag,
     SceneGeometryFaceOffsetsTag, SceneSpaceConversionEvidence, SceneSpaceConversionIssue,
-    consume_scene_edit_freeze_permit, resolve_scene_space_conversion, run_finite_scene_edit_body,
-    run_scene_edit_body, try_start_scene_edit_operation,
+    consume_finite_scene_edit_freeze_permit, consume_scene_edit_freeze_permit,
+    resolve_scene_space_conversion, run_finite_scene_edit_body, run_scene_edit_body,
+    try_start_scene_edit_operation,
 };
 pub use super::super::construction::node_scene::edit::transaction::{
     SceneGeometryPlanScratch, SceneGeometryPlanStorage, SceneGeometryReplacement,
@@ -172,5 +365,14 @@ mod tests {
         let _: fn(&SceneActivationRejection) -> u32 = SceneActivationRejection::stable_code;
         let _: fn(&SceneGenerationRejection) -> u32 = SceneGenerationRejection::stable_code;
         let _: fn(PreparedSceneSuccess) -> ScenePublishedSuccess = PreparedSceneSuccess::handoff;
+        let _: fn(PreparedFiniteSceneEditSuccess) -> FiniteSceneEditPublishedSuccess =
+            PreparedFiniteSceneEditSuccess::handoff;
+        let _: fn(
+            FiniteSceneEditPublishedSuccess,
+        ) -> (
+            ValidatedScene,
+            SceneEditEvidence,
+            baozi_operation::FiniteStoreFacts,
+        ) = FiniteSceneEditPublishedSuccess::into_parts;
     }
 }

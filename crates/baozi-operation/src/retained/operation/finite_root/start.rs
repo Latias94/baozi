@@ -358,7 +358,7 @@ where
             );
         }
         Ok(FiniteDeferredUnattachedBinding {
-            identity: self.root.invocation_identity(),
+            identity: self.root.invocation_identity().addr(),
         })
     }
 
@@ -422,7 +422,7 @@ where
                 };
                 guard.reject(code);
                 drop(guard);
-                root.contained |= error.startup.is_some() || error.retained.is_some();
+                root.contained |= error.has_residue();
                 return Err(error);
             }
         };
@@ -528,15 +528,19 @@ where
         .try_build(builder.take())
         .map_err(|failure| FiniteAttachmentFailure {
             cause: RetainedOperationStartError::Writer(failure.cause),
-            startup: None,
-            retained: failure.residue,
+            residue: failure
+                .residue
+                .map_or(FiniteAttachmentResidue::None, |owner| {
+                    FiniteAttachmentResidue::Retained { _owner: owner }
+                }),
         })?;
     let baseline = baseline
         .try_attach_owned(common.coordinator.retained_ledger().as_read())
         .map_err(|(cause, baseline)| FiniteAttachmentFailure {
             cause: RetainedOperationStartError::Writer(cause),
-            startup: None,
-            retained: Some(FiniteStartupRetainedResidue::from_baseline(baseline)),
+            residue: FiniteAttachmentResidue::Retained {
+                _owner: FiniteStartupRetainedResidue::from_baseline(baseline),
+            },
         })?;
     Ok(FiniteRetainedOperationFields {
         baseline,
@@ -573,8 +577,9 @@ where
         };
         Self {
             cause: RetainedOperationStartError::Writer(cause),
-            startup: containment,
-            retained: None,
+            residue: containment.map_or(FiniteAttachmentResidue::None, |owner| {
+                FiniteAttachmentResidue::CrossPlane { _owner: owner }
+            }),
         }
     }
 }

@@ -450,7 +450,7 @@ fn early_start_and_attachment_rejection_dispose_uninvoked_builder_under_original
             failure.cause,
             RetainedOperationStartError::InvalidTerminalLimits
         ));
-        assert!(failure.startup.is_none() && failure.retained.is_none());
+        assert!(!failure.has_residue());
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert_eq!(entry.pending.is_some(), !rejected_at_bind);
@@ -517,7 +517,10 @@ fn foreign_deferred_preparation_returns_original_authority_without_mutating_targ
         .finish_deferred(prepared)
         .err()
         .expect("foreign Ready authority must be returned before effects");
-    let FiniteRootTerminalFailure::RejectedPreparation(prepared) = failure else {
+    let FiniteRootTerminalFailure::Rejected(FiniteRootTerminalRejection::RejectedPreparation(
+        prepared,
+    )) = failure
+    else {
         panic!("a foreign preparation must retain its original ownerless authority");
     };
     assert_eq!(second.invocation_identity(), identity);
@@ -649,7 +652,10 @@ fn unattached_finish_consumes_the_original_outer_admission_without_startup_share
         .unwrap_or_else(|_| panic!("finite production unattached close failed"));
     assert!(entry.pending.is_none());
     assert!(root.common.is_none());
-    drop(root);
+    let remainder = root.into_extracted_remainder();
+    assert!(remainder.test_has_started());
+    assert!(!remainder.must_retain_domain());
+    drop(remainder);
     assert_eq!(terminal.snapshot.dimensions().len(), 6);
     assert_eq!(terminal.snapshot.phases().len(), 3);
     assert_eq!(terminal.snapshot.current_live_bytes(), 0);
@@ -677,12 +683,12 @@ fn builder_panic_returns_original_startup_owners_after_the_root_and_entry_end() 
             Err(error) => error,
         };
         assert!(entry.pending.is_none());
-        assert!(error.startup.is_none());
+        let FiniteAttachmentResidue::Retained { _owner: retained } = &error.residue else {
+            panic!("the builder failure must retain its actual construction owners");
+        };
         assert!(
-            error
-                .retained
-                .as_ref()
-                .and_then(|owner| owner.account())
+            retained
+                .account()
                 .is_some_and(|owner| owner.is_same_account(&account))
         );
         let state = root.fields().into_owned();
@@ -692,14 +698,10 @@ fn builder_panic_returns_original_startup_owners_after_the_root_and_entry_end() 
     };
     assert_eq!(account.share_call_count(), 3);
     assert_eq!(account.snapshot().live_retained_allocations(), 1);
-    assert!(
-        error
-            .0
-            .retained
-            .as_ref()
-            .and_then(|owner| owner.account())
-            .is_some()
-    );
+    let FiniteAttachmentResidue::Retained { _owner: retained } = &error.0.residue else {
+        panic!("the original construction owners must outlive the root and entry");
+    };
+    assert!(retained.account().is_some());
     drop(error);
     assert_eq!(account.snapshot().live_retained_allocations(), 1);
     assert_eq!(
@@ -709,4 +711,30 @@ fn builder_panic_returns_original_startup_owners_after_the_root_and_entry_end() 
             .map(|evidence| evidence.reason()),
         Some(AccountPoisonReason::RetainedBuilderPanicked)
     );
+}
+
+#[test]
+fn extracted_remainder_rejects_live_common_before_transferring_physical_owners() {
+    let account = account();
+    let mut entry = FiniteEntryAdmission::new(&account);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut root = Root::new();
+    let operation = root
+        .try_start(
+            OperationControl::default(),
+            limits(),
+            [1, 2, 3],
+            &mut entry,
+            plan(),
+            || Ok(Payload(Arc::clone(&drops))),
+        )
+        .unwrap_or_else(|cause| panic!("finite attach failed: {cause:?}"));
+    let _forgotten = std::mem::ManuallyDrop::new(operation);
+    assert!(root.common.is_some());
+    assert_eq!(account.snapshot().live_retained_allocations(), 1);
+    assert!(catch_unwind(AssertUnwindSafe(|| root.into_extracted_remainder())).is_err());
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
 }

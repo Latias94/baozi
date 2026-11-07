@@ -13,7 +13,9 @@ use crate::retained::startup::{
 
 mod start;
 mod terminal;
-pub(crate) use terminal::FiniteRootTerminalFailure;
+pub(crate) use terminal::{FiniteRootTerminalFailure, FiniteRootTerminalRejection};
+mod remainder;
+pub(crate) use remainder::FiniteInvocationRemainder;
 #[cfg(test)]
 mod tests;
 
@@ -85,7 +87,8 @@ impl<'account> FiniteEntryAdmission<'account> {
 
 /// This token owns no admission, control owner, numerical state or account share.
 pub(crate) struct FiniteDeferredUnattachedBinding {
-    identity: *const (),
+    // An opaque address comparison only; this token never dereferences or reconstructs a pointer.
+    identity: usize,
 }
 
 #[expect(
@@ -204,28 +207,16 @@ where
     }
 
     pub(crate) fn cleanup_owned_state(&mut self) {
-        if let Some(physical) = self.terminal.take() {
-            self.contained |= !physical.graph.is_empty();
-            drop(physical);
-        }
-        let retain = cleanup_retained_root_graph(
-            self.retained
-                .as_mut()
-                .map(RetainedOperationFieldsLoan::from),
+        let retain = remainder::cleanup_finite_physical_state(
+            &mut self.terminal,
             &mut self.assembly,
-            TerminalPhysicalSlot::Finite(&mut self.terminal),
-            InvocationLoan {
-                common: InvocationSlot::Finite(&mut self.common),
-                contained: &mut self.contained,
-                not_send_or_sync: PhantomData,
-            },
+            &mut self.retained,
+            Some(&mut self.common),
+            &mut self.contained,
         );
         if retain {
-            std::mem::forget(self.assembly.take());
-            std::mem::forget(self.retained.take());
             std::mem::forget(self.common.take());
         } else {
-            drop(self.retained.take());
             let unresolved = InvocationLoan {
                 common: InvocationSlot::Finite(&mut self.common),
                 contained: &mut self.contained,
@@ -245,8 +236,8 @@ where
         entry: &mut FiniteEntryAdmission<'_>,
         final_progress: FinalProgress<PP, U>,
     ) -> UnattachedResult<O, P, PP, U, D> {
-        if binding.identity != self.invocation_identity()
-            || entry.identity != Some(binding.identity)
+        if binding.identity != self.invocation_identity().addr()
+            || entry.identity.map(<*const ()>::addr) != Some(binding.identity)
             || self.retained.is_some()
             || self.assembly.is_some()
             || self.terminal.is_some()
@@ -616,7 +607,7 @@ where
     local: PhantomData<Rc<()>>,
 }
 
-/// Both uncertainty paths keep their actual independent physical owners beside the cause.
+/// Startup rejection keeps the actual owner from the stage that failed.
 pub(crate) struct FiniteAttachmentFailure<O, P, D, F>
 where
     O: OperationOwner,
@@ -624,8 +615,26 @@ where
     D: Copy + Ord,
 {
     pub(crate) cause: RetainedOperationStartError<D>,
-    pub(crate) startup: Option<FiniteStartupCrossPlaneContainment<O, P, D>>,
-    pub(crate) retained: Option<FiniteStartupRetainedResidue<O, P, D, F>>,
+    residue: FiniteAttachmentResidue<O, P, D, F>,
+}
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "successive startup stages return their original physical owner without allocating on rejection"
+)]
+enum FiniteAttachmentResidue<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    None,
+    CrossPlane {
+        _owner: FiniteStartupCrossPlaneContainment<O, P, D>,
+    },
+    Retained {
+        _owner: FiniteStartupRetainedResidue<O, P, D, F>,
+    },
 }
 
 impl<O, P, D, F> fmt::Debug for FiniteAttachmentFailure<O, P, D, F>
@@ -638,8 +647,14 @@ where
         formatter
             .debug_struct("FiniteAttachmentFailure")
             .field("cause", &self.cause)
-            .field("retains_cross_plane_owners", &self.startup.is_some())
-            .field("retains_construction_owners", &self.retained.is_some())
+            .field(
+                "retains_cross_plane_owners",
+                &matches!(&self.residue, FiniteAttachmentResidue::CrossPlane { .. }),
+            )
+            .field(
+                "retains_construction_owners",
+                &matches!(&self.residue, FiniteAttachmentResidue::Retained { .. }),
+            )
             .finish()
     }
 }
@@ -653,8 +668,11 @@ where
     fn clean(cause: RetainedOperationStartError<D>) -> Self {
         Self {
             cause,
-            startup: None,
-            retained: None,
+            residue: FiniteAttachmentResidue::None,
         }
+    }
+
+    pub(crate) fn has_residue(&self) -> bool {
+        !matches!(&self.residue, FiniteAttachmentResidue::None)
     }
 }

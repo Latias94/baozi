@@ -368,8 +368,6 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFiel
                 ))
             },
         ));
-        let mut error = self.into_error(cause);
-        error.terminal = Some(failure);
-        error
+        self.into_owned().into_terminal_error(cause, failure)
     }
 }
