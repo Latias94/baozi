@@ -926,3 +926,25 @@ negative case only for a genuinely new boundary, not for incidental private layo
   joint GNU quiet-start scopes stay distinct. Fixed startup and
   nonempty selection scratch remain. Native qualification is incomplete; no finite-root
   implementation, main runtime merge or release follows.
+- The [finite consumer Windows checkpoint](../reviews/2026-11-08-finite-consumer-windows.md)
+  measures the qualified Core/Postprocess integration `b76fbc0` against fresh
+  `00b54f4` controls and rebuilt pinned Assimp 6.0.5. Final29/source172 passes
+  all seven integrated gates: 3,956 workspace tests, 218 doctests and 138
+  consumer tests, both strict gates and both formats, with 1,058 stable inputs
+  and unchanged current user notes. Both Windows functional matrices pass
+  110 lanes. N0, N1 and C1 complete every original lane with three warmups and
+  twenty retained pairs and no worker failure; C0 remains not started after
+  its prospective quiet-start deadline. Both candidates retain nine of 28
+  pipeline medians above 3x Assimp, 59/110 endpoint medians above 3x and 33
+  endpoint medians at least 10x in both repeats. Neither whole-child Windows
+  memory metric has a lane median above 3x. Independent raw evidence review
+  verifies all 15,180 worker objects, every summary/ratio and the complete
+  110-lane export, including regressions and missing cells. All 321 ordinary
+  named-tool samples are clear; 14/14 functional snapshots are busy, and neither
+  scope establishes isolation. One trailing control does not qualify source
+  speed or replace missing original B0 raw evidence. Pinned-source inspection
+  confirms glTF/STL whole-input buffering and that all generated OBJ cases fit
+  Assimp's initial cache block; no streaming performance cause is inferred.
+  GNU builds and measurements remain pending in the current repository/target,
+  followed by separate calibrated heap attribution. Native convergence,
+  local-main runtime integration and release remain HOLD.
