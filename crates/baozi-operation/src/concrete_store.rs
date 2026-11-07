@@ -4526,50 +4526,6 @@ where
         )
     }
 
-    pub(super) fn validate_rich_failure_controlled<EvidenceKind, EvidenceTag>(
-        self,
-        evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-        validate: impl for<'session, 'storage, 'control> FnOnce(
-            StoreEvidenceValidationSession<'session, 'storage>,
-            OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
-            crate::retained::RetainedFailureWorkControl<
-                'control,
-                O,
-                StorePhaseKey,
-                PP,
-                U,
-                StoreDimensionKey,
-            >,
-        ) -> bool,
-    ) -> StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
-    where
-        EvidenceTag: Copy + Send + Sync + 'static,
-    {
-        let Self {
-            raw,
-            state,
-            forced_cause,
-            evidence_root: _,
-            domain,
-        } = self;
-        if state.fallback_cause.is_some() {
-            return StoreFailureValidation::FallbackOnly(StoreFallbackOnly {
-                state: StoreFallbackState::FailureAssembly(raw),
-                domain,
-            });
-        }
-        map_failure_validation(
-            raw.validate_rich_failure_controlled(evidence_root.raw, |raw, _, control| {
-                let session = StoreEvidenceValidationSession { raw };
-                validate(session, evidence_root, control)
-            }),
-            evidence_root,
-            domain,
-            state,
-            forced_cause,
-        )
-    }
-
     /// Discards failure details and prepares only minimal fallback.
     pub fn prepare_minimal_fallback(self) -> Result<PreparedStoreFallback, StorePrepareError> {
         self.prepare_minimal_fallback_with(0)
@@ -4635,6 +4591,40 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let validation = match validation {
+        RetainedFailureValidation::Rejected(raw) => {
+            RetainedFailureValidation::Rejected(match forced_cause {
+                Some(cause) => raw.with_fallback_cause(cause),
+                None => raw,
+            })
+        }
+        validation => validation,
+    };
+    map_resolved_failure_validation(validation, evidence_root, domain, state, forced_cause)
+}
+
+fn map_resolved_failure_validation<'inv, O, PP, U, EvidenceKind, EvidenceTag>(
+    validation: RetainedFailureValidation<
+        'inv,
+        O,
+        StorePhaseKey,
+        PP,
+        U,
+        StoreDimensionKey,
+        StoreFallbackEnvelope,
+        StoredBlock,
+        StoredBlock,
+    >,
+    evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
+    domain: StoreDomainLoan<'inv>,
+    state: StorePublicationState,
+    forced_cause: Option<PreparationFailureCode>,
+) -> StoreFailureValidation<'inv, O, PP, U, EvidenceKind, EvidenceTag>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     match validation {
         RetainedFailureValidation::Valid(raw) => {
             StoreFailureValidation::Valid(ValidatedStoreFailure {
@@ -4646,10 +4636,7 @@ where
         }
         RetainedFailureValidation::Rejected(raw) => {
             StoreFailureValidation::Rejected(StoreFailureAssembly {
-                raw: match forced_cause {
-                    Some(cause) => raw.with_fallback_cause(cause),
-                    None => raw,
-                },
+                raw,
                 state,
                 forced_cause,
                 evidence_root,
@@ -4686,19 +4673,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn outcome_evidence_commitment_len(&self) -> usize {
-        self.raw.outcome_evidence_commitment_len()
-    }
-
-    pub(super) fn try_stage_exact_outcome_evidence(
-        &mut self,
-        dimension: StoreDimensionKey,
-    ) -> Result<(), StoreRuntimeError> {
-        self.raw
-            .try_stage_exact_outcome_evidence(dimension)
-            .map_err(|cause| map_publication_error(&cause))
-    }
-
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()
     }
@@ -4823,13 +4797,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn activation_containment_required(&self) -> bool {
-        match &self.state {
-            StoreFallbackState::Validated(raw) => raw.activation_containment_required(),
-            StoreFallbackState::Assembly { .. } | StoreFallbackState::FailureAssembly(_) => false,
-        }
-    }
-
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         match self.state {
             StoreFallbackState::Assembly { raw, cause: _ } => raw.contain_activation_fault(),

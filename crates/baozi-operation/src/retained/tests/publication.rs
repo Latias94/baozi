@@ -2873,7 +2873,7 @@ fn assert_freeze_destination_rejected(
                     RetainedOutcomeMode::FailureOnly
                 );
                 assert!(failure.assembly.loan.canonical_ownership_is_absent());
-                assert_eq!(failure.outcome_evidence_commitment_len(), 0);
+                assert_eq!(failure.assembly.loan().outcome_evidence_commitment_len(), 0);
                 drop(failure);
             }
             RetainedSuccessFreezePermitIssue::Ready(_) => {

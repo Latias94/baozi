@@ -3,10 +3,14 @@
 use super::super::payload_owner::PayloadValue;
 use super::*;
 use crate::concrete_store::finite::{
-    FiniteRetainedStoreOperation, FiniteRetainedStorePublicationAssembly, FiniteStoreExitError,
-    FiniteStoreFinalFields, FiniteUnrootedStoreFailure,
+    FinitePublicationTransition, FiniteRetainedStoreOperation,
+    FiniteRetainedStorePublicationAssembly, FiniteStoreExitCause, FiniteStoreExitError,
+    FiniteStoreFailureAssembly, FiniteStoreFinalFields, FiniteStoreFinalizeCause,
+    FiniteUnrootedStoreFailure,
 };
-use crate::concrete_store::{StoreActionExecution, StoreInvocationError};
+use crate::concrete_store::{
+    PreparedFiniteStoreFallback, StoreActionExecution, StoreInvocationError,
+};
 
 type FiniteActivationResult<'host, O, PP, U, T, E, CK, CT, L> = Result<
     FiniteCanonicalActivationOutcome<'host, O, PP, U, T, E, CK, CT, L>,
@@ -832,5 +836,507 @@ where
 {
     pub const fn cause(&self) -> &StoreCanonicalRejection<E> {
         self.state.cause()
+    }
+}
+
+struct FiniteFailureBuild<'host, O, PP, U, Cause>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fields: Option<FiniteStoreFinalFields<'host, O, PP, U>>,
+    cause: PayloadValue<PayloadLoan<'host, Cause>>,
+    state: StorePublicationState,
+    failure_code: PreparationFailureCode,
+    failure_work: FailureEvidenceWorkBudget,
+    evidence_destination: StoreDimensionKey,
+}
+
+impl<'host, O, PP, U, Cause> FiniteFailureBuild<'host, O, PP, U, Cause>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn into_error(mut self) -> FiniteStoreExitError<O, PP, U> {
+        let _ = self.cause.dispose();
+        let mut fields = self.fields.take().expect("original finite failure fields");
+        let cause = fields.contain_publication_fault();
+        fields.into_activation_error(StoreActivationContainment::from_cause(cause))
+    }
+
+    fn prepare_minimal_fallback(
+        mut self,
+        code: PreparationFailureCode,
+    ) -> Result<
+        VerifiedMinimalFallback<Cause, PreparedFiniteStoreFallback>,
+        FiniteStoreExitError<O, PP, U>,
+    > {
+        let result = self
+            .fields
+            .take()
+            .expect("original finite failure fields")
+            .prepare_publication_fallback(code, None);
+        match result {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
+                prepared,
+                self.cause
+                    .take()
+                    .expect("original finite failure cause")
+                    .into_owned(),
+            )),
+            Err(mut error) => {
+                if self.cause.dispose().is_err() {
+                    error.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+                    error.contain_payload_failure();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn build<EK, ET>(
+        mut self,
+        build: impl for<'evidence, 'lane> FnMut(
+            &mut FailureEvidenceLane<'evidence, 'lane, O, PP, U>,
+        ) -> FailureEvidenceDecision<EK, ET>,
+    ) -> FiniteFailureBuildResult<'host, O, PP, U, Cause, EK, ET>
+    where
+        ET: Copy + Send + Sync + 'static,
+    {
+        let mut build = PayloadValue::new(build);
+        let evidence = self
+            .fields
+            .as_mut()
+            .expect("original finite failure fields")
+            .failure_decision_loan(&mut self.state);
+        let result = run_failure_evidence_build(
+            evidence,
+            &mut self.failure_work,
+            build
+                .take()
+                .expect("the original failure builder transfers once"),
+        );
+        let evidence_root = match result {
+            Ok(root) => root,
+            Err(Some(code)) => {
+                self.fields
+                    .as_mut()
+                    .expect("original finite failure fields")
+                    .failure_decision_loan(&mut self.state)
+                    .publication_impl()
+                    .raw
+                    .loan_mut()
+                    .record_terminal_cause(code);
+                return self
+                    .prepare_minimal_fallback(code)
+                    .map(FailureEvidenceOutcome::MinimalFallback);
+            }
+            Err(None) => return Err(self.into_error()),
+        };
+        let storage = FiniteStoreFailureAssembly::from_bound_fields(
+            self.fields.take().expect("original finite failure fields"),
+            std::mem::take(&mut self.state),
+            self.failure_code,
+            Some(self.failure_code),
+            evidence_root,
+            None,
+        );
+        Ok(FailureEvidenceOutcome::Rooted(CanonicalFinal::new(
+            RootedFailureEvidence {
+                owner: PayloadOwner::new(
+                    self.cause.take().expect("original finite failure cause"),
+                    storage,
+                ),
+                failure_work: self.failure_work,
+                outcome_evidence_destination_dimension: self.evidence_destination,
+                _lifecycle: PhantomData::<OrdinaryFailureState>,
+            },
+        )))
+    }
+}
+
+impl<O, PP, U, Cause> Drop for FiniteFailureBuild<'_, O, PP, U, Cause>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if let Some(fields) = self.fields.as_mut() {
+            let _ = self.cause.dispose();
+            let _ = fields.contain_publication_fault();
+        }
+    }
+}
+
+struct FiniteFailureOpen<'host, O, PP, U, Cause, L, Build>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    publication: Option<FinitePublicationTransition<'host, O, PP, U, L>>,
+    opened: Option<StorePublicationOpenDisposition>,
+    cause: PayloadValue<PayloadLoan<'host, Cause>>,
+    build: PayloadValue<Build>,
+}
+
+impl<'host, O, PP, U, Cause, L, Build> FiniteFailureOpen<'host, O, PP, U, Cause, L, Build>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn new(
+        owner: PayloadOwner<
+            PayloadLoan<'host, Cause>,
+            FiniteRetainedStoreOperation<'host, O, PP, U, L>,
+        >,
+        build: Option<Build>,
+    ) -> Self {
+        let (cause, operation) = owner.into_parts();
+        let (fields, lineage) = operation.into_activation_parts();
+        Self {
+            publication: Some(FinitePublicationTransition::new(
+                fields,
+                StorePublicationState::default(),
+                lineage,
+            )),
+            opened: None,
+            cause: PayloadValue::new(cause),
+            build: PayloadValue { value: build },
+        }
+    }
+
+    fn into_error(mut self) -> FiniteStoreExitError<O, PP, U> {
+        let _ = self.build.dispose();
+        let _ = self.cause.dispose();
+        let publication = self
+            .publication
+            .as_mut()
+            .expect("original finite publication transition");
+        let error = publication.contain();
+        let (fields, _, original_error) = self
+            .publication
+            .take()
+            .expect("original finite publication transition")
+            .finish();
+        fields.into_error(FiniteStoreExitCause::Finalize(
+            FiniteStoreFinalizeCause::Publication(original_error.unwrap_or(error)),
+        ))
+    }
+
+    fn clear_error(
+        &mut self,
+        mut error: FiniteStoreExitError<O, PP, U>,
+    ) -> FiniteStoreExitError<O, PP, U> {
+        let build_failed = self.build.dispose().is_err();
+        let cause_failed = self.cause.dispose().is_err();
+        if build_failed || cause_failed {
+            error.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+            error.contain_payload_failure();
+        }
+        error
+    }
+
+    fn open(
+        &mut self,
+        plan: RetainedStorePublicationPlan,
+        failure_code: PreparationFailureCode,
+    ) -> Result<bool, ()> {
+        let publication = self
+            .publication
+            .as_mut()
+            .expect("original finite publication transition");
+        let opened = catch_unwind(AssertUnwindSafe(|| {
+            let operation = publication
+                .fields
+                .as_mut()
+                .expect("original finite operation fields")
+                .operation_loan::<L>()?;
+            operation.validate_publication_plan_keys(&plan)?;
+            operation
+                .open_publication_loan(plan, &mut publication.state)
+                .into_disposition()
+        }));
+        self.opened = match opened {
+            Ok(Ok(opened)) => Some(opened),
+            Ok(Err(_)) => return Err(()),
+            Err(payload) => {
+                discard_untrusted_panic_payload(payload);
+                return Err(());
+            }
+        };
+        let failure = match self.opened.as_ref().expect("original open disposition") {
+            StorePublicationOpenDisposition::Opened(_) => None,
+            StorePublicationOpenDisposition::Failed(failure) => Some((
+                failure.is_fail_closed(),
+                classify_activation_fault(&map_writer_error(failure.cause())),
+            )),
+        };
+        if let Err(opened) = publication
+            .fields
+            .as_mut()
+            .expect("original finite operation fields")
+            .bind_scoped_open(self.opened.take().expect("original open disposition"))
+        {
+            self.opened = Some(opened);
+            return Err(());
+        }
+        if let Some((fail_closed, classification)) = failure {
+            let ActivationFaultClassification::Recoverable(code) = classification else {
+                return Err(());
+            };
+            if fail_closed {
+                return Err(());
+            }
+            publication
+                .fields
+                .as_mut()
+                .expect("original finite operation fields")
+                .operation_loan::<L>()
+                .map_err(|_| ())?
+                .latch_activation_terminal_cause(code);
+            return Ok(false);
+        }
+        if publication.state.fallback_cause.is_some()
+            || publication.state.success_rejection.is_some()
+        {
+            return Err(());
+        }
+        let verification = publication
+            .ordinary()
+            .raw
+            .loan_mut()
+            .verify_failure_only(failure_code);
+        if let Err(cause) = verification {
+            publication.record_containment(StorePrepareError::FinalizationContainment(cause));
+            return Err(());
+        }
+        if drop_scoped_value(publication.take_lineage()).is_err() {
+            publication.contain();
+            return Err(());
+        }
+        Ok(true)
+    }
+
+    fn prepare_minimal_fallback(
+        mut self,
+        code: PreparationFailureCode,
+    ) -> Result<
+        VerifiedMinimalFallback<Cause, PreparedFiniteStoreFallback>,
+        FiniteStoreExitError<O, PP, U>,
+    > {
+        if self.build.dispose().is_err() || self.opened.is_some() {
+            return Err(self.into_error());
+        }
+        let publication = self
+            .publication
+            .as_mut()
+            .expect("original finite publication transition");
+        let poll = catch_unwind(AssertUnwindSafe(|| {
+            publication
+                .fields
+                .as_mut()
+                .expect("original finite operation fields")
+                .operation_loan::<L>()
+                .map(|mut operation| operation.poll_terminal_control())
+        }));
+        match poll {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(self.into_error()),
+            Err(payload) => {
+                discard_untrusted_panic_payload(payload);
+                return Err(self.into_error());
+            }
+        }
+        let (fields, _, error) = self
+            .publication
+            .take()
+            .expect("original finite publication transition")
+            .finish();
+        if let Some(error) = error {
+            let error = fields.into_error(FiniteStoreExitCause::Finalize(
+                FiniteStoreFinalizeCause::Publication(error),
+            ));
+            return Err(self.clear_error(error));
+        }
+        match fields.prepare_minimal_code(code) {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
+                prepared,
+                self.cause
+                    .take()
+                    .expect("original finite failure cause")
+                    .into_owned(),
+            )),
+            Err(error) => Err(self.clear_error(error)),
+        }
+    }
+}
+
+impl<O, PP, U, Cause, L, Build> Drop for FiniteFailureOpen<'_, O, PP, U, Cause, L, Build>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if let Some(publication) = self.publication.as_mut() {
+            let _ = self.build.dispose();
+            let _ = self.cause.dispose();
+            publication.retire_lineage();
+            publication.contain();
+        }
+    }
+}
+
+impl<'host, O, PP, U, E, L> CanonicalFinal<FiniteNeverActivatedSession<'host, O, PP, U, E, L>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub fn build_failure_evidence<EK, ET>(
+        mut self,
+        build: impl for<'evidence, 'lane> FnMut(
+            &mut FailureEvidenceLane<'evidence, 'lane, O, PP, U>,
+        ) -> FailureEvidenceDecision<EK, ET>,
+    ) -> FiniteFailureBuildResult<'host, O, PP, U, StoreNeverActivatedCause<E>, EK, ET>
+    where
+        ET: Copy + Send + Sync + 'static,
+    {
+        let mut transition = FiniteFailureOpen::new(
+            self.state
+                .owner
+                .take()
+                .expect("the final finite session transfers its original owner once"),
+            Some(build),
+        );
+        let failure_code = self.state.failure_code;
+        if self.state.fallback_only {
+            return transition
+                .prepare_minimal_fallback(failure_code)
+                .map(FailureEvidenceOutcome::MinimalFallback);
+        }
+        let plan = RetainedStorePublicationPlan::rich_failure(self.state.outcome_evidence_plan);
+        match transition.open(plan, failure_code) {
+            Ok(true) => {}
+            Ok(false) => {
+                return transition
+                    .prepare_minimal_fallback(failure_code)
+                    .map(FailureEvidenceOutcome::MinimalFallback);
+            }
+            Err(()) => return Err(transition.into_error()),
+        }
+        let (fields, state, error) = transition
+            .publication
+            .take()
+            .expect("original finite publication transition")
+            .finish();
+        if let Some(error) = error {
+            let error = fields.into_error(FiniteStoreExitCause::Finalize(
+                FiniteStoreFinalizeCause::Publication(error),
+            ));
+            return Err(transition.clear_error(error));
+        }
+        FiniteFailureBuild {
+            fields: Some(fields),
+            cause: PayloadValue::new(
+                transition
+                    .cause
+                    .take()
+                    .expect("original finite failure cause"),
+            ),
+            state,
+            failure_code,
+            failure_work: self.state.failure_work,
+            evidence_destination: self.state.evidence_destination,
+        }
+        .build(
+            transition
+                .build
+                .take()
+                .expect("the original failure builder transfers once"),
+        )
+    }
+
+    pub fn prepare_minimal_fallback(
+        mut self,
+    ) -> Result<
+        VerifiedMinimalFallback<StoreNeverActivatedCause<E>, PreparedFiniteStoreFallback>,
+        FiniteStoreExitError<O, PP, U>,
+    > {
+        FiniteFailureOpen::<_, _, _, _, L, ()>::new(
+            self.state
+                .owner
+                .take()
+                .expect("the final finite session transfers its original owner once"),
+            None,
+        )
+        .prepare_minimal_fallback(self.state.failure_code)
+    }
+}
+
+impl<'host, O, PP, U, E> CanonicalFinal<FiniteRejectedSession<'host, O, PP, U, E>>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub fn build_failure_evidence<EK, ET>(
+        self,
+        build: impl for<'evidence, 'lane> FnMut(
+            &mut FailureEvidenceLane<'evidence, 'lane, O, PP, U>,
+        ) -> FailureEvidenceDecision<EK, ET>,
+    ) -> FiniteFailureBuildResult<'host, O, PP, U, StoreCanonicalRejection<E>, EK, ET>
+    where
+        ET: Copy + Send + Sync + 'static,
+    {
+        let FiniteRejectedSession {
+            owner,
+            failure_code: _,
+            failure_work,
+            evidence_destination,
+        } = self.state;
+        let (cause, failure) = owner.into_parts();
+        let cause = PayloadValue::new(cause);
+        let (fields, state, failure_code) = failure.into_failure_parts();
+        FiniteFailureBuild {
+            fields: Some(fields),
+            cause,
+            state,
+            failure_code,
+            failure_work,
+            evidence_destination,
+        }
+        .build(build)
+    }
+
+    pub fn prepare_minimal_fallback(
+        self,
+    ) -> Result<
+        VerifiedMinimalFallback<StoreCanonicalRejection<E>, PreparedFiniteStoreFallback>,
+        FiniteStoreExitError<O, PP, U>,
+    > {
+        let FiniteRejectedSession {
+            owner,
+            failure_code: _,
+            failure_work,
+            evidence_destination,
+        } = self.state;
+        let (cause, failure) = owner.into_parts();
+        let cause = PayloadValue::new(cause);
+        let (fields, state, failure_code) = failure.into_failure_parts();
+        FiniteFailureBuild {
+            fields: Some(fields),
+            cause,
+            state,
+            failure_code,
+            failure_work,
+            evidence_destination,
+        }
+        .prepare_minimal_fallback(failure_code)
     }
 }

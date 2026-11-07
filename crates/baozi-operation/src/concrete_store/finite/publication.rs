@@ -272,7 +272,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn new(
+    pub(in crate::concrete_store) fn new(
         fields: FiniteStoreFinalFields<'inv, O, PP, U>,
         state: StorePublicationState,
         lineage: L,
@@ -402,6 +402,22 @@ where
 }
 
 impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFields<'_, O, PP, U> {
+    pub(in crate::concrete_store) fn failure_decision_loan<'op>(
+        &'op mut self,
+        state: &'op mut StorePublicationState,
+    ) -> ordinary::StoreFailureEvidenceLoan<'op, O, PP, U> {
+        let raw = RetainedPublicationAssemblyBorrow::from_loan(
+            self.raw
+                .assembly_loan()
+                .expect("the original finite assembly remains installed"),
+        );
+        ordinary::StoreFailureEvidenceLoan::new(
+            raw,
+            self.domain.as_ref().expect("original finite domain"),
+            state,
+        )
+    }
+
     fn assembly_borrow(&mut self) -> RawStoreAssemblyBorrow<'_, O, PP, U> {
         RetainedPublicationAssemblyBorrow::from_loan(
             self.raw
@@ -464,12 +480,22 @@ where
     }
 }
 
-impl<O, PP, U> FiniteUnrootedStoreFailure<'_, O, PP, U>
+impl<'inv, O, PP, U> FiniteUnrootedStoreFailure<'inv, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn into_failure_parts(
+        self,
+    ) -> (
+        FiniteStoreFinalFields<'inv, O, PP, U>,
+        StorePublicationState,
+        PreparationFailureCode,
+    ) {
+        (self.fields, self.state, self.failure_cause)
+    }
+
     pub(in crate::concrete_store) fn contain_activation_fault(
         mut self,
     ) -> FinalizationContainmentError {

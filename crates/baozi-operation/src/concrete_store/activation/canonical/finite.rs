@@ -333,7 +333,7 @@ where
     }
 }
 
-impl<O, PP, U> CanonicalFinal<FiniteCentralFallback<'_, O, PP, U>>
+impl<'host, O, PP, U> CanonicalFinal<FiniteCentralFallback<'host, O, PP, U>>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -341,6 +341,35 @@ where
 {
     pub const fn cause(&self) -> &StoreRuntimeError {
         self.state.cause()
+    }
+
+    pub fn prepare_minimal_fallback(
+        self,
+    ) -> Result<
+        VerifiedMinimalFallback<
+            StoreRuntimeError,
+            crate::concrete_store::PreparedFiniteStoreFallback,
+        >,
+        FiniteStoreExitError<O, PP, U>,
+    > {
+        let (cause, fallback) = self.state.owner.into_parts();
+        let mut cause = PayloadValue::new(cause);
+        match fallback.prepare_minimal_fallback() {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
+                prepared,
+                cause
+                    .take()
+                    .expect("original finite runtime cause")
+                    .into_owned(),
+            )),
+            Err(mut error) => {
+                if cause.dispose().is_err() {
+                    error.record_payload_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
+                    error.contain_payload_failure();
+                }
+                Err(error)
+            }
+        }
     }
 }
 

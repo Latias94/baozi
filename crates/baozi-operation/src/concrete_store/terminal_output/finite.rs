@@ -4,6 +4,7 @@ use super::*;
 use crate::ledger::finite::FiniteLedgerSnapshot;
 use crate::retained::{
     FiniteRetainedOutput, FiniteRetainedOutputPayload, PreparedFiniteRetainedPublication,
+    quarantine_coupled_cause_account,
 };
 
 type RawPreparedFiniteStore = PreparedFiniteRetainedPublication<
@@ -164,6 +165,17 @@ pub enum PreparedFiniteStoreFailureOutcome<EK, ET> {
     MinimalFallback(PreparedFiniteStoreFallback),
 }
 
+impl<EK, ET> PreparedFiniteStoreFailureOutcome<EK, ET> {
+    pub(in crate::concrete_store) fn quarantine_cause_drop_failure(self) {
+        let account = match &self {
+            Self::RichFailure(prepared) => prepared.outcome_evidence.account(),
+            Self::MinimalFallback(prepared) => &prepared.terminal_account,
+        };
+        quarantine_coupled_cause_account(account);
+        std::mem::forget(self);
+    }
+}
+
 /// Finite outcomes of a success request with no retained primary output.
 pub enum PreparedFiniteStoreEvidenceOnlyOutcome {
     /// The fixed facts committed after verified fallback destruction.
@@ -217,6 +229,11 @@ pub struct PreparedFiniteStoreFallback {
 }
 
 impl PreparedFiniteStoreFallback {
+    pub(in crate::concrete_store) fn quarantine_cause_drop_failure(self) {
+        quarantine_coupled_cause_account(&self.terminal_account);
+        std::mem::forget(self);
+    }
+
     /// Moves the original fallback, facts and independent account without new admission.
     pub fn handoff(self) -> PublishedFiniteStoreFallbackParts {
         PublishedFiniteStoreFallbackParts {

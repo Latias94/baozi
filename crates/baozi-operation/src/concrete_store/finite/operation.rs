@@ -331,13 +331,17 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> FiniteStoreFinalFiel
     }
 
     pub(in crate::concrete_store) fn prepare_minimal(
-        mut self,
+        self,
         code: u32,
     ) -> Result<PreparedFiniteStoreFallback, FiniteStoreExitError<O, PP, U>> {
-        match self
-            .raw
-            .finish_minimal(PreparationFailureCode::domain(code))
-        {
+        self.prepare_minimal_code(PreparationFailureCode::domain(code))
+    }
+
+    pub(in crate::concrete_store) fn prepare_minimal_code(
+        mut self,
+        code: PreparationFailureCode,
+    ) -> Result<PreparedFiniteStoreFallback, FiniteStoreExitError<O, PP, U>> {
+        match self.raw.finish_minimal(code) {
             Ok(raw) => Ok(terminal_output::finite::classify_fallback(
                 raw,
                 self.take_domain(),

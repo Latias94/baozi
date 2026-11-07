@@ -5,7 +5,8 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalFreezePermitIssue, FailureEvidenceOutcome, StoreNeverActivatedCause,
+    CanonicalFreezePermitIssue, DynamicFailureEvidenceOutcome, DynamicRootedFailureValidation,
+    FailureEvidenceOutcome, StoreNeverActivatedCause,
 };
 use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
@@ -783,7 +784,15 @@ fn retain_node_authoring_rejection(
 #[cfg(test)]
 pub(super) fn prepare_node_activation_failure<'inv, O, PP, U, Cause>(
     outcome: Result<
-        FailureEvidenceOutcome<'inv, O, PP, U, Cause, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
+        DynamicFailureEvidenceOutcome<
+            'inv,
+            O,
+            PP,
+            U,
+            Cause,
+            RecordBlock,
+            NodeSceneOutcomeEvidenceSchema,
+        >,
         StoreActivationContainment,
     >,
     failure_fallback: CanonicalCauseSlot<'inv, StoreRuntimeError>,
@@ -829,7 +838,15 @@ where
 #[cfg(test)]
 pub(super) fn prepare_node_central_failure<O, PP, U, Cause>(
     validation: Result<
-        RootedFailureValidation<'_, O, PP, U, Cause, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
+        DynamicRootedFailureValidation<
+            '_,
+            O,
+            PP,
+            U,
+            Cause,
+            RecordBlock,
+            NodeSceneOutcomeEvidenceSchema,
+        >,
         StoreActivationContainment,
     >,
     final_progress: FinalProgress<PP, U>,
@@ -845,7 +862,7 @@ where
 
 #[cfg(test)]
 fn prepare_node_ordinary_construction_failure<O, PP, U, Cause>(
-    validation: RootedFailureValidation<
+    validation: DynamicRootedFailureValidation<
         '_,
         O,
         PP,
@@ -867,7 +884,7 @@ where
 
 #[cfg(test)]
 fn prepare_node_ordinary_failure_validation<O, PP, U, Cause>(
-    validation: RootedFailureValidation<
+    validation: DynamicRootedFailureValidation<
         '_,
         O,
         PP,

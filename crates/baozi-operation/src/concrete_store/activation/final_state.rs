@@ -292,6 +292,99 @@
 ///     drop(escaped);
 /// }
 /// ```
+/// Finite failure authoring uses the same final boundary with concrete fixed-capacity owners:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalFinal, FiniteNeverActivatedSession, FiniteRejectedSession,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn build<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     never: CanonicalFinal<FiniteNeverActivatedSession<'inv, O, P, U, ()>>,
+///     rejected: CanonicalFinal<FiniteRejectedSession<'inv, O, P, U, ()>>,
+/// ) {
+///     let _ = never.build_failure_evidence::<(), ()>(|lane| lane.abort());
+///     let _ = rejected.build_failure_evidence::<(), ()>(|lane| lane.abort());
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteNeverActivatedSession;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     never: FiniteNeverActivatedSession<'_, O, P, U, ()>,
+/// ) {
+///     let _ = never.build_failure_evidence::<(), ()>(|lane| lane.abort());
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteRejectedSession;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     rejected: FiniteRejectedSession<'_, O, P, U, ()>,
+/// ) {
+///     let _ = rejected.prepare_minimal_fallback();
+/// }
+/// ```
+///
+/// A restored finite failure validates and prepares without exposing its storage for replacement:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalCauseSlot, FiniteRootedFailureEvidence, RootedFailureValidation,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
+/// fn finish<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     rooted: FiniteRootedFailureEvidence<'inv, O, P, U, (), (), ()>,
+///     slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     if let Ok(RootedFailureValidation::Valid(validated)) =
+///         rooted.validate_rich_failure(slot, |_, _| true)
+///     {
+///         let _ = validated.try_prepare(progress);
+///     }
+/// }
+/// ```
+///
+/// The underlying finite body products independently exclude each consuming transition:
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::{
+///     activation::{CanonicalCauseSlot, RootedFailureEvidence}, authority::FiniteStoreFailureAssembly,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
+/// fn premature<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     rooted: RootedFailureEvidence<'inv, (), FiniteStoreFailureAssembly<'inv, O, P, U, (), ()>>,
+///     slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
+/// ) {
+///     let _ = rooted.validate_rich_failure(slot, |_, _| true);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::{
+///     activation::ValidatedFailureEvidence, authority::ValidatedFiniteStoreFailure,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     validated: ValidatedFailureEvidence<'inv, (), ValidatedFiniteStoreFailure<'inv, O, P, U, (), ()>>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     let _ = validated.try_prepare(progress);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteCentralFallback;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     fallback: FiniteCentralFallback<'_, O, P, U>,
+/// ) {
+///     let _ = fallback.prepare_minimal_fallback();
+/// }
+/// ```
 #[must_use = "the restored canonical state must complete its terminal transition or be dropped"]
 pub struct CanonicalFinal<S> {
     pub(super) state: S,

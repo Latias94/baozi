@@ -1295,7 +1295,17 @@ fn finite_host_restores_each_original_semantic_failure_role_after_body_cleanup()
                     assert!(matches!(
                         fallback.cause(),
                         StoreRuntimeError::AllocationFailed
-                    ))
+                    ));
+                    let (prepared, cause) =
+                        fallback.prepare_minimal_fallback().unwrap().into_parts();
+                    assert!(matches!(cause, StoreRuntimeError::AllocationFailed));
+                    let parts = prepared.handoff();
+                    assert!(matches!(
+                        parts.facts.header().terminal_cause(),
+                        crate::StoreTerminalCause::Failure(cause)
+                            if cause.class() == crate::StorePreparationFailureClass::ProductGraph
+                    ));
+                    drop(parts);
                 }
                 _ => panic!("finite branch {branch} restored as {actual_role} after cleanup"),
             }

@@ -112,3 +112,26 @@ where
         self.assembly.loan.borrow_ordinary()
     }
 }
+
+type FailureAssemblyParts<'inv, O, P, PP, U, D, F, CB, EB> = (
+    RetainedPublicationAssembly<'inv, O, P, PP, U, D, F, CB, EB>,
+    PreparationFailureCode,
+);
+
+impl<'inv, O, P, PP, U, D, F, CB, EB> RetainedFailureAssembly<'inv, O, P, PP, U, D, F, CB, EB>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CB: Send + Sync + 'static,
+    EB: Send + Sync + 'static,
+{
+    pub(crate) fn into_failure_parts(
+        self,
+    ) -> FailureAssemblyParts<'inv, O, P, PP, U, D, F, CB, EB> {
+        (self.assembly, self.fallback_cause)
+    }
+}

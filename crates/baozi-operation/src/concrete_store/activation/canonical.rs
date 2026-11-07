@@ -1187,7 +1187,7 @@ where
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        RootedFailureValidation<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
+        DynamicRootedFailureValidation<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
     >
     where

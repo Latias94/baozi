@@ -83,6 +83,10 @@ pub(crate) fn release_owned_storage<T>(lease: RetainedStorageLease, value: T) ->
     )
 }
 
+pub(crate) fn quarantine_coupled_cause_account(account: &PhysicalStorageAccount) {
+    let _ = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+}
+
 /// The logical reservation and its corresponding admitted physical lease.
 type RetainedStorageAdmission<O, P, D> = (
     crate::ledger::LiveReservation<O, P, D>,
@@ -3273,24 +3277,6 @@ where
         self.map_failure_validation(validation)
     }
 
-    pub(crate) fn validate_rich_failure_controlled<EvidenceTag>(
-        mut self,
-        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-        validate: impl for<'session, 'control> FnOnce(
-            &mut RetainedEvidenceClosureSession<'session, EvidenceBlock>,
-            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
-        ) -> bool,
-    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    where
-        EvidenceTag: Copy + Send + Sync + 'static,
-    {
-        let validation = self
-            .loan
-            .validate_rich_failure_controlled(evidence_root, validate);
-        self.map_failure_validation(validation)
-    }
-
     /// Discards every block table before attribution and publishes the pre-admitted fallback.
     pub fn prepare_minimal_fallback(
         self,
@@ -3510,7 +3496,7 @@ where
         Ok(RetainedSuccessFreezeDecision::Ready)
     }
 
-    fn try_stage_exact_outcome_evidence(
+    pub(crate) fn try_stage_exact_outcome_evidence(
         &mut self,
         proof: &RetainedEvidenceClosureProof<EvidenceBlock>,
         dimension: D,
@@ -4385,22 +4371,6 @@ where
         self.assembly.validate_rich_failure(evidence_root, validate)
     }
 
-    pub(crate) fn validate_rich_failure_controlled<EvidenceTag>(
-        self,
-        evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-        validate: impl for<'session, 'control> FnOnce(
-            &mut RetainedEvidenceClosureSession<'session, EvidenceBlock>,
-            OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
-            RetainedFailureWorkControl<'control, O, P, PP, U, D>,
-        ) -> bool,
-    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
-    where
-        EvidenceTag: Copy + Send + Sync + 'static,
-    {
-        self.assembly
-            .validate_rich_failure_controlled(evidence_root, validate)
-    }
-
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<
@@ -4426,19 +4396,6 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    pub(crate) fn outcome_evidence_commitment_len(&self) -> usize {
-        self.assembly.loan.outcome_evidence_commitment_len()
-    }
-
-    pub(crate) fn try_stage_exact_outcome_evidence(
-        &mut self,
-        dimension: D,
-    ) -> Result<(), RetainedPublicationError<D>> {
-        self.assembly
-            .loan
-            .try_stage_exact_outcome_evidence(&self.proof, dimension)
-    }
-
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
     }
@@ -4521,10 +4478,6 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    pub(crate) const fn activation_containment_required(&self) -> bool {
-        self.activation_containment_required
-    }
-
     pub(crate) fn defer_until_body_cleanup(mut self) -> Result<(), Self> {
         if !matches!(self.assembly.loan.prepare_body_deferral(), Some(Ok(()))) {
             return Err(self);

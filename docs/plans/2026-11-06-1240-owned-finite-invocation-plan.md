@@ -18,15 +18,20 @@ and four consuming graph chains are deleted; the bounded runtime/test qualificat
 below records their actual execution and remaining integrated limits.
 Test observation keeps a borrowed classification seam without owner extraction.
 
-The latest integrated attempt is **final21/source129: all seven gates PASS**. It runs
-**3,920 workspace tests** (two slow, six existing manual skips), **196 doctests** and
+The latest integrated attempt is **final25/source140: all seven gates PASS**. It runs
+**3,930 workspace tests** (two slow, six existing manual skips), **203 doctests** and
 **138 asset-consumer tests** (one existing manual scale skip), and passes both strict
-all-target/all-feature Clippy checks and both format checks. All **1,046** before/after/
-current inputs, **155** frozen files and five current recorded user-note identities
+all-target/all-feature Clippy checks and both format checks. All **1,049** before/after/
+current inputs, **163** frozen files and five current recorded user-note identities
 match; no equality to an absent older note baseline is inferred. This qualifies the
-owned body-error transport structural checkpoint. Complete finite final authoring,
-freeze/Core/Postprocess and measured layout/allocation/performance acceptance remain
+final-only finite failure-authoring structural checkpoint. Complete finite success
+freeze/joint/Core/Postprocess and measured layout/allocation/performance acceptance remain
 open. Release and local-main merge stay HOLD.
+
+Historical final21/source129 independently passes 3,920 workspace tests, 196 doctests,
+138 consumer tests and all remaining strict/format gates, with 1,046 stable inputs and
+155 frozen files. It qualifies the earlier body-error transport and is not relabeled
+as source140 evidence.
 
 Historical final20/source126 independently passes 3,916 workspace tests (two slow,
 six skips), 196 doctests, 138 consumer tests (one manual scale skip), both strict and
@@ -52,14 +57,54 @@ and capture/proof/output destructor-fault combinations; all 1,364 Operation test
 strict50 pass. Body errors cross the Result callback in their original owned form
 before entry teardown, survive capture/payload disposal, and return without inventing
 a new failure or poisoning an otherwise healthy root. Adversarial source127 and bounded
-source129 delta/focused-execution reviews close GO within their scopes. Full21 is the
-latest complete integrated checkpoint; it grants no native or release credit.
+source129 delta/focused-execution reviews close GO within their scopes. Full21 is that
+distinct integrated checkpoint; it grants no native or release credit.
 
-The next final-only failure-authoring proposal adopts both independent P1 amendments:
-original preparation-error/unmatched-decision custody and production quarantine through
-the original prepared-owner account. Its explicit control-preserving result and concrete
-compatibility appendix close design GO. Implementation remains pending; freeze/joint and
-actual Core/Postprocess migration follow that bounded cut.
+The final-only failure-authoring cut is qualified after both independent P1
+amendments: original preparation-error/unmatched-decision custody and production
+quarantine through the original prepared-owner account. Dynamic and finite concrete
+owners now lend one rooted failure-validation algorithm; generic cause-coupled products
+retain their actual storage type. Finite authoring, validation and preparation stay on
+the restored final capability. The finite result carries the original final control
+cause, including physical minimal fallback. Retired consuming controlled-validation
+and unused commitment-forwarding adapters are removed; the readonly count used by
+transcript validation remains required. Source130's over-deletion/fixture borrow errors
+and source131's missing underlying count accessor remain recorded. Source132 runs
+1,368 PASS/four new fixture failures; source134 runs 1,371 PASS/one new fixture failure.
+Source135 corrects only the cancellation observation point and passes all 1,372
+Operation tests and 143 Operation doctests. Source134's strict52 passes every target
+and feature; no production body changes follow it in source135. Independent shared,
+concrete finite, and test/delta reviews close bounded GO; the test review requests
+one non-blocking destination assertion correction. Source136 adds actual final Fallback
+consumption and recoverable-open/Build-disposal coverage. Full22 stops before tests on
+three old Import type annotations; source137 updates only those concrete dynamic
+annotations/imports for the original seven integrated gates. Freeze/joint
+and actual Core/Postprocess migration follow this bounded cut.
+
+Full23/source137 finishes compilation but stops before test execution because the
+STL ascii executable is absent. Four named historical measurement artifacts under
+`target` are also absent; preserve their tracked historical reports without claiming
+current raw availability. All subsequent builds remain in this repository's existing
+`target`. Full24/source138 rebuilds the missing products and runs 3,928 PASS/two new
+assertion failures, with six existing manual skips. The tests incorrectly expected zero
+minimal evidence on the actual destination, which the original start plan admits at
+amount three. Source140 preserves that exact amount and adds both cumulative retained
+admission assertions around validation cancellation. Its production is identical to
+source137; source139 is formatted but unexecuted and byte-identical to138.
+The independent source140 closure explicitly corrects the earlier zero recommendation
+and closes the admission-assertion gap. Full25/source140 passes all seven gates,
+including 3,930 workspace tests, 203 doctests, 138 consumer tests, both strict Clippy
+and both format checks. All 1,049 inputs and 163 frozen files match; the current five
+user-note identities are preserved. Actual log/source identities are bound by
+`owned-finite-source140-integrated-association-1.json`. The deliberate passing
+ordinary-host unwind stderr is counted once. No native or release credit follows.
+
+The next bounded finite freeze/joint design has amended independent design GO. Actual
+detailed freeze-control metadata must survive runtime-source replacement and owned
+post-detach errors, independently of the disposable typed source. Cancellation after
+Ready must preserve exact frozen success without another control observation. These
+are specified future implementation/test obligations; no finite freeze/joint runtime
+acceptance follows from this design result.
 
 The central/restoration cut passes all 1,361 Operation tests on source126 and strict47
 passes every Operation target/feature. All 1,046 inputs and 155 frozen source files
@@ -850,3 +895,70 @@ protocol and all release targets remain. A structural compiler cut is not a nati
 performance keep. Allocation-free empty/single unchanged preparation additionally
 requires the later indexed selection/zero-single scratch owner cut; this plan does
 not claim that fixed arrays alone eliminate all escaping scratch.
+
+## Next bounded cut: finite freeze and joint success
+
+The independent proposal and amended closure are recorded as
+`owned-finite-source137-freeze-joint-{design,plan-review,amendments,plan-closure}-1.md`
+under `.git/baozi-review/performance-convergence`. Design GO applies to the proposal
+together with its amendments. It is not implementation or native qualification.
+
+Add final-only finite permit/issue, invariant joint contribution and exact-success
+products beside their concrete dynamic counterparts. Reuse `CanonicalJointSeal` and
+its binder lifetime. The restored finite Candidate issues Ready, Interrupted/Frozen,
+or DestinationRejected/Ordinary; bare body wrappers gain no terminal methods or raw
+storage escape. Generation admission checks original slot identity/vacancy and both
+proven roots before executing generation callbacks.
+
+Original success-storage parts contain actual assembly/fields, the original closure
+proof, typed canonical/evidence roots and the existing domain where owned. Private
+parts adapters move these owners without validation, admission, cleanup or another
+abandonment obligation. Short actual-field loans share the existing freeze decision,
+paired commitment, generation checks and ordered payload-disposal algorithms. A
+concrete transition guard holds original output/proof permissions, fields, roots,
+budget and first error before callbacks or terminal effects. End its short borrow
+before any concrete consuming binding. Retire local forwarding-only dynamic freeze
+envelopes after their callers migrate; retain concrete dynamic stage owners if their
+deletion would require another terminal rewrite. No backend union, consuming provider,
+temporary dynamic ledger, counter copy or second terminal algorithm is permitted.
+
+Ready atomically stages the two exact nonzero counts before final control. A denied
+second row leaves neither partial row nor final-control execution. Destination denial
+remains Ordinary; control interruption and generation rejection become Frozen and
+retain their one already-staged evidence row. Thread the sealed existing lifecycle
+State through finite failure products: Ordinary stages once, Frozen never stages again.
+Ordinary final preparation takes progress; Frozen preparation takes none and performs
+no further poll, progress, control-owner disposal, validation or canonical discard.
+
+Before freeze, dispose proof then output. Normal Ready abandonment follows the existing
+frozen output/proof order; explicit generation rejection disposes proof then output.
+Denied generation/reject/prepare captures precede both payloads. Every destructor has
+its separate catch; preserve first panic/error while original storage remains guarded.
+Normal errors retain original finite domain/startup/preparation/stamp/detach/proof
+residue. Healthy stable permit/contribution abandonment releases normally; transient
+guard failure and deliberately forgotten authority retain the original containment
+rules. Exact finite success uses `FrozenSuccess` and precommit `require_success()`;
+never commit fallback and then convert the committed result into an error.
+
+Detailed freeze control has independent custody. Capture the actual optional
+`ControlCause` returned by freeze; clone only this bounded known metadata, never generic
+Cause or backing. Carry it through original finite failure/validated storage, parts
+and guards independently of source/runtime payload replacement. First-Some attachment
+to the original owned `FiniteStoreExitError` occurs before source-cause disposal and
+preserves its primary terminal failure/residue. Successful rich/minimal output places
+it in the sole existing `FiniteStoreFacts`, including runtime fallback replacing the
+source. Add read-only accessors and the defining finite error/facts files to this cut;
+do not reconstruct details from a stable code or observe control again.
+
+Required tests use real finite Host owners with unequal nonzero canonical/evidence
+counts, Inline and genuinely promoted storage, paired destination denial, control
+interruption, generation exhaustion, foreign/occupied slots or roots, separate capture
+and payload faults, healthy abandonment and forgotten authority. Ready followed by
+cancellation must still commit exact success with original output/proof and unchanged
+control/progress/poll/disposal/semantic-validation counts. A nontrivial Interrupted
+cause followed by post-detach commit rejection must remain inspectable with its
+original proof/domain after Host exit; cover frozen rich/minimal errors and runtime
+replacement. Add matching positive and compile-fail cases for final-only freeze,
+Ordinary/Frozen preparation misuse and mixed finite/dynamic nested-binder seals.
+Core/Postprocess migration and all original convergence targets follow this qualified
+Operation cut; no changed producer algorithm or benchmark boundary is part of it.

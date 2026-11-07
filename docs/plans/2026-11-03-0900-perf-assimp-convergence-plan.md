@@ -62,6 +62,16 @@ formats. Parser completion is also substantial in grid OBJ. The existing stable 
 dense remaps already removed the previously demonstrated sorting waste; do not claim that gain
 again or assume text allocation is now the leading cost.
 
+Current artifact availability, 2026-11-08: four explicitly checked historical closed-text
+paths under `target` are absent, including Windows C0/N0 output, the inline attribution
+report and candidate build identity. Earlier tracked reports remain historical records;
+their absent raw files are not current acceptance evidence. Full23 also reached a finished
+test compilation but could not enumerate the missing STL ascii executable. The next
+structural run rebuilds in this repository's existing `target`; no agent cleanup or new
+build location is involved. New ordinary and heap campaigns are still required. Preserve
+their small raw JSON, identities and logs outside the cleanable build tree after all
+measurement clocks end, without changing the comparison boundary or sample protocol.
+
 ## Work Sequence
 
 1. **Locate and freeze.** Reconcile current exclusive profile rows with the executed source;
@@ -857,11 +867,22 @@ negative case only for a genuinely new boundary, not for incidental private layo
   disjoint-loan P2 at the plan-contract level. The dynamic-first cut includes all
   three whole-Ledger transfers, the sibling pre-freeze classifier and real fail-closed
   state retention; the finite cut includes every Start/Body error carrier and actual
-  Core/postprocess ownership. The first dynamic cut is now source-only work in the
-  current checkout, uncompiled and independently unreviewed; no finite caller exists.
-  The current producer-result slice and its immutable workers remain separate; no
+  Core/postprocess ownership. The dynamic cut has completed its qualified structural
+  checkpoint. Finite owned startup/body errors, actual physical/domain terminal
+  ownership, shared activation/central validation and body-error transport are also
+  implemented; final21/source129 passes all seven integrated gates. The subsequent
+  final-only failure authoring shares one validation algorithm across concrete owners,
+  retains original error/proof/payload custody, and preserves final control through
+  prepared finite output. Source135 passes 1,372 Operation tests and 143 Operation
+  doctests, with bounded independent source/test reviews. Final25/source140 passes all
+  seven integrated gates: 3,930 workspace tests, 203 doctests, 138 consumer tests,
+  both strict and both formats, with 1,049 stable inputs and 163 frozen files. The
+  Import Dynamic annotations are migrated and original fallback/admission assertions
+  are qualified without changing production behavior to satisfy tests.
+  The finite success freeze/joint boundary and actual changed Core/Postprocess consumers
+  still follow. The producer-result workers remain separate immutable evidence; no
   finite allocation, layout, performance, main integration or release claim follows
-  from design GO or in-progress source.
+  from these structural checkpoints.
 - The [preparation producer result](../reviews/2026-11-06-preparation-producer-result.md)
   qualifies `e8c4802`: only real effects materialize output, unchanged prefixes/suffixes
   retain complete ordered evidence, and caller rediscovery is removed. Independent

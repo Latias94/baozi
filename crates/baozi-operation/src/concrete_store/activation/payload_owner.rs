@@ -161,7 +161,7 @@ impl<T, Proof> Drop for PayloadPair<T, Proof> {
 }
 
 /// The concrete stage owner can quarantine its storage after a callback value fails to drop.
-pub(super) trait PayloadStorage {
+pub trait PayloadStorage {
     fn contain_payload_failure(self);
 }
 
@@ -379,6 +379,38 @@ where
 
 impl<O, PP, U> PayloadStorage
     for crate::concrete_store::finite::FiniteStoreFallbackOnly<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
+    }
+}
+
+impl<EK, ET> PayloadStorage for PreparedStoreFailureOutcome<EK, ET> {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl PayloadStorage for PreparedStoreFallback {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl<EK, ET> PayloadStorage for crate::concrete_store::PreparedFiniteStoreFailureOutcome<EK, ET> {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl PayloadStorage for crate::concrete_store::PreparedFiniteStoreFallback {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl<O, PP, U, EK, ET> PayloadStorage
+    for crate::concrete_store::finite::ValidatedFiniteStoreFailure<'_, O, PP, U, EK, ET>
 where
     O: OperationOwner,
     PP: ProgressPhase,

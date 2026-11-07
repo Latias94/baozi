@@ -1,6 +1,6 @@
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalCauseSlot, CanonicalFreezePermitIssue, CanonicalGenerationSlots,
-    CanonicalJointSuccess, RootedFailureValidation,
+    CanonicalJointSuccess, DynamicRootedFailureValidation, RootedFailureValidation,
 };
 use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
@@ -221,7 +221,7 @@ where
 }
 
 fn prepare_ordinary_failure_validation<O, PP, U, Cause>(
-    validation: RootedFailureValidation<
+    validation: DynamicRootedFailureValidation<
         '_,
         O,
         PP,

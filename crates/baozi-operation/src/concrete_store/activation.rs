@@ -58,8 +58,10 @@ pub use canonical::finite::{
     FiniteCentralFallback,
 };
 mod failure_evidence;
-pub(in crate::concrete_store) use failure_evidence::{
-    failure_evidence_validator, run_failure_evidence_build,
+pub(in crate::concrete_store) use failure_evidence::run_failure_evidence_build;
+pub use failure_evidence::{
+    FiniteFailureEvidenceOutcome, FinitePreparedFailureEvidence, FiniteRejectedFailureEvidence,
+    FiniteRootedFailureEvidence, FiniteRootedFailureValidation, FiniteValidatedFailureEvidence,
 };
 mod fallback;
 mod final_state;
@@ -2809,7 +2811,7 @@ pub enum CanonicalFreezePermitIssue<
         >,
     ),
     Interrupted(
-        RootedFailureEvidence<
+        DynamicRootedFailureEvidence<
             'inv,
             O,
             PP,
@@ -2821,7 +2823,7 @@ pub enum CanonicalFreezePermitIssue<
         >,
     ),
     DestinationRejected(
-        RootedFailureEvidence<
+        DynamicRootedFailureEvidence<
             'inv,
             O,
             PP,
@@ -2901,7 +2903,7 @@ pub struct CentrallyRejectedCanonicalStoreSession<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    root: RootedFailureEvidence<
+    root: DynamicRootedFailureEvidence<
         'inv,
         O,
         PP,
@@ -2923,7 +2925,7 @@ pub type CanonicalRejectionFailureValidation<
     EvidenceKind,
     EvidenceTag,
     State = OrdinaryFailureState,
-> = RootedFailureValidation<
+> = DynamicRootedFailureValidation<
     'inv,
     O,
     PP,
@@ -2942,7 +2944,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    root: RootedFailureEvidence<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
+    root: DynamicRootedFailureEvidence<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
 }
 
 /// Opaque validation outcome for a materialized canonical session.
@@ -3032,7 +3034,15 @@ where
 
 /// Failure-evidence construction result for a rejected canonical candidate.
 pub type CanonicalRejectionEvidenceOutcome<'inv, O, PP, U, E, EvidenceKind, EvidenceTag> =
-    FailureEvidenceOutcome<'inv, O, PP, U, StoreCanonicalRejection<E>, EvidenceKind, EvidenceTag>;
+    DynamicFailureEvidenceOutcome<
+        'inv,
+        O,
+        PP,
+        U,
+        StoreCanonicalRejection<E>,
+        EvidenceKind,
+        EvidenceTag,
+    >;
 
 /// One-shot failure-evidence lane. It is consumed together with the owner and cannot be reopened.
 pub struct FailureEvidenceLane<'evidence, 'lane, O, PP, U>
@@ -3059,44 +3069,39 @@ pub struct FrozenFailureState {
 }
 
 trait FailureLifecycleState {
-    fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
-        validated: &mut ValidatedStoreFailure<'_, O, PP, U, EvidenceKind, EvidenceTag>,
-        outcome_evidence_destination_dimension: StoreDimensionKey,
-    ) -> Result<(), StoreRuntimeError>
-    where
-        O: OperationOwner,
-        PP: ProgressPhase,
-        U: ProgressUnit;
+    fn validate_commitment<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>(
+        assembly: &mut super::RawStoreAssemblyBorrow<'_, O, PP, U>,
+        proof: &crate::retained::RetainedEvidenceClosureProof<StoredBlock>,
+        destination: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError>;
 }
-
 impl FailureLifecycleState for OrdinaryFailureState {
-    fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
-        validated: &mut ValidatedStoreFailure<'_, O, PP, U, EvidenceKind, EvidenceTag>,
-        outcome_evidence_destination_dimension: StoreDimensionKey,
-    ) -> Result<(), StoreRuntimeError>
-    where
-        O: OperationOwner,
-        PP: ProgressPhase,
-        U: ProgressUnit,
-    {
-        if validated.outcome_evidence_commitment_len() != 0 {
+    fn validate_commitment<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>(
+        assembly: &mut super::RawStoreAssemblyBorrow<'_, O, PP, U>,
+        proof: &crate::retained::RetainedEvidenceClosureProof<StoredBlock>,
+        destination: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        if assembly.loan().outcome_evidence_commitment_len() != 0 {
             return Err(StoreRuntimeError::InvalidPublicationPlan);
         }
-        validated.try_stage_exact_outcome_evidence(outcome_evidence_destination_dimension)
+        assembly
+            .loan_mut()
+            .try_stage_exact_outcome_evidence(proof, destination)
+            .map_err(|error| map_publication_error(&error))?;
+        if assembly.loan().outcome_evidence_commitment_len() == 1 {
+            Ok(())
+        } else {
+            Err(StoreRuntimeError::InvalidPublicationPlan)
+        }
     }
 }
-
 impl FailureLifecycleState for FrozenFailureState {
-    fn validate_commitment<O, PP, U, EvidenceKind, EvidenceTag>(
-        validated: &mut ValidatedStoreFailure<'_, O, PP, U, EvidenceKind, EvidenceTag>,
-        _outcome_evidence_destination_dimension: StoreDimensionKey,
-    ) -> Result<(), StoreRuntimeError>
-    where
-        O: OperationOwner,
-        PP: ProgressPhase,
-        U: ProgressUnit,
-    {
-        if validated.outcome_evidence_commitment_len() == 1 {
+    fn validate_commitment<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>(
+        assembly: &mut super::RawStoreAssemblyBorrow<'_, O, PP, U>,
+        _proof: &crate::retained::RetainedEvidenceClosureProof<StoredBlock>,
+        _destination: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        if assembly.loan().outcome_evidence_commitment_len() == 1 {
             Ok(())
         } else {
             Err(StoreRuntimeError::InvalidPublicationPlan)
@@ -3104,26 +3109,15 @@ impl FailureLifecycleState for FrozenFailureState {
     }
 }
 
-/// Rooted failure evidence. No mutation API is exposed after the one-shot lane completes.
+/// Rooted failure evidence with its concrete original storage owner.
 #[must_use = "rooted failure evidence must be validated or prepared"]
 pub struct RootedFailureEvidence<
     'inv,
-    O,
-    PP,
-    U,
     Cause,
-    EvidenceKind,
-    EvidenceTag,
+    Storage: payload_owner::PayloadStorage,
     State = OrdinaryFailureState,
-> where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    owner: PayloadOwner<
-        PayloadLoan<'inv, Cause>,
-        StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-    >,
+> {
+    owner: PayloadOwner<PayloadLoan<'inv, Cause>, Storage>,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
     _lifecycle: PhantomData<State>,
@@ -3131,75 +3125,75 @@ pub struct RootedFailureEvidence<
 
 /// Result of validating an already-rooted failure graph.
 #[must_use = "the validated or rejected failure owner must be consumed"]
-pub enum RootedFailureValidation<
-    'inv,
-    O,
-    PP,
-    U,
-    Cause,
-    EvidenceKind,
-    EvidenceTag,
-    State = OrdinaryFailureState,
-> where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    Valid(ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>),
-    Rejected(RejectedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>),
-    Fallback(VerifiedMinimalFallback<StoreRuntimeError>),
+pub enum RootedFailureValidation<Valid, Rejected, Fallback> {
+    Valid(Valid),
+    Rejected(Rejected),
+    Fallback(Fallback),
 }
 
 #[must_use = "validated failure evidence must be prepared or downgraded"]
 pub struct ValidatedFailureEvidence<
     'inv,
-    O,
-    PP,
-    U,
     Cause,
-    EvidenceKind,
-    EvidenceTag,
+    Storage: payload_owner::PayloadStorage,
     State = OrdinaryFailureState,
-> where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    owner: PayloadOwner<
-        PayloadLoan<'inv, Cause>,
-        ValidatedStoreFailure<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-    >,
+> {
+    owner: PayloadOwner<PayloadLoan<'inv, Cause>, Storage>,
     _lifecycle: PhantomData<State>,
 }
 
 #[must_use = "prepared failure evidence must be handed to the terminal publisher"]
-pub struct PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag> {
+pub struct PreparedFailureEvidence<Cause, Prepared: payload_owner::PayloadStorage> {
     cause: Option<Cause>,
     final_control_cause: Option<ControlCause>,
-    // The cause drop boundary either releases this owner normally or quarantines it intact.
-    prepared: Option<PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>>,
+    prepared: Option<Prepared>,
 }
 
 #[must_use = "rejected failure evidence must prepare the minimal fallback"]
-pub struct RejectedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    owner: PayloadOwner<
-        PayloadLoan<'inv, Cause>,
-        StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-    >,
+pub struct RejectedFailureEvidence<'inv, Cause, Storage: payload_owner::PayloadStorage> {
+    owner: PayloadOwner<PayloadLoan<'inv, Cause>, Storage>,
 }
 
-/// Minimal fallback whose typed source cause remains available without exposing physical state.
+/// Minimal fallback whose typed cause stays coupled to its original prepared owner.
 #[must_use = "the verified minimal fallback must be handed to the terminal publisher"]
-pub struct VerifiedMinimalFallback<Cause> {
+pub struct VerifiedMinimalFallback<
+    Cause,
+    Prepared: payload_owner::PayloadStorage = PreparedStoreFallback,
+> {
     cause: Option<Cause>,
-    // The cause drop boundary either releases this owner normally or quarantines it intact.
-    prepared: Option<PreparedStoreFallback>,
+    prepared: Option<Prepared>,
 }
+
+pub type DynamicRootedFailureEvidence<'inv, O, PP, U, Cause, EK, ET, State = OrdinaryFailureState> =
+    RootedFailureEvidence<'inv, Cause, StoreFailureAssembly<'inv, O, PP, U, EK, ET>, State>;
+pub type DynamicValidatedFailureEvidence<
+    'inv,
+    O,
+    PP,
+    U,
+    Cause,
+    EK,
+    ET,
+    State = OrdinaryFailureState,
+> = ValidatedFailureEvidence<'inv, Cause, ValidatedStoreFailure<'inv, O, PP, U, EK, ET>, State>;
+pub type DynamicRejectedFailureEvidence<'inv, O, PP, U, Cause, EK, ET> =
+    RejectedFailureEvidence<'inv, Cause, StoreFailureAssembly<'inv, O, PP, U, EK, ET>>;
+pub type DynamicRootedFailureValidation<
+    'inv,
+    O,
+    PP,
+    U,
+    Cause,
+    EK,
+    ET,
+    State = OrdinaryFailureState,
+> = RootedFailureValidation<
+    DynamicValidatedFailureEvidence<'inv, O, PP, U, Cause, EK, ET, State>,
+    DynamicRejectedFailureEvidence<'inv, O, PP, U, Cause, EK, ET>,
+    VerifiedMinimalFallback<StoreRuntimeError>,
+>;
+pub type DynamicPreparedFailureEvidence<Cause, EK, ET> =
+    PreparedFailureEvidence<Cause, PreparedStoreFailureOutcome<EK, ET>>;
 
 /// A recoverable central-validation failure that retains fallback authority without freezing it.
 ///
@@ -3217,18 +3211,25 @@ where
     owner: PayloadOwner<PayloadLoan<'inv, StoreRuntimeError>, StoreFallbackOnly<'inv, O, PP, U>>,
 }
 
-// Both variants are linear terminal owners. Boxing the larger owner would bypass the store ledger.
-#[allow(clippy::large_enum_variant)]
+/// Either one rooted original owner or a prepared minimal fallback.
 #[must_use = "the rooted evidence or minimal fallback owner must be consumed"]
-pub enum FailureEvidenceOutcome<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    Rooted(RootedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>),
-    MinimalFallback(VerifiedMinimalFallback<Cause>),
+pub enum FailureEvidenceOutcome<Rooted, Minimal> {
+    Rooted(Rooted),
+    MinimalFallback(Minimal),
 }
+pub type DynamicFailureEvidenceOutcome<'inv, O, PP, U, Cause, EK, ET> = FailureEvidenceOutcome<
+    DynamicRootedFailureEvidence<'inv, O, PP, U, Cause, EK, ET>,
+    VerifiedMinimalFallback<Cause>,
+>;
+
+type FiniteFailureBuildResult<'host, O, PP, U, Cause, EK, ET> = Result<
+    FiniteFailureEvidenceOutcome<'host, O, PP, U, Cause, EK, ET>,
+    crate::concrete_store::finite::FiniteStoreExitError<O, PP, U>,
+>;
+type FiniteFailureValidationResult<'host, O, PP, U, Cause, EK, ET> = Result<
+    FiniteRootedFailureValidation<'host, O, PP, U, Cause, EK, ET>,
+    crate::concrete_store::finite::FiniteStoreExitError<O, PP, U>,
+>;
 
 /// Exact post-activation rejection cause coupled to its evidence-only continuation.
 #[derive(Debug, Clone, PartialEq, Eq)]

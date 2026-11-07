@@ -1,18 +1,70 @@
 # Owned Finite Invocation: Numerical and Control Foundation
 
-Latest checkpoint: **final21/source129 passes all seven integrated gates**:
-**3,920 workspace tests** (two slow, six existing manual skips), **196 doctests**,
+Latest checkpoint: **final25/source140 passes all seven integrated gates**:
+**3,930 workspace tests** (two slow, six existing manual skips), **203 doctests**,
 **138 asset-consumer tests** (one existing manual scale skip), workspace and consumer
-strict all-target/all-feature Clippy, and both format checks. All **1,046** before/after/
-current input hashes, **155** frozen files and five current recorded user-note identities
+strict all-target/all-feature Clippy, and both format checks. All **1,049** before/after/
+current input hashes, **163** frozen files and five current recorded user-note identities
 match; the absent older note baseline is not reconstructed. The exact source/log
-association is `owned-finite-source129-integrated-association-1.json`. The independent
-`owned-finite-source129-integrated-evidence-review-1.md` authenticates all seven terminal
-commands, raw logs, source identities and counts; source127 and source129 source reviews
-close bounded GO within their own scopes. The earlier interim record stays historical.
-This is an owned body-error transport structural checkpoint. Complete finite final
-authoring/freeze/Core/Postprocess, layout/allocation/native/heap qualification, local-main
+association is `owned-finite-source140-integrated-association-1.json`. Shared and concrete
+finite source reviews and the source140 test closure close bounded GO. The final
+independent `owned-finite-source140-integrated-evidence-review-1.md` authenticates all
+seven terminal commands, raw logs, source identities, manual skips and counts and
+accepts this structural checkpoint. The earlier
+interim records stay historical. This is a final-only finite failure-authoring structural
+checkpoint. Complete finite success freeze/joint/Core/Postprocess,
+layout/allocation/native/heap qualification, local-main
 merge and release remain open.
+
+Historical final21/source129 independently passes 3,920 workspace tests, 196 doctests,
+138 consumer tests and all remaining strict/format gates with 1,046 stable inputs and
+155 frozen files. Its independent execution review authenticates that distinct earlier
+body-error transport checkpoint, without relabeling it as source140 evidence.
+
+The final-only failure-authoring shared borrowed algorithm retains the actual bound proof or complete
+unmatched decision before disposing the validator capture. Concrete guards retain
+original dynamic or finite fields and typed payload permissions; finite normal errors
+carry their original domain and residue. Prepared-cause quarantine uses the original
+rich-evidence or independent fallback account and retains the entire prepared owner.
+The bounded shared/dynamic source review closes GO, excluding finite integration and
+runtime. Source130 fails before tests on an over-deleted transcript count accessor and
+two new fixture borrow scopes. Source131 fixes those scopes and restores the concrete
+accessor, then fails before tests because its underlying raw accessor is also needed.
+Source132 restores that original accessor and runs 1,368 PASS/four new fixture failures.
+The four assertions used the work dimension rather than evidence destination, an
+inconsistent final progress total, or the wrong existing terminal-control precedence.
+Source134 then runs 1,371 PASS/one new fixture failure: cancellation was raised after
+the last controlled visit, so the trusted Reject had no interruption checkpoint.
+Source135 moves that signal before the actual controlled visit and passes all 1,372
+Operation tests and 143 Operation doctests. Strict52/source134 passes all targets and
+features; source135 has identical production bodies. Independent shared, finite and
+test/delta reviews close bounded GO. The latter requests a non-blocking correction to
+a minimal zero-evidence assertion's destination; it is not a production finding.
+Source136 adds actual final Fallback consumption and a recoverable-open/Build-disposal
+case. Full22 fails before tests on three old Import type annotations; source137 changes
+only those concrete Dynamic alias annotations/imports for full23's original
+seven gates. None of these attempts inherits full21's status or native acceptance.
+
+Full23/source137 finishes test compilation, then fails before test execution because
+the STL ascii executable is absent. Source138 rebuilds in the existing repository
+target and full24 runs 3,928 PASS/two new assertion failures (two slow, six existing
+manual skips), with 1,049 stable inputs and 163 matching frozen files. Both assertions
+query the right destination but wrongly assume zero fallback evidence. The original
+finite start fixture admits amount three there, and its existing tableless minimal
+test checks three. The source140 closure explicitly supersedes the earlier review's
+zero recommendation. Source139 is formatted but unexecuted and identical to138.
+
+Source140 changes only that test file: both expected amounts are the original three,
+and actual cumulative retained allocation/byte admissions are compared before cancel
+and after prepared runtime fallback. No production body changes follow source137.
+The bounded independent closure closes GO and preserves actual typed causes, Host-exit
+facts/domain/account identity, controlled cancellation and healthy-release assertions.
+Full25/source140 passes all seven gates: 3,930 workspace tests in 193.900 seconds,
+203 doctests, 138 consumer tests in 7.920 seconds, both strict Clippy and both format
+checks. These are correctness-run durations, not performance measurements. All 1,049
+inputs, 163 frozen files and five current user-note identities match. Passing
+ordinary-host unwind stderr/replayed output is counted once. Native convergence,
+finite success freeze/joint/Core/Postprocess, main integration and release remain open.
 
 Historical final20/source126 independently passes all seven gates: 3,916 workspace
 tests (two slow, six existing manual skips), 196 doctests, 138 consumer tests (one manual

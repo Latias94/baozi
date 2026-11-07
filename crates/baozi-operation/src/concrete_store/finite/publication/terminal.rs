@@ -3,6 +3,23 @@ use super::*;
 type SuccessPreparationResult<O, PP, U, CK, CT, EK, ET> =
     Result<PreparedFiniteStoreSuccessOutcome<CK, CT, EK, ET>, FiniteStoreExitError<O, PP, U>>;
 
+type FailureAssemblyParts<'inv, O, PP, U, EK, ET> = (
+    FiniteStoreFinalFields<'inv, O, PP, U>,
+    StorePublicationState,
+    PreparationFailureCode,
+    Option<PreparationFailureCode>,
+    OutcomeEvidenceStoreRef<EK, ET>,
+    Option<StorePrepareError>,
+);
+
+type FailurePreparationWithControlResult<O, PP, U, EK, ET> = Result<
+    (
+        PreparedFiniteStoreFailureOutcome<EK, ET>,
+        Option<ControlCause>,
+    ),
+    FiniteStoreExitError<O, PP, U>,
+>;
+
 /// An exact success proof alongside the original finite terminal fields.
 #[must_use = "validated finite success must be prepared or deliberately dropped"]
 pub struct ValidatedFiniteStoreSuccess<'inv, O, PP, U, CK, CT, EK, ET>
@@ -155,6 +172,19 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn into_failure_parts(
+        self,
+    ) -> FailureAssemblyParts<'inv, O, PP, U, PreservedKind, PreservedTag> {
+        (
+            self.fields,
+            self.state,
+            self.failure_cause,
+            self.forced_cause,
+            self.evidence_root,
+            self.error,
+        )
+    }
+
     pub(in crate::concrete_store) fn from_bound_fields(
         fields: FiniteStoreFinalFields<'inv, O, PP, U>,
         state: StorePublicationState,
@@ -410,18 +440,45 @@ where
     }
 }
 
-impl<O, PP, U, EK, ET> ValidatedFiniteStoreFailure<'_, O, PP, U, EK, ET>
+impl<'inv, O, PP, U, EK, ET> ValidatedFiniteStoreFailure<'inv, O, PP, U, EK, ET>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    pub(in crate::concrete_store) fn from_bound_fields(
+        fields: FiniteStoreFinalFields<'inv, O, PP, U>,
+        proof: RetainedEvidenceClosureProof<StoredBlock>,
+        forced_cause: Option<PreparationFailureCode>,
+        evidence_root: OutcomeEvidenceStoreRef<EK, ET>,
+    ) -> Self {
+        Self {
+            fields,
+            proof,
+            forced_cause,
+            evidence_root,
+        }
+    }
+
+    pub(in crate::concrete_store) fn into_request_error(self) -> FiniteStoreExitError<O, PP, U> {
+        self.fields.into_request_error(None)
+    }
+
     /// Freezes rich-failure evidence through the original finite terminal preparation.
     pub fn try_prepare(
         self,
         cause: u32,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<PreparedFiniteStoreFailureOutcome<EK, ET>, FiniteStoreExitError<O, PP, U>> {
+        self.try_prepare_with_control(cause, final_progress)
+            .map(|(prepared, _control)| prepared)
+    }
+
+    pub(in crate::concrete_store) fn try_prepare_with_control(
+        self,
+        cause: u32,
+        final_progress: FinalProgress<PP, U>,
+    ) -> FailurePreparationWithControlResult<O, PP, U, EK, ET> {
         let Self {
             mut fields,
             proof,
@@ -434,10 +491,9 @@ where
             final_progress,
         };
         match fields.raw.finish_assembly(request) {
-            Ok((raw, _control)) => Ok(terminal_output::finite::classify_failure(
-                raw,
-                evidence_root,
-                fields.take_domain(),
+            Ok((raw, control)) => Ok((
+                terminal_output::finite::classify_failure(raw, evidence_root, fields.take_domain()),
+                control,
             )),
             Err(failure) => Err(fields.terminal_error(failure)),
         }

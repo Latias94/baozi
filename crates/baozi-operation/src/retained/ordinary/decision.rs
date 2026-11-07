@@ -263,6 +263,13 @@ where
         Ok(self.map_success_validation(validation))
     }
 
+    pub(crate) fn bind_resolved_failure(
+        self,
+        validation: RetainedClosureValidation<RetainedEvidenceClosureProof<EB>>,
+    ) -> RetainedFailureValidation<'inv, O, P, PP, U, D, F, CB, EB> {
+        self.map_failure_validation(validation)
+    }
+
     pub(crate) fn bind_evidence_decision(
         self,
         decision: RetainedAssemblyDecision<CB, EB>,

@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod activation_tests;
 mod completion;
+#[cfg(test)]
+mod final_failure_tests;
 pub use completion::{
     FiniteCanonicalInvocationCompletion, FiniteCanonicalInvocationOutcome,
     FiniteCanonicalOperationCompletion,

@@ -7,24 +7,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    pub(super) fn new(
-        fallback: StoreFallbackOnly<'inv, O, PP, U>,
-        cause_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
-        cause: StoreRuntimeError,
-    ) -> Result<Self, StoreActivationContainment> {
-        match cause_slot.place(cause) {
-            Ok(cause) => Ok(Self {
-                owner: PayloadOwner::new(cause, fallback),
-            }),
-            Err(cause) => {
-                let _ = drop_scoped_value(cause);
-                Err(StoreActivationContainment {
-                    cause: fallback.contain_activation_fault(),
-                })
-            }
-        }
-    }
-
     /// The original evidence-construction or validation failure, before terminal preparation.
     pub const fn cause(&self) -> &StoreRuntimeError {
         self.owner.value().value()
@@ -109,7 +91,7 @@ where
         )
             -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
-        FailureEvidenceOutcome<
+        DynamicFailureEvidenceOutcome<
             'inv,
             O,
             PP,

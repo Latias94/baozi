@@ -3,6 +3,13 @@ use super::final_state::CanonicalFinal;
 use super::work_batch::CompletionPrefixBatch;
 use super::*;
 
+mod finite;
+mod validation;
+pub use finite::{
+    FiniteFailureEvidenceOutcome, FinitePreparedFailureEvidence, FiniteRejectedFailureEvidence,
+    FiniteRootedFailureEvidence, FiniteRootedFailureValidation, FiniteValidatedFailureEvidence,
+};
+
 impl CanonicalFailureTerminalWorkPlan {
     /// Qualifies caller policy ceilings into the protected requirement inside the total work cap.
     ///
@@ -1411,7 +1418,7 @@ pub(in crate::concrete_store) fn failure_evidence_validator<
 >(
     failure_work: &'callback FailureEvidenceWorkBudget,
     controlled_failure: &'callback mut Option<StoreRuntimeError>,
-    validate: &'callback mut ManuallyDrop<Option<Validate>>,
+    validate: &'callback mut Option<Validate>,
 ) -> impl for<'session, 'storage, 'control> FnOnce(
     StoreEvidenceValidationSession<'session, 'storage>,
     OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
@@ -1483,7 +1490,7 @@ where
     reason = "public failure typestates are sealed by the crate-private lifecycle contract"
 )]
 impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
-    RootedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+    DynamicRootedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1510,178 +1517,13 @@ where
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        RootedFailureValidation<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>,
+        DynamicRootedFailureValidation<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>,
         StoreActivationContainment,
     >
     where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let mut validate = ManuallyDrop::new(Some(validate));
-        let Self {
-            owner,
-            failure_work,
-            outcome_evidence_destination_dimension,
-            _lifecycle: _,
-        } = self;
-        let (cause, failure) = owner.into_parts();
-        if !fallback_slot.is_vacant_for(cause.identity()) {
-            let _ = drop_optional_callback(validate);
-            let _ = drop_scoped_value(cause);
-            return Err(StoreActivationContainment {
-                cause: failure.contain_activation_fault(),
-            });
-        }
-        let cause = ManuallyDrop::new(cause);
-        let evidence_root = failure.evidence_root();
-        let mut controlled_failure = None;
-        let validation = failure.validate_rich_failure_controlled(
-            evidence_root,
-            super::failure_evidence_validator(
-                &failure_work,
-                &mut controlled_failure,
-                &mut validate,
-            ),
-        );
-        if drop_optional_callback(validate).is_err() {
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-            let cause = match validation {
-                StoreFailureValidation::Valid(validated) => validated.contain_activation_fault(),
-                StoreFailureValidation::Rejected(failure) => failure.contain_activation_fault(),
-                StoreFailureValidation::FallbackOnly(fallback) => {
-                    fallback.contain_activation_fault()
-                }
-            };
-            return Err(StoreActivationContainment { cause });
-        }
-        if let Some(runtime_cause) = controlled_failure {
-            if drop_scoped_value(ManuallyDrop::into_inner(cause)).is_err() {
-                let cause = match validation {
-                    StoreFailureValidation::Valid(validated) => {
-                        validated.contain_activation_fault()
-                    }
-                    StoreFailureValidation::Rejected(failure) => failure.contain_activation_fault(),
-                    StoreFailureValidation::FallbackOnly(fallback) => {
-                        fallback.contain_activation_fault()
-                    }
-                };
-                return Err(StoreActivationContainment { cause });
-            }
-            let runtime_cause = match fallback_slot.place(runtime_cause) {
-                Ok(cause) => ManuallyDrop::new(cause),
-                Err(runtime_cause) => {
-                    let _ = drop_scoped_value(runtime_cause);
-                    let cause = match validation {
-                        StoreFailureValidation::Valid(validated) => {
-                            validated.contain_activation_fault()
-                        }
-                        StoreFailureValidation::Rejected(failure) => {
-                            failure.contain_activation_fault()
-                        }
-                        StoreFailureValidation::FallbackOnly(fallback) => {
-                            fallback.contain_activation_fault()
-                        }
-                    };
-                    return Err(StoreActivationContainment { cause });
-                }
-            };
-            let prepared = match validation {
-                StoreFailureValidation::Valid(validated) => validated.prepare_minimal_fallback(),
-                StoreFailureValidation::Rejected(failure) => failure.prepare_minimal_fallback(),
-                StoreFailureValidation::FallbackOnly(fallback) => {
-                    fallback.prepare_minimal_fallback()
-                }
-            };
-            return match prepared {
-                Ok(prepared) => Ok(RootedFailureValidation::Fallback(
-                    VerifiedMinimalFallback::new(
-                        prepared,
-                        ManuallyDrop::into_inner(runtime_cause).into_owned(),
-                    ),
-                )),
-                Err(StorePrepareError::FinalizationContainment(cause)) => {
-                    let _ = drop_scoped_value(ManuallyDrop::into_inner(runtime_cause));
-                    Err(StoreActivationContainment { cause })
-                }
-            };
-        }
-        match validation {
-            StoreFailureValidation::Valid(mut validated) => {
-                match State::validate_commitment(
-                    &mut validated,
-                    outcome_evidence_destination_dimension,
-                ) {
-                    Ok(()) => Ok(RootedFailureValidation::Valid(ValidatedFailureEvidence {
-                        owner: PayloadOwner::new(ManuallyDrop::into_inner(cause), validated),
-                        _lifecycle: PhantomData,
-                    })),
-                    Err(runtime_cause) => {
-                        if matches!(
-                            classify_activation_fault(&runtime_cause),
-                            ActivationFaultClassification::Contract
-                        ) {
-                            let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-                            return Err(StoreActivationContainment {
-                                cause: validated.contain_activation_fault(),
-                            });
-                        }
-                        if drop_scoped_value(ManuallyDrop::into_inner(cause)).is_err() {
-                            return Err(StoreActivationContainment {
-                                cause: validated.contain_activation_fault(),
-                            });
-                        }
-                        let runtime_cause = match fallback_slot.place(runtime_cause) {
-                            Ok(cause) => ManuallyDrop::new(cause),
-                            Err(runtime_cause) => {
-                                let _ = drop_scoped_value(runtime_cause);
-                                return Err(StoreActivationContainment {
-                                    cause: validated.contain_activation_fault(),
-                                });
-                            }
-                        };
-                        match validated.prepare_minimal_fallback() {
-                            Ok(prepared) => Ok(RootedFailureValidation::Fallback(
-                                VerifiedMinimalFallback::new(
-                                    prepared,
-                                    ManuallyDrop::into_inner(runtime_cause).into_owned(),
-                                ),
-                            )),
-                            Err(StorePrepareError::FinalizationContainment(cause)) => {
-                                let _ = drop_scoped_value(ManuallyDrop::into_inner(runtime_cause));
-                                Err(StoreActivationContainment { cause })
-                            }
-                        }
-                    }
-                }
-            }
-            StoreFailureValidation::Rejected(failure) => {
-                Ok(RootedFailureValidation::Rejected(RejectedFailureEvidence {
-                    owner: PayloadOwner::new(ManuallyDrop::into_inner(cause), failure),
-                }))
-            }
-            StoreFailureValidation::FallbackOnly(fallback) => {
-                let containment_required = fallback.activation_containment_required();
-                if drop_scoped_value(ManuallyDrop::into_inner(cause)).is_err() {
-                    return Err(StoreActivationContainment {
-                        cause: fallback.contain_activation_fault(),
-                    });
-                }
-                if containment_required {
-                    return Err(StoreActivationContainment {
-                        cause: fallback.contain_activation_fault(),
-                    });
-                }
-                PendingMinimalFallback::new(
-                    fallback,
-                    fallback_slot,
-                    activation_product_graph_cause(),
-                )?
-                .prepare_minimal_fallback()
-                .map(RootedFailureValidation::Fallback)
-                .map_err(|StorePrepareError::FinalizationContainment(cause)| {
-                    StoreActivationContainment { cause }
-                })
-            }
-        }
+        validation::validate_dynamic(self, fallback_slot, validate)
     }
 
     pub fn prepare_minimal_fallback(
@@ -1710,7 +1552,16 @@ where
 }
 
 impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, OrdinaryFailureState>
+    DynamicValidatedFailureEvidence<
+        'inv,
+        O,
+        PP,
+        U,
+        Cause,
+        EvidenceKind,
+        EvidenceTag,
+        OrdinaryFailureState,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1719,7 +1570,8 @@ where
     pub fn try_prepare(
         self,
         final_progress: FinalProgress<PP, U>,
-    ) -> Result<PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError> {
+    ) -> Result<DynamicPreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError>
+    {
         let Self {
             owner,
             _lifecycle: _,
@@ -1742,7 +1594,16 @@ where
 }
 
 impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, FrozenFailureState>
+    DynamicValidatedFailureEvidence<
+        'inv,
+        O,
+        PP,
+        U,
+        Cause,
+        EvidenceKind,
+        EvidenceTag,
+        FrozenFailureState,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1750,7 +1611,8 @@ where
 {
     pub fn try_prepare_frozen(
         self,
-    ) -> Result<PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError> {
+    ) -> Result<DynamicPreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError>
+    {
         let Self {
             owner,
             _lifecycle: _,
@@ -1773,7 +1635,7 @@ where
 }
 
 impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
-    ValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
+    DynamicValidatedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag, State>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1806,42 +1668,26 @@ where
     }
 }
 
-impl<Cause, EvidenceKind, EvidenceTag> PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag> {
-    fn new(
-        prepared: PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
-        cause: Cause,
-        final_control_cause: Option<ControlCause>,
-    ) -> Self {
+impl<Cause, Prepared: super::payload_owner::PayloadStorage>
+    PreparedFailureEvidence<Cause, Prepared>
+{
+    fn new(prepared: Prepared, cause: Cause, final_control_cause: Option<ControlCause>) -> Self {
         Self {
             cause: Some(cause),
             final_control_cause,
             prepared: Some(prepared),
         }
     }
-
     pub const fn cause(&self) -> &Cause {
         self.cause
             .as_ref()
             .expect("prepared failure evidence retains its cause until handoff")
     }
-
-    pub fn into_parts(
-        self,
-    ) -> (
-        PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
-        Cause,
-    ) {
+    pub fn into_parts(self) -> (Prepared, Cause) {
         let (prepared, cause, _) = self.into_parts_with_control();
         (prepared, cause)
     }
-
-    pub fn into_parts_with_control(
-        mut self,
-    ) -> (
-        PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
-        Cause,
-        Option<ControlCause>,
-    ) {
+    pub fn into_parts_with_control(mut self) -> (Prepared, Cause, Option<ControlCause>) {
         let prepared = self
             .prepared
             .take()
@@ -1853,9 +1699,8 @@ impl<Cause, EvidenceKind, EvidenceTag> PreparedFailureEvidence<Cause, EvidenceKi
         (prepared, cause, self.final_control_cause.take())
     }
 }
-
-impl<Cause, EvidenceKind, EvidenceTag> Drop
-    for PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>
+impl<Cause, Prepared: super::payload_owner::PayloadStorage> Drop
+    for PreparedFailureEvidence<Cause, Prepared>
 {
     fn drop(&mut self) {
         let Some(cause) = self.cause.take() else {
@@ -1864,7 +1709,7 @@ impl<Cause, EvidenceKind, EvidenceTag> Drop
         let already_unwinding = std::thread::panicking();
         if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(cause))) {
             if let Some(prepared) = self.prepared.take() {
-                prepared.quarantine_cause_drop_failure();
+                prepared.contain_payload_failure();
             }
             if already_unwinding {
                 discard_untrusted_panic_payload(payload);
@@ -1876,7 +1721,7 @@ impl<Cause, EvidenceKind, EvidenceTag> Drop
 }
 
 impl<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
-    RejectedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
+    DynamicRejectedFailureEvidence<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1905,21 +1750,21 @@ where
     }
 }
 
-impl<Cause> VerifiedMinimalFallback<Cause> {
-    pub(super) fn new(prepared: PreparedStoreFallback, cause: Cause) -> Self {
+impl<Cause, Prepared: super::payload_owner::PayloadStorage>
+    VerifiedMinimalFallback<Cause, Prepared>
+{
+    pub(super) fn new(prepared: Prepared, cause: Cause) -> Self {
         Self {
             cause: Some(cause),
             prepared: Some(prepared),
         }
     }
-
     pub const fn cause(&self) -> &Cause {
         self.cause
             .as_ref()
             .expect("verified minimal fallback retains its cause until handoff")
     }
-
-    pub fn into_parts(mut self) -> (PreparedStoreFallback, Cause) {
+    pub fn into_parts(mut self) -> (Prepared, Cause) {
         let prepared = self
             .prepared
             .take()
@@ -1931,8 +1776,9 @@ impl<Cause> VerifiedMinimalFallback<Cause> {
         (prepared, cause)
     }
 }
-
-impl<Cause> Drop for VerifiedMinimalFallback<Cause> {
+impl<Cause, Prepared: super::payload_owner::PayloadStorage> Drop
+    for VerifiedMinimalFallback<Cause, Prepared>
+{
     fn drop(&mut self) {
         let Some(cause) = self.cause.take() else {
             return;
@@ -1940,7 +1786,7 @@ impl<Cause> Drop for VerifiedMinimalFallback<Cause> {
         let already_unwinding = std::thread::panicking();
         if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(cause))) {
             if let Some(prepared) = self.prepared.take() {
-                prepared.quarantine_cause_drop_failure();
+                prepared.contain_payload_failure();
             }
             if already_unwinding {
                 discard_untrusted_panic_payload(payload);
@@ -2043,7 +1889,7 @@ where
         )
             -> FailureEvidenceDecision<EvidenceKind, EvidenceTag>,
     ) -> Result<
-        FailureEvidenceOutcome<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>,
+        DynamicFailureEvidenceOutcome<'inv, O, PP, U, Cause, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
     >
     where

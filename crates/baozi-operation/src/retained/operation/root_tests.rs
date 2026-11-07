@@ -2167,7 +2167,7 @@ fn deferred_failure_and_fallback_preserve_protected_work_and_original_causes() {
     let panic_cause =
         PreparationFailureCode::from_closure_validation(RetainedClosureValidationError::Panicked);
     assert_eq!(fallback.cause, panic_cause);
-    assert!(!fallback.activation_containment_required());
+    assert!(!fallback.activation_containment_required);
     assert!(fallback.defer_until_body_cleanup().is_ok());
     assert!(root.resume_deferred_failure().is_none());
     assert!(root.resume_deferred_success().is_none());
@@ -2176,7 +2176,7 @@ fn deferred_failure_and_fallback_preserve_protected_work_and_original_causes() {
         .resume_deferred_fallback()
         .unwrap_or_else(|| panic!("the actual fallback stage must remain pending"));
     assert_eq!(fallback.cause, panic_cause);
-    assert!(!fallback.activation_containment_required());
+    assert!(!fallback.activation_containment_required);
     assert_eq!(
         fallback
             .assembly
@@ -3642,7 +3642,9 @@ fn validated_rich_failure_discards_real_canonical_table_before_ready_and_preserv
             _ => panic!("the real evidence closure must validate"),
         };
         validated
-            .try_stage_exact_outcome_evidence(1)
+            .assembly
+            .loan_mut()
+            .try_stage_exact_outcome_evidence(&validated.proof, 1)
             .unwrap_or_else(|_| {
                 panic!("the real evidence member must receive its exact commitment")
             });
