@@ -1,8 +1,16 @@
 # Finish one parser piece through its original host
 
-Status: prospective design, not implementation GO or a measured improvement.
-The implementation baseline is qualified `0452a73`; rejected root-local body
-candidate `d62cf67` remains isolated. Original release/main gates remain HOLD.
+Status: independent design and production source reviews close GO. The
+Implementation `2bdc37a` passes affected checking, all 1,403 Operation
+tests, all 665 Import/OBJ tests and affected strict Clippy on frozen source2.
+Test/format binding review closes GO. The original seven integrated gates all
+pass: 3,976 workspace tests, 220 doctests, 138 consumer tests, both strict
+Clippy gates and both formats. Independent terminal-receipt review closes GO
+for the exact source2 bytes and staged blobs. All 1,061 committed archive,
+frozen, QA and current input hashes match; independent commit-association
+review and measurements remain pending. The implementation baseline is qualified
+`0452a73`; rejected root-local body candidate `d62cf67` remains isolated.
+Original release/main gates remain HOLD.
 
 ## Problem and attribution
 
@@ -143,3 +151,7 @@ Keep only demonstrated same-task native improvement beyond dispersion with
 no unexplained affected regression, under the original convergence targets.
 A failed screen remains failed and does not invite threshold changes or
 broader ownership rewrites to save the experiment.
+
+The [implementation checkpoint](../reviews/2026-11-09-single-piece-parser.md)
+records actual source2 checks and source1's preserved fixture compilation
+failure. No generated-code or measured gain follows from those passes.
