@@ -165,7 +165,7 @@ pub fn convert_scene_space(
         options,
         source_generation,
         result,
-        invocation_error,
+        &mut invocation_error,
         body_cause,
     )
 }
@@ -180,7 +180,7 @@ fn finish_conversion(
     options: SpaceConversionOptions,
     source_generation: baozi_core::SceneGenerationId,
     result: Result<EditTerminal, EditFailure>,
-    mut invocation_error: Option<EditInvocationError>,
+    invocation_error: &mut Option<EditInvocationError>,
     body_cause: Option<SpaceConversionCause>,
 ) -> Result<PostProcessRunOutcome, PostProcessRunFailure> {
     match result {

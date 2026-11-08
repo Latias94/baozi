@@ -410,7 +410,7 @@ pub(crate) fn run(
         options,
         source_generation,
         result,
-        invocation_error,
+        &mut invocation_error,
         body_cause,
     )
 }
@@ -426,7 +426,7 @@ fn finish_preparation(
     options: TrianglePreparationOptions,
     source_generation: baozi_core::SceneGenerationId,
     result: Result<EditTerminal, EditFailure>,
-    mut invocation_error: Option<EditInvocationError>,
+    invocation_error: &mut Option<EditInvocationError>,
     body_cause: Option<PreparationCause>,
 ) -> Result<PostProcessRunOutcome, PostProcessRunFailure> {
     match result {
