@@ -11,7 +11,7 @@ use crate::ledger::ImportProgressPhase;
 use crate::metered_storage::{MeteredDecodedText, MeteredVec, metered_vec_replacement_plan};
 use crate::scope::{
     ImportStorageClass, ImportWorkClass, METERED_COPY_POLL_INTERVAL, ParseChildren, ParseErrorView,
-    ParseFailure, ParseParser, ParseReadRow, ParseResult, ParseServices,
+    ParseFailure, ParseReadRow, ParseResult, ParseServices,
 };
 use baozi_operation::__retained_store_integration::activation::StoreScanReturn;
 use std::fmt;
@@ -1524,79 +1524,94 @@ fn build_text_input<'session>(
         }
         let mut offset = plan.input_start;
         let mut valid_run_start = offset;
+        let errors = scope.error_view();
         while offset < bytes.len() {
-            cursor.poll_before_unit(scope, facts, bytes, offset)?;
-            let unit = scope.run_returned(|| {
-                let unit = TextEmission::read(bytes, offset);
-                Ok((unit, [unit.raw_len() as u64]))
-            })?;
-            let unit_end =
-                checked_add_usize(scope.error_view(), offset, unit.raw_len(), options.resource)?;
-            match unit {
-                TextEmission::Valid { newline, .. } => {
-                    if unit_end.saturating_sub(valid_run_start) > TEXT_INPUT_WORK_CHUNK_BYTES {
-                        append_valid_run(
-                            scope.error_view(),
-                            &mut text,
-                            bytes,
-                            valid_run_start,
-                            offset,
-                        )?;
-                        valid_run_start = offset;
+            let exit = scope.with_read_row(&mut |reads| {
+                while offset < bytes.len() {
+                    if cursor.poll_before_unit_due(facts, bytes, offset) {
+                        return Ok(TextEmissionRegionExit::RawPoll);
                     }
-                    if newline {
-                        append_valid_run(
-                            scope.error_view(),
-                            &mut text,
-                            bytes,
-                            valid_run_start,
-                            unit_end,
-                        )?;
-                        if unit_end < bytes.len() {
-                            line_starts.try_push_reserved(TextInputLineStart {
-                                raw_offset: raw_offset(scope.error_view(), options, unit_end)?,
-                                decoded_offset: text.len(),
-                                replacement_index: replacements.len(),
-                            })?;
+                    if !reads.ready_for_read()? {
+                        return Ok(TextEmissionRegionExit::DebtPoll);
+                    }
+                    let unit = TextEmission::read(bytes, offset);
+                    reads.complete_read(unit.raw_len() as u64)?;
+                    let unit_end =
+                        checked_add_usize(errors, offset, unit.raw_len(), options.resource)?;
+                    match unit {
+                        TextEmission::Valid { newline, .. } => {
+                            if unit_end.saturating_sub(valid_run_start)
+                                > TEXT_INPUT_WORK_CHUNK_BYTES
+                            {
+                                append_valid_run(
+                                    errors,
+                                    &mut text,
+                                    bytes,
+                                    valid_run_start,
+                                    offset,
+                                )?;
+                                valid_run_start = offset;
+                            }
+                            if newline {
+                                append_valid_run(
+                                    errors,
+                                    &mut text,
+                                    bytes,
+                                    valid_run_start,
+                                    unit_end,
+                                )?;
+                                if unit_end < bytes.len() {
+                                    line_starts.try_push_reserved(TextInputLineStart {
+                                        raw_offset: raw_offset(errors, options, unit_end)?,
+                                        decoded_offset: text.len(),
+                                        replacement_index: replacements.len(),
+                                    })?;
+                                }
+                                valid_run_start = unit_end;
+                            } else if unit_end.saturating_sub(valid_run_start)
+                                >= TEXT_INPUT_WORK_CHUNK_BYTES
+                            {
+                                append_valid_run(
+                                    errors,
+                                    &mut text,
+                                    bytes,
+                                    valid_run_start,
+                                    unit_end,
+                                )?;
+                                valid_run_start = unit_end;
+                            }
                         }
-                        valid_run_start = unit_end;
-                    } else if unit_end.saturating_sub(valid_run_start)
-                        >= TEXT_INPUT_WORK_CHUNK_BYTES
-                    {
-                        append_valid_run(
-                            scope.error_view(),
-                            &mut text,
-                            bytes,
-                            valid_run_start,
-                            unit_end,
-                        )?;
-                        valid_run_start = unit_end;
+                        TextEmission::Replacement { .. } => {
+                            append_valid_run(errors, &mut text, bytes, valid_run_start, offset)?;
+                            let raw_range = raw_range_parse(errors, options, offset, unit_end)?;
+                            let decoded_start = text.len();
+                            text.try_push_str_reserved("\u{fffd}")?;
+                            let decoded_end = text.len();
+                            replacements.try_push_reserved(TextInputReplacement::new(
+                                raw_range,
+                                decoded_start,
+                                decoded_end,
+                            ))?;
+                            valid_run_start = unit_end;
+                        }
+                    }
+                    offset = unit_end;
+                    #[cfg(test)]
+                    tests::classified_unit(tests::ScanPass::Building, offset);
+                    if offset >= cursor.next_poll_at {
+                        return Ok(TextEmissionRegionExit::RawPoll);
                     }
                 }
-                TextEmission::Replacement { .. } => {
-                    append_valid_run(
-                        scope.error_view(),
-                        &mut text,
-                        bytes,
-                        valid_run_start,
-                        offset,
-                    )?;
-                    let raw_range = raw_range_parse(scope.error_view(), options, offset, unit_end)?;
-                    let decoded_start = text.len();
-                    text.try_push_str_reserved("\u{fffd}")?;
-                    let decoded_end = text.len();
-                    replacements.try_push_reserved(TextInputReplacement::new(
-                        raw_range,
-                        decoded_start,
-                        decoded_end,
-                    ))?;
-                    valid_run_start = unit_end;
+                Ok(TextEmissionRegionExit::Exhausted)
+            })?;
+            match exit {
+                TextEmissionRegionExit::Exhausted => break,
+                TextEmissionRegionExit::RawPoll => {
+                    scope.poll()?;
+                    cursor.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
                 }
+                TextEmissionRegionExit::DebtPoll => scope.poll()?,
             }
-            offset = unit_end;
-            #[cfg(test)]
-            tests::classified_unit(tests::ScanPass::Building, offset);
-            cursor.poll_if_chunk_complete(scope, offset)?;
         }
         append_valid_run(
             scope.error_view(),
@@ -1650,6 +1665,12 @@ fn append_valid_run(
 enum TextEmission {
     Valid { raw_len: usize, newline: bool },
     Replacement { raw_len: usize },
+}
+
+enum TextEmissionRegionExit {
+    Exhausted,
+    RawPoll,
+    DebtPoll,
 }
 
 impl TextEmission {
@@ -1876,20 +1897,6 @@ impl WorkCursor {
         }
     }
 
-    fn poll_before_unit(
-        &mut self,
-        scope: &mut ParseParser<'_, '_, '_, '_, '_, 1, true>,
-        facts: &TextProfileFacts,
-        bytes: &[u8],
-        offset: usize,
-    ) -> ParseResult<()> {
-        if self.poll_before_unit_due(facts, bytes, offset) {
-            scope.poll()?;
-            self.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
-        }
-        Ok(())
-    }
-
     fn poll_before_unit_due(&self, facts: &TextProfileFacts, bytes: &[u8], offset: usize) -> bool {
         if offset.saturating_add(4) <= self.next_poll_at {
             return false;
@@ -1897,18 +1904,6 @@ impl WorkCursor {
         // Only bounded width lookahead precedes the poll; semantic classification follows it.
         let raw_len = text_unit_raw_len(facts, bytes, offset);
         offset.saturating_add(raw_len) > self.next_poll_at
-    }
-
-    fn poll_if_chunk_complete(
-        &mut self,
-        scope: &mut ParseParser<'_, '_, '_, '_, '_, 1, true>,
-        offset: usize,
-    ) -> ParseResult<()> {
-        if offset >= self.next_poll_at {
-            scope.poll()?;
-            self.next_poll_at = offset.saturating_add(TEXT_INPUT_WORK_CHUNK_BYTES);
-        }
-        Ok(())
     }
 }
 
@@ -2014,6 +2009,7 @@ mod tests {
     use baozi_core::FormatId;
     use baozi_io::AssetPath;
     use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2022,12 +2018,17 @@ mod tests {
         Building,
     }
 
+    enum FrontierAction {
+        Cancel(CancellationToken),
+        Panic,
+    }
+
     struct FrontierProbe {
         pass: ScanPass,
         trigger_offset: usize,
         completed: usize,
         raised_at: Option<usize>,
-        token: Option<CancellationToken>,
+        action: Option<FrontierAction>,
     }
 
     thread_local! {
@@ -2037,7 +2038,7 @@ mod tests {
     struct FrontierProbeGuard(PhantomData<Rc<()>>);
 
     impl FrontierProbeGuard {
-        fn install(pass: ScanPass, trigger_offset: usize, token: CancellationToken) -> Self {
+        fn install(pass: ScanPass, trigger_offset: usize, action: FrontierAction) -> Self {
             FRONTIER_PROBE.with(|slot| {
                 let mut slot = slot.borrow_mut();
                 assert!(slot.is_none());
@@ -2046,7 +2047,7 @@ mod tests {
                     trigger_offset,
                     completed: 0,
                     raised_at: None,
-                    token: Some(token),
+                    action: Some(action),
                 });
             });
             Self(PhantomData)
@@ -2069,7 +2070,7 @@ mod tests {
     }
 
     pub(super) fn classified_unit(pass: ScanPass, completed: usize) {
-        let token = FRONTIER_PROBE.with(|slot| {
+        let action = FRONTIER_PROBE.with(|slot| {
             let mut slot = slot.borrow_mut();
             let probe = slot.as_mut()?;
             if probe.pass != pass {
@@ -2078,13 +2079,15 @@ mod tests {
             probe.completed = completed;
             if completed == probe.trigger_offset && probe.raised_at.is_none() {
                 probe.raised_at = Some(completed);
-                probe.token.take()
+                probe.action.take()
             } else {
                 None
             }
         });
-        if let Some(token) = token {
-            token.cancel();
+        match action {
+            Some(FrontierAction::Cancel(token)) => token.cancel(),
+            Some(FrontierAction::Panic) => panic!("injected text emission prefix panic"),
+            None => {}
         }
     }
 
@@ -2181,7 +2184,11 @@ mod tests {
                     (1, TEXT_INPUT_WORK_CHUNK_BYTES)
                 };
                 let token = CancellationToken::new();
-                let probe = FrontierProbeGuard::install(pass, trigger, token.clone());
+                let probe = FrontierProbeGuard::install(
+                    pass,
+                    trigger,
+                    FrontierAction::Cancel(token.clone()),
+                );
                 let failure = plan
                     .read_bytes(
                         AssetPath::new("frontier.txt").unwrap(),
@@ -2219,6 +2226,107 @@ mod tests {
                 assert!(failure.diagnostics().is_empty());
             }
         }
+    }
+
+    struct EmissionUnwindImporter;
+
+    impl Format for EmissionUnwindImporter {
+        type Options = crate::NoFormatOptions;
+
+        fn compile_defaults(
+            &self,
+            scope: &mut crate::RegistryBuildScope<'_>,
+        ) -> Result<crate::CompiledOptions<Self::Options>, crate::OptionCompileError> {
+            crate::NoFormatOptions::compile_defaults(scope)
+        }
+
+        fn descriptor(&self) -> FormatDescriptor {
+            FrontierImporter.descriptor()
+        }
+
+        fn detect(
+            &self,
+            probe: &crate::Probe<'_>,
+            hint: &ReadHint,
+            scope: &mut DetectionScope<'_, '_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            FrontierImporter.detect(probe, hint, scope)
+        }
+
+        fn parse(
+            &self,
+            _options: &Self::Options,
+            context: &mut crate::ParseContext<'_, '_>,
+        ) -> ParseResult<()> {
+            context.with_execution(|exec| -> ParseResult<()> {
+                let descriptor = self.descriptor();
+                let facts = TextProfileFacts::new(descriptor.text_profile().unwrap());
+                let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "unwind-text");
+                let source = exec.services()?.diagnostic_source();
+                let mut children = exec.children()?;
+                let later = children.bind_group([ImportWorkClass::DecodeWork])?;
+                let plan = match plan_text_input(&mut children, &facts, source.bytes(), options) {
+                    Ok(plan) => plan,
+                    Err(TextInputScanError::Scope(failure)) => return Err(failure),
+                    Err(TextInputScanError::Violation(_)) => panic!("unwind fixture must conform"),
+                };
+                let caught = catch_unwind(AssertUnwindSafe(|| {
+                    build_text_input(&mut children, &facts, source.bytes(), options, plan, true)
+                }));
+                let Err(payload) = caught else {
+                    panic!("the real emission prefix must unwind before returning an input");
+                };
+                assert_eq!(
+                    payload.downcast_ref::<&str>().copied(),
+                    Some("injected text emission prefix panic")
+                );
+                let failure = children
+                    .child(&later, [1], |_| -> ParseResult<()> {
+                        panic!("caught emission unwind must reject later physical work")
+                    })
+                    .expect_err("an abandoned emission cannot resume or report success");
+                Err(failure)
+            })
+        }
+    }
+
+    #[test]
+    fn emission_unwind_keeps_committed_prefix_and_rejects_later_work() {
+        let mut registry = RegistryBuilder::new();
+        registry.register(EmissionUnwindImporter).unwrap();
+        let request = registry
+            .freeze(RegistryBuildLimits::default())
+            .unwrap()
+            .plan(&ImportRequest::new(), OptionCompileLimits::default())
+            .unwrap();
+        let probe = FrontierProbeGuard::install(ScanPass::Building, 2, FrontierAction::Panic);
+        let failure = request
+            .read_bytes(
+                AssetPath::new("unwind.txt").unwrap(),
+                b"a\nb\n",
+                ImportOperationControl::default(),
+            )
+            .expect_err("caught emission unwind must remain an import failure")
+            .into_operation_failure()
+            .expect("ordinary failed emission");
+        let probe = probe.finish();
+        assert_eq!((probe.raised_at, probe.completed), (Some(2), 2));
+        assert!(matches!(
+            failure.cause(),
+            ImportCause::Scope(abort) if matches!(
+                abort.cause(),
+                ScopeAbortCause::DescriptorContract { code: "import-store-runtime-contract" }
+            )
+        ));
+        let decode = failure
+            .ledger()
+            .dimension(ImportDimension::DecodeWork)
+            .unwrap();
+        assert_eq!((decode.attempted(), decode.consumed()), (8, 6));
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        assert_eq!(failure.ledger().active_reservations(), 0);
+        assert_eq!(failure.ledger().committed_canonical_members(), 0);
+        assert!(failure.diagnostics().is_empty());
     }
 
     struct AllocationFailureImporter;
