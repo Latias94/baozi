@@ -169,6 +169,73 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>
         self.context.parser_child(layout, amounts, limits, body)
     }
 
+    /// Executes one exact child piece under its original frame host. The caller retains
+    /// uncalled captures until admission/runtime errors have been projected.
+    ///
+    /// An owning result can leave the piece:
+    ///
+    /// ```
+    /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+    /// use baozi_operation::__retained_store_integration::activation::{
+    ///     StoreChildAdmission, StoreInvocationError, StoreInvocationLayout,
+    ///     StoreOrdinaryStorage,
+    /// };
+    /// fn piece<'op, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+    ///     children: &mut StoreChildAdmission<'_, 'op, O, P, U>,
+    ///     layout: StoreInvocationLayout<'op, 1>,
+    /// ) -> Result<u32, StoreInvocationError> {
+    ///     let mut action = Some(|_storage: StoreOrdinaryStorage<'_, 'op, O, P, U>| {
+    ///         Ok::<_, StoreInvocationError>((7, [1]))
+    ///     });
+    ///     children.run_piece_with_storage(
+    ///         layout, [1], [None], &mut action, |cause| cause, |_, cause| cause,
+    ///     )
+    /// }
+    /// ```
+    ///
+    /// The piece cannot return its storage loan:
+    ///
+    /// ```compile_fail
+    /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+    /// use baozi_operation::__retained_store_integration::activation::{
+    ///     StoreChildAdmission, StoreInvocationError, StoreInvocationLayout,
+    ///     StoreOrdinaryStorage,
+    /// };
+    /// fn escape<'op, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+    ///     children: &mut StoreChildAdmission<'_, 'op, O, P, U>,
+    ///     layout: StoreInvocationLayout<'op, 1>,
+    /// ) {
+    ///     let mut action = Some(|storage: StoreOrdinaryStorage<'_, 'op, O, P, U>| {
+    ///         Ok::<_, StoreInvocationError>((storage, [1]))
+    ///     });
+    ///     let _ = children.run_piece_with_storage(
+    ///         layout, [1], [None], &mut action, |cause| cause, |_, cause| cause,
+    ///     );
+    /// }
+    /// ```
+    pub fn run_piece_with_storage<T, P, E, F, const N: usize>(
+        &mut self,
+        layout: StoreInvocationLayout<'op, N>,
+        amounts: [u64; N],
+        limits: [Option<u64>; N],
+        action: &mut Option<F>,
+        project: impl FnOnce(StoreInvocationError) -> E,
+        materialize: impl FnOnce(&mut StoreInvocationParser<'_, '_, 'op, O, PP, U, N, true>, P) -> E,
+    ) -> Result<T, E>
+    where
+        E: From<StoreInvocationError>,
+        F: for<'s> FnOnce(StoreOrdinaryStorage<'s, 'op, O, PP, U>) -> Result<(T, [u64; N]), P>,
+    {
+        self.context.parser_piece_with_storage(
+            layout,
+            amounts,
+            limits,
+            action,
+            project,
+            materialize,
+        )
+    }
+
     pub fn scan_child<T, E: From<StoreInvocationError>, const N: usize>(
         &mut self,
         layout: StoreInvocationLayout<'op, N>,

@@ -468,6 +468,56 @@ impl<'op, 'session> ParseChildren<'_, 'op, 'session> {
         self.finish_parser(result, layout.item_limits)
     }
 
+    /// Runs and closes one child piece through its original parser host.
+    /// Format evidence is captured before that host's parser frame closes.
+    pub fn run_piece_with_storage<T, P: FormatFailureEvidenceProducer, const N: usize>(
+        &mut self,
+        layout: &ParseWorkLayout<'op, N>,
+        amounts: [u64; N],
+        action: impl for<'piece> FnOnce(
+            ParseStorage<'piece, 'op, 'session>,
+        ) -> Result<(T, [u64; N]), ParsePieceError<P>>,
+    ) -> ParseResult<T> {
+        self.views.preflight()?;
+        let views = self.views;
+        let vocabulary = self.vocabulary;
+        let mut action = Some(action);
+        let mut slot = Some(|raw: OrdinaryStorage<'_, 'op>| {
+            let action = action
+                .take()
+                .expect("a host-owned parser piece callback runs once");
+            action(ParseStorage::new(
+                crate::store::ImportOrdinaryStorage::new(raw, vocabulary),
+                views.identity(),
+                views.callback_active,
+            ))
+        });
+        let result: Result<T, ImportExecutionFailure<ParseFailure>> =
+            self.numeric.run_piece_with_storage(
+                layout.raw,
+                amounts,
+                layout
+                    .item_limits
+                    .map(|limit| limit.map(|(_, limit)| limit)),
+                &mut slot,
+                |cause| ImportExecutionFailure::Owned(views.runtime(vocabulary, cause)),
+                |numeric, cause| {
+                    ImportExecutionFailure::Owned(match cause {
+                        ParsePieceError::Parse(cause) => cause,
+                        ParsePieceError::Format(producer) => capture_format_failure(
+                            FormatFailureHost::exclusive(
+                                numeric.failure_storage(),
+                                vocabulary,
+                                views,
+                            ),
+                            producer,
+                        ),
+                    })
+                },
+            );
+        self.finish_parser(result, layout.item_limits)
+    }
+
     /// Closes a scan after its explicit normal boundary or exhausted result.
     #[allow(
         clippy::result_large_err,

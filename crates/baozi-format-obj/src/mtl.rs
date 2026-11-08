@@ -705,8 +705,10 @@ fn tokenize_mtl<'op, 'session, 'input>(
                 usize_amount(&children.services()?, end - start, "obj-mtl-token-bytes")?,
             ];
             let errors = children.error_view();
-            children.child(&token_work.tokens, amounts, |work| {
-                work.run_returned_with_storage::<_, crate::ObjFailure>(|mut storage| {
+            children.run_piece_with_storage::<_, crate::ObjFailure, _>(
+                &token_work.tokens,
+                amounts,
+                |mut storage| {
                     let column = start
                         .checked_add(1)
                         .and_then(|column| u32::try_from(column).ok())
@@ -721,8 +723,8 @@ fn tokenize_mtl<'op, 'session, 'input>(
                         },
                     )?;
                     Ok(((), amounts))
-                })
-            })
+                },
+            )
         },
     )?;
     Ok(())

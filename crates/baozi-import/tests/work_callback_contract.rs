@@ -1,3 +1,5 @@
+#[path = "work_callback_contract/single_piece.rs"]
+mod single_piece;
 mod support;
 
 use baozi_core::FormatId;
