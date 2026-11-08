@@ -1364,3 +1364,15 @@ existing target; measurement copies may live on the measured native filesystem.
 Refresh final documentation and the exact37-path commit scope after evidence review;
 never stage the five user notes. Local-main/native/release acceptance remains closed
 until its actual required evidence supports the disposition.
+
+The fixed `00b54f4`/`b76fbc0` consumer comparison now has separately reviewed
+[Windows ordinary evidence](../reviews/2026-11-08-finite-consumer-windows.md)
+and [GNU attempt1 evidence](../reviews/2026-11-08-finite-consumer-gnu.md), with
+complete110-lane exports and every unavailable campaign preserved. Windows
+candidate native convergence fails; GNU candidate ordinary intervals remain
+unavailable. The [diagnostic checkpoint](../reviews/2026-11-08-finite-consumer-attribution.md)
+records all six instruction regressions and bounded allocator calibration,
+including the retained failed first calibration. Actual worker heap qualification
+and any next source experiment have their own evidence requirements. Main/runtime
+integration and release remain HOLD; do not infer source performance acceptance
+from functional QA, finite ownership completion or diagnostic collection alone.
