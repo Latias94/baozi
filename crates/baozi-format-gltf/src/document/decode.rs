@@ -2,7 +2,10 @@ use super::schema::*;
 use crate::GltfFailure;
 use crate::json_syntax::{DecodedScalars, IndexedValue, JsonIndex, ValueId, ValueKind};
 use baozi_import::ImportWorkClass;
-use baozi_import::{ImportStorageClass, ParseResult, ParseRoot};
+use baozi_import::{ImportStorageClass, ParseResult, ParseRoot, ParseWorkLayout};
+
+#[cfg(test)]
+mod tests;
 
 // Document views may be shorter than the session supplying admitted storage.
 // Keep execution explicit so decoded rows never retain an execution-region borrow.
@@ -51,15 +54,23 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         )
     }
 
-    fn key_eq<'session: 'scope>(
+    fn key_eq<'op, 'session: 'scope>(
         &self,
         id: ValueId,
         key: &str,
-        ctx: &mut ParseRoot<'_, '_, 'session>,
+        layout: &mut Option<ParseWorkLayout<'op, 1>>,
+        ctx: &mut ParseRoot<'_, 'op, 'session>,
     ) -> ParseResult<bool> {
         let value = self.value(id);
         let amount = (value.key_end - value.key_start) as u64 + 1;
-        let layout = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        let layout = match *layout {
+            Some(layout) => layout,
+            None => {
+                let bound = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+                *layout = Some(bound);
+                bound
+            }
+        };
         let compared = ctx.child(&layout, [amount], |child| {
             child.run([amount], || {
                 Ok::<_, baozi_import::ParseFailure>((|| -> Result<bool, GltfFailure> {
@@ -91,8 +102,9 @@ impl<'a, 'scope> Decoder<'a, 'scope> {
         ctx: &mut ParseRoot<'_, '_, 'session>,
     ) -> ParseResult<Option<ValueId>> {
         self.object(object, ctx)?;
+        let mut layout = None;
         for id in self.children(object) {
-            if self.key_eq(id, key, ctx)? {
+            if self.key_eq(id, key, &mut layout, ctx)? {
                 return Ok(Some(id));
             }
         }
