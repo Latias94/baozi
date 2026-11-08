@@ -179,3 +179,19 @@ warnings. The tiny task confirms three constructor calls become one; its
 separate earlier-control comparison is descriptive, not native timing.
 Ordinary Windows/GNU comparison and calibrated heap qualification remain
 separate requirements; no candidate native or memory result is inferred.
+
+## Native and heap collection checkpoint
+
+The [native and tracked-heap report](../reviews/2026-11-08-import-policy-owner-native-heap.md)
+records terminal attempts without replacing earlier missing campaigns. Windows
+completes all four original campaigns; both candidate repeats have nine pipeline
+medians above 3x and thirty common endpoints at least 10x. The late control
+retains 102/144 busy named-tool snapshots. GNU completes C0/N0, with fourteen
+candidate pipeline medians above 3x; N1/C1 terminate not started after their
+prospective quiet-start deadlines. All available whole-child memory median
+ratios stay below 3x. Separate eighteen-worker heap collection observes 56 fewer
+candidate allocation calls in each original task, with unchanged rounded peak
+displays. Both native actual evidence reviews close with GO; heap actual
+stack/interception review closes with bounded GO, retaining calibration and
+temporary-classification limits. Native
+convergence, source retention, main/runtime integration and release remain HOLD.

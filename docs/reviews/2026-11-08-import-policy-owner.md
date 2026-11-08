@@ -154,3 +154,14 @@ or heap result is available here. Original 14-case/110-lane three-warmup /
 twenty-retained-pair comparisons and separate representative calibrated heap
 attribution remain required, preserving all signs, failures, memory limits,
 missing campaigns and source/ownership obligations.
+
+The later [native and tracked-heap checkpoint](2026-11-08-import-policy-owner-native-heap.md)
+supersedes that pending collection status. Windows completes C0/N0/N1/C1;
+GNU completes C0/N0 only and terminates N1/C1 not started. Both Windows
+candidates fail the pipeline target and share thirty endpoints at least 10x.
+All eighteen heap workers complete with 56 fewer candidate allocation calls
+per task and equal rounded control/candidate peak displays. Independent actual
+Windows/GNU evidence reviews close with GO; heap stack/interception review closes
+with bounded GO, locating the reduction in policy-construction stacks while
+retaining unknown frames and temporary-classification differences. No source-speed
+acceptance, main integration or release follows.

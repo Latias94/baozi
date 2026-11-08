@@ -1001,3 +1001,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   both grid warnings, unknown labels and the extra tiny-STL three-to-one
   constructor attribution. New ordinary and calibrated heap results remain
   pending. Source retention, main/runtime integration and release remain HOLD.
+- The later [policy-owner native/heap checkpoint](../reviews/2026-11-08-import-policy-owner-native-heap.md)
+  records a complete Windows C0/N0/N1/C1 bracket and terminal partial GNU C0/N0.
+  Both Windows candidates have nine pipeline medians above 3x Assimp and thirty
+  common endpoints at least 10x; GNU's sole candidate has fourteen pipeline
+  medians above 3x. GNU N1/C1 terminate not started, and late Windows control
+  contention remains. Available whole-child memory median ratios stay below
+  3x. Separate eighteen-worker heap collection observes 56 fewer candidate calls
+  per original task and equal rounded peak displays. Both native actual evidence
+  reviews close with GO; actual heap stack/interception review closes with bounded
+  GO, locating the reduction in policy construction while preserving calibration,
+  unresolved frames and temporary-count differences. No native source-speed acceptance, runtime
+  main integration or release follows.
