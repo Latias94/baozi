@@ -43,12 +43,12 @@ use baozi_operation::{
 };
 
 use crate::error::ScopeAbortCause;
-#[cfg(test)]
-use crate::ledger::ImportOperationControl;
 use crate::ledger::{
     ImportDimension, ImportLedgerPhase, ImportOperationOwner, ImportProgressPhase,
-    ImportProgressUnit, import_ledger_limits,
+    ImportProgressUnit,
 };
+#[cfg(test)]
+use crate::ledger::{ImportOperationControl, import_ledger_limits};
 use crate::limits::ResourceLimits;
 use crate::metered_storage::AccountedVec;
 
@@ -814,7 +814,7 @@ impl ImportStoreBootstrapRequirements {
     }
 
     pub(crate) fn for_node_scene(
-        limits: &ResourceLimits,
+        import_limits: &LedgerLimits<ImportDimension>,
     ) -> Result<Self, ImportStoreBootstrapError> {
         let terminal_attribution_slots = scene_failure_evidence_member_count()
             .checked_add(1)
@@ -823,8 +823,6 @@ impl ImportStoreBootstrapRequirements {
             .map_err(|_| StorePlanError::SizeOverflow)?;
         let canonical_structural_work_limit =
             maximum_scene_structural_work().ok_or(StorePlanError::SizeOverflow)?;
-        let import_limits =
-            import_ledger_limits(limits).map_err(ImportStoreBootstrapError::ImportLedgerLimits)?;
         let (ordinary_attempted, ordinary_consumed) = ImportDimension::ALL.into_iter().try_fold(
             (0_u64, 0_u64),
             |(attempted, consumed), dimension| {
@@ -1586,11 +1584,9 @@ fn project_store_ledger_cause(
 }
 
 pub(crate) fn try_import_store_bootstrap(
-    limits: &ResourceLimits,
+    import_limits: LedgerLimits<ImportDimension>,
     requirements: ImportStoreBootstrapRequirements,
 ) -> Result<ImportStoreBootstrap, ImportStoreBootstrapError> {
-    let import_limits =
-        import_ledger_limits(limits).map_err(ImportStoreBootstrapError::ImportLedgerLimits)?;
     let domain = StoreKeyDomain::try_new(IMPORT_STORE_CATALOG)
         .map_err(ImportStoreBootstrapError::KeyDomain)?;
     let vocabulary = ImportStoreVocabulary::try_admit(&domain)?;
@@ -1598,7 +1594,7 @@ pub(crate) fn try_import_store_bootstrap(
     let canonical_retained_member_policy = requirements.canonical_retained_member_policy();
     let canonical_structural_work_policy = requirements.canonical_structural_work_policy();
     let startup_outcome_evidence_policy =
-        DimensionPolicy::reservable_bytes(0, 0, 0, limits.max_live_bytes)
+        DimensionPolicy::reservable_bytes(0, 0, 0, import_limits.operation_live_byte_limit())
             .with_published_outcome_evidence_limit(requirements.published_outcome_evidence_limit);
     let (ordinary_attempted_work_limit, ordinary_consumed_work_limit) = vocabulary
         .dimensions
@@ -1765,7 +1761,6 @@ const fn phase_index(phase: ImportLedgerPhase) -> usize {
 pub(crate) enum ImportStoreBootstrapError {
     KeyDomain(StoreKeyDomainCreateError),
     KeyAdmissionInvariant,
-    ImportLedgerLimits(LedgerLimitsError<ImportDimension>),
     MissingImportDimensionPolicy {
         dimension: ImportDimension,
     },
@@ -1802,9 +1797,6 @@ impl fmt::Display for ImportStoreBootstrapError {
             }
             Self::KeyAdmissionInvariant => {
                 formatter.write_str("cannot admit the normalized import store vocabulary")
-            }
-            Self::ImportLedgerLimits(cause) => {
-                write!(formatter, "cannot freeze import ledger policy: {cause}")
             }
             Self::MissingImportDimensionPolicy { dimension } => write!(
                 formatter,
@@ -1853,7 +1845,6 @@ impl std::error::Error for ImportStoreBootstrapError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::KeyDomain(cause) => Some(cause),
-            Self::ImportLedgerLimits(cause) => Some(cause),
             Self::StoreLedgerLimits(cause) => Some(cause),
             Self::LedgerPlan(cause) => Some(cause),
             Self::StorePlan(cause) => Some(cause),
@@ -1910,8 +1901,7 @@ mod tests {
         assert!(size_of::<ImportStoreSessionOwner<'_>>() <= MAX_INLINE_SESSION_HANDLE_BYTES);
     }
 
-    fn ordinary_work_limits(limits: &ResourceLimits) -> (u64, u64) {
-        let import_limits = import_ledger_limits(limits).expect("test import policy is valid");
+    fn ordinary_work_limits(import_limits: &LedgerLimits<ImportDimension>) -> (u64, u64) {
         ImportDimension::ALL
             .into_iter()
             .try_fold((0_u64, 0_u64), |(attempted, consumed), dimension| {
@@ -1926,13 +1916,11 @@ mod tests {
             .expect("default import aggregate work fits u64")
     }
 
-    fn requirements_for(limits: &ResourceLimits) -> ImportStoreBootstrapRequirements {
-        ImportStoreBootstrapRequirements::for_node_scene(limits)
+    fn requirements_for(
+        import_limits: &LedgerLimits<ImportDimension>,
+    ) -> ImportStoreBootstrapRequirements {
+        ImportStoreBootstrapRequirements::for_node_scene(import_limits)
             .expect("test retained-store requirements are valid")
-    }
-
-    fn requirements() -> ImportStoreBootstrapRequirements {
-        requirements_for(&ResourceLimits::default())
     }
 
     #[test]
@@ -1958,7 +1946,9 @@ mod tests {
         limits: ResourceLimits,
         control: ImportOperationControl,
     ) -> (ImportStoreSessionOwner<'inv>, PhysicalStorageAccount) {
-        let bootstrap = try_import_store_bootstrap(&limits, requirements_for(&limits))
+        let import_limits = import_ledger_limits(&limits).expect("test import policy is valid");
+        let requirements = requirements_for(&import_limits);
+        let bootstrap = try_import_store_bootstrap(import_limits, requirements)
             .expect("test import store bootstrap must be valid");
         let factory = PhysicalStorageAccountFactory::try_new(
             PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
@@ -2196,7 +2186,10 @@ mod tests {
 
     #[test]
     fn bootstrap_maps_the_complete_import_vocabulary_into_one_store_domain() {
-        let bootstrap = try_import_store_bootstrap(&ResourceLimits::default(), requirements())
+        let import_limits =
+            import_ledger_limits(&ResourceLimits::default()).expect("test import policy is valid");
+        let requirements = requirements_for(&import_limits);
+        let bootstrap = try_import_store_bootstrap(import_limits, requirements)
             .expect("default import store bootstrap must be valid");
         let ImportStoreBootstrap {
             vocabulary,
@@ -2236,7 +2229,10 @@ mod tests {
 
     #[test]
     fn bootstrap_starts_and_resolves_one_session_outcome_owner() {
-        let bootstrap = try_import_store_bootstrap(&ResourceLimits::default(), requirements())
+        let import_limits =
+            import_ledger_limits(&ResourceLimits::default()).expect("test import policy is valid");
+        let requirements = requirements_for(&import_limits);
+        let bootstrap = try_import_store_bootstrap(import_limits, requirements)
             .expect("default import store bootstrap must be valid");
         let factory = PhysicalStorageAccountFactory::try_new(
             PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
@@ -3701,8 +3697,15 @@ mod tests {
         )
         .expect("the startup envelope is structurally valid");
 
+        let import_limits = import_ledger_limits(&limits).expect("test import policy is valid");
         assert!(matches!(
-            try_import_store_bootstrap(&limits, requirements),
+            ImportStoreBootstrapRequirements::for_node_scene(&import_limits),
+            Err(ImportStoreBootstrapError::StorePlan(
+                StorePlanError::SizeOverflow
+            ))
+        ));
+        assert!(matches!(
+            try_import_store_bootstrap(import_limits, requirements),
             Err(ImportStoreBootstrapError::StorePlan(
                 StorePlanError::SizeOverflow
             ))
@@ -3710,9 +3713,44 @@ mod tests {
     }
 
     #[test]
+    fn requirements_and_bootstrap_reject_an_incomplete_supplied_import_policy() {
+        let complete =
+            import_ledger_limits(&ResourceLimits::default()).expect("test import policy is valid");
+        let requirements = requirements_for(&complete);
+        let missing = ImportDimension::DependencyAcquisitionWork;
+        let incomplete = LedgerLimits::with_evidence_byte_limit(
+            complete.operation_live_byte_limit(),
+            complete.evidence_byte_limit(),
+            ImportDimension::ALL
+                .into_iter()
+                .filter(|dimension| *dimension != missing)
+                .map(|dimension| {
+                    (
+                        dimension,
+                        complete
+                            .dimension(dimension)
+                            .expect("the complete import policy contains every dimension"),
+                    )
+                }),
+        )
+        .expect("individual policies remain valid without the omitted import dimension");
+        assert!(matches!(
+            ImportStoreBootstrapRequirements::for_node_scene(&incomplete),
+            Err(ImportStoreBootstrapError::MissingImportDimensionPolicy { dimension })
+                if dimension == missing
+        ));
+        assert!(matches!(
+            try_import_store_bootstrap(incomplete, requirements),
+            Err(ImportStoreBootstrapError::MissingImportDimensionPolicy { dimension })
+                if dimension == missing
+        ));
+    }
+
+    #[test]
     fn bootstrap_rejects_a_total_that_does_not_leave_the_exact_ordinary_remainder() {
         let limits = ResourceLimits::default();
-        let (ordinary_attempted, ordinary_consumed) = ordinary_work_limits(&limits);
+        let import_limits = import_ledger_limits(&limits).expect("test import policy is valid");
+        let (ordinary_attempted, ordinary_consumed) = ordinary_work_limits(&import_limits);
         let structural_work = 4;
         let protected =
             RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(1, 1, 1)
@@ -3728,7 +3766,7 @@ mod tests {
                 .expect("the writer and publication envelope is valid");
 
         assert!(matches!(
-            try_import_store_bootstrap(&limits, requirements),
+            try_import_store_bootstrap(import_limits, requirements),
             Err(ImportStoreBootstrapError::OrdinaryWorkPartitionMismatch {
                 actual_attempted,
                 expected_attempted,
@@ -3744,7 +3782,8 @@ mod tests {
     #[test]
     fn bootstrap_rejects_a_consumed_total_below_the_exact_ordinary_remainder() {
         let limits = ResourceLimits::default();
-        let (ordinary_attempted, ordinary_consumed) = ordinary_work_limits(&limits);
+        let import_limits = import_ledger_limits(&limits).expect("test import policy is valid");
+        let (ordinary_attempted, ordinary_consumed) = ordinary_work_limits(&import_limits);
         let structural_work = 4;
         let protected =
             RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(1, 1, 1)
@@ -3767,7 +3806,7 @@ mod tests {
         .expect("the writer and publication envelope is valid");
 
         assert!(matches!(
-            try_import_store_bootstrap(&limits, requirements),
+            try_import_store_bootstrap(import_limits, requirements),
             Err(ImportStoreBootstrapError::OrdinaryWorkPartitionMismatch {
                 actual_attempted,
                 expected_attempted,

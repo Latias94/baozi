@@ -2143,7 +2143,7 @@ fn restore_acquisition_reservations(
 mod tests {
     use super::*;
     use crate::dependency::shared_dependency_snapshot_allocation_bytes;
-    use crate::ledger::ImportOperationControl;
+    use crate::ledger::{ImportOperationControl, import_ledger_limits};
     use crate::store::{
         ImportStoreBodyParts, ImportStoreBootstrapRequirements, ImportStoreInvocationRoot,
         ImportStoreSessionOwner, try_import_store_bootstrap,
@@ -2165,8 +2165,10 @@ mod tests {
         limits: &ResourceLimits,
         control: ImportOperationControl,
     ) -> (ImportStoreSessionOwner<'inv>, PhysicalStorageAccount) {
-        let requirements = ImportStoreBootstrapRequirements::for_node_scene(limits).unwrap();
-        let bootstrap = try_import_store_bootstrap(limits, requirements).unwrap();
+        let import_limits = import_ledger_limits(limits).expect("test import limits are valid");
+        let requirements =
+            ImportStoreBootstrapRequirements::for_node_scene(&import_limits).unwrap();
+        let bootstrap = try_import_store_bootstrap(import_limits, requirements).unwrap();
         let factory = PhysicalStorageAccountFactory::try_new(
             PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1).unwrap(),
         )

@@ -50,7 +50,7 @@ use crate::descriptor::{
     TextBomPolicy, TextControlPolicy, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
     TextSourceEncoding,
 };
-use crate::ledger::ImportOperationControl;
+use crate::ledger::{ImportOperationControl, import_ledger_limits};
 use crate::store::{
     ImportRootExecution, ImportStoreBodyParts, ImportStoreBootstrapRequirements,
     ImportStoreHostError, ImportStoreInvocationRoot, try_import_store_bootstrap,
@@ -73,8 +73,9 @@ fn start_store<'inv>(
     let account = factory
         .try_create_account(PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX).unwrap())
         .unwrap();
-    let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits).unwrap();
-    let bootstrap = try_import_store_bootstrap(&limits, requirements).unwrap();
+    let import_limits = import_ledger_limits(&limits).expect("test import limits are valid");
+    let requirements = ImportStoreBootstrapRequirements::for_node_scene(&import_limits).unwrap();
+    let bootstrap = try_import_store_bootstrap(import_limits, requirements).unwrap();
     let owner = ImportStoreSessionOwner::try_start_in_body(
         parts,
         ImportOperationControl::default(),

@@ -163,15 +163,15 @@ fn prepare_import_entry(
     request: &ImportPlan,
     ledger_limits: Result<LedgerLimits<ImportDimension>, LedgerLimitsError<ImportDimension>>,
 ) -> Result<(PhysicalStorageAccount, ImportStoreBootstrap), ImportInitializationError> {
-    ledger_limits.map_err(ImportInitializationError::ledger_limits)?;
+    let import_limits = ledger_limits.map_err(ImportInitializationError::ledger_limits)?;
     let account = request.try_create_storage_account().map_err(|_| {
         ImportInitializationError::retained_store("physical-storage-account-unavailable")
     })?;
     let requirements =
-        ImportStoreBootstrapRequirements::for_node_scene(request.limits()).map_err(|_| {
+        ImportStoreBootstrapRequirements::for_node_scene(&import_limits).map_err(|_| {
             ImportInitializationError::retained_store("retained-store-bootstrap-rejected")
         })?;
-    let bootstrap = try_import_store_bootstrap(request.limits(), requirements)
+    let bootstrap = try_import_store_bootstrap(import_limits, requirements)
         .map_err(|_| ImportInitializationError::retained_store("retained-store-plan-rejected"))?;
     Ok((account, bootstrap))
 }

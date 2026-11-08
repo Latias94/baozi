@@ -2,6 +2,7 @@ use super::*;
 use crate::authoring::{
     AuthoredTransform, NodeAuthoringNode, NodeLocalId, Presence, StaticSceneBuilder,
 };
+use crate::ledger::import_ledger_limits;
 use crate::{
     CapabilityStatus, CompiledOptions, DependencyRequirement, DependencyRoleId, DetectionOutcome,
     DetectionResult, DiagnosticCode, DiagnosticSeverity, Format, FormatCapability,
@@ -199,8 +200,10 @@ fn start_store_with_control<'inv>(
     let account = factory
         .try_create_account(PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX).unwrap())
         .unwrap();
-    let requirements = ImportStoreBootstrapRequirements::for_node_scene(request.limits()).unwrap();
-    let bootstrap = try_import_store_bootstrap(request.limits(), requirements).unwrap();
+    let import_limits =
+        import_ledger_limits(request.limits()).expect("test import limits are valid");
+    let requirements = ImportStoreBootstrapRequirements::for_node_scene(&import_limits).unwrap();
+    let bootstrap = try_import_store_bootstrap(import_limits, requirements).unwrap();
     let store =
         ImportStoreSessionOwner::try_start_in_body(parts, control, &account, bootstrap).unwrap();
     (store, account)
