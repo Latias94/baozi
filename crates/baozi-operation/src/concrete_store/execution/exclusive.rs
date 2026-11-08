@@ -1032,27 +1032,15 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
             &mut StoreInvocationParser<'_, '_, 'op, O, PP, U, N, CHILD>,
         ) -> Result<StoreScanReturn<T>, E>,
     ) -> Result<T, E> {
+        self.running()?;
+        if self.boundary.is_some() {
+            self.before(1)?;
+        }
         let channel = if CHILD {
             ParserChannel::Child
         } else {
             ParserChannel::Parent
         };
-        let mut host = self.open_parser(layout, amounts, limits, channel)?;
-        let result = body(&mut StoreInvocationParser { host: &mut host });
-        host.finish(result)
-    }
-
-    fn open_parser<const N: usize>(
-        &mut self,
-        layout: StoreInvocationLayout<'op, N>,
-        amounts: [u64; N],
-        limits: [Option<u64>; N],
-        channel: ParserChannel,
-    ) -> Result<ParserHost<'_, 'op, O, PP, U, N>, StoreInvocationError> {
-        self.running()?;
-        if self.boundary.is_some() {
-            self.before(1)?;
-        }
         let frame = layout
             .raw
             .begin_parser(&mut self.parts.work.work, amounts, limits, channel)
@@ -1076,58 +1064,25 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
                     },
                 }
             })?;
-        Ok(ParserHost {
+        let mut host = ParserHost {
             context: self,
             layout: layout.raw,
             frame,
-        })
-    }
-
-    fn parser_piece_with_storage<T, P, E, F, const N: usize>(
-        &mut self,
-        layout: StoreInvocationLayout<'op, N>,
-        amounts: [u64; N],
-        limits: [Option<u64>; N],
-        action: &mut Option<F>,
-        project: impl FnOnce(StoreInvocationError) -> E,
-        materialize: impl FnOnce(&mut StoreInvocationParser<'_, '_, 'op, O, PP, U, N, true>, P) -> E,
-    ) -> Result<T, E>
-    where
-        E: From<StoreInvocationError>,
-        F: for<'s> FnOnce(StoreOrdinaryStorage<'s, 'op, O, PP, U>) -> Result<(T, [u64; N]), P>,
-    {
-        let mut host = self.open_parser(layout, amounts, limits, ParserChannel::Child)?;
-        let result = host.run_piece(action, project, materialize);
-        host.finish(result.map(StoreScanReturn::Exhausted))
-    }
-}
-
-struct ParserHost<'ctx, 'op, O, PP, U, const N: usize> {
-    context: &'ctx mut StoreInvocation<'op, O, PP, U>,
-    layout: WorkLayout<N>,
-    frame: ParserFrame<N>,
-}
-
-impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize>
-    ParserHost<'_, 'op, O, PP, U, N>
-{
-    fn finish<T, E: From<StoreInvocationError>>(
-        &mut self,
-        result: Result<StoreScanReturn<T>, E>,
-    ) -> Result<T, E> {
+        };
+        let result = body(&mut StoreInvocationParser { host: &mut host });
         StoreExecutionState::settle_caught_unwind(
-            self.context.parts.ordinary.execution_state,
-            self.context.parts.ordinary.failure,
+            host.context.parts.ordinary.execution_state,
+            host.context.parts.ordinary.failure,
         );
         if result.is_err() {
-            self.context.stop_known_error();
+            host.context.stop_known_error();
         }
         let (result, exact) = match result {
             Ok(StoreScanReturn::Exhausted(value)) => (Ok(value), true),
             Ok(StoreScanReturn::Boundary(value)) => (Ok(value), false),
             Err(cause) => (Err(cause), false),
         };
-        let close = self.close(exact);
+        let close = host.close(exact);
         match result {
             Err(cause) => {
                 let _ = close;
@@ -1135,60 +1090,20 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize>
             }
             Ok(value) => {
                 close?;
-                self.context.running()?;
-                if exact && self.context.boundary.is_some() {
-                    self.context.completed(1)?;
+                host.context.running()?;
+                if exact && host.context.boundary.is_some() {
+                    host.context.completed(1)?;
                 }
                 Ok(value)
             }
         }
     }
+}
 
-    fn run_piece<T, P, E, F>(
-        &mut self,
-        action: &mut Option<F>,
-        project: impl FnOnce(StoreInvocationError) -> E,
-        materialize: impl FnOnce(&mut StoreInvocationParser<'_, '_, 'op, O, PP, U, N, true>, P) -> E,
-    ) -> Result<T, E>
-    where
-        F: for<'s> FnOnce(StoreOrdinaryStorage<'s, 'op, O, PP, U>) -> Result<(T, [u64; N]), P>,
-    {
-        // The child admission just checked registry state and invokes no user code.
-        // Direct-mode control still runs after installation of the original frame.
-        if self.context.boundary.is_none()
-            && let Err(cause) = self.context.before(1)
-        {
-            return Err(project(cause));
-        }
-        let storage = StoreOrdinaryStorage {
-            domain: self.context.domain,
-            raw: &mut self.context.parts.ordinary,
-        };
-        let action = action.take().expect("a host-owned parser piece runs once");
-        let (value, amounts) = match action(storage) {
-            Ok(returned) => returned,
-            Err(cause) => {
-                return Err(
-                    StoreInvocationParser { host: self }.materialize_error(cause, materialize)
-                );
-            }
-        };
-        if let Err(cause) = complete_parser_prefix(
-            &mut self.context.parts.work.work,
-            &mut self.frame,
-            &self.layout,
-            self.context.parts.ordinary.failure,
-            amounts,
-        ) {
-            return Err(project(StoreRuntimeError::Ledger(cause).into()));
-        }
-        if self.context.boundary.is_none()
-            && let Err(cause) = self.context.completed(1)
-        {
-            return Err(project(cause));
-        }
-        Ok(value)
-    }
+struct ParserHost<'ctx, 'op, O, PP, U, const N: usize> {
+    context: &'ctx mut StoreInvocation<'op, O, PP, U>,
+    layout: WorkLayout<N>,
+    frame: ParserFrame<N>,
 }
 
 impl<O, PP, U, const N: usize> ParserHost<'_, '_, O, PP, U, N> {
@@ -1247,26 +1162,14 @@ struct ParserActionHost<'a, 'op, const N: usize> {
 
 impl<const N: usize> ParserActionHost<'_, '_, N> {
     fn complete(&mut self, amounts: [u64; N]) -> Result<(), LedgerCause<StoreDimensionKey>> {
-        let result =
-            complete_parser_prefix(self.work, self.frame, &self.layout, self.failure, amounts);
+        let result = self.frame.complete(&self.layout, self.work, amounts);
+        if result.is_err() {
+            record(self.failure, PreparationFailureCode::ledger());
+            let _ = self.frame.resolve(self.work);
+        }
         self.armed = false;
         result
     }
-}
-
-fn complete_parser_prefix<const N: usize>(
-    work: &mut WorkView<'_, StoreDimensionKey>,
-    frame: &mut ParserFrame<N>,
-    layout: &WorkLayout<N>,
-    failure: &Cell<Option<PreparationFailureCode>>,
-    amounts: [u64; N],
-) -> Result<(), LedgerCause<StoreDimensionKey>> {
-    let result = frame.complete(layout, work, amounts);
-    if result.is_err() {
-        record(failure, PreparationFailureCode::ledger());
-        let _ = frame.resolve(work);
-    }
-    result
 }
 
 impl<const N: usize> Drop for ParserActionHost<'_, '_, N> {

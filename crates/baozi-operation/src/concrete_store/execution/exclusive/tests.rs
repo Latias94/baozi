@@ -1,6 +1,4 @@
 //! Private host-boundary probes use an actual Ledger, not a shadow numeric implementation.
-mod single_piece;
-
 use super::*;
 use crate::ledger::{Ledger, LedgerLimits};
 use crate::retained::RetainedHandleSharePlan;

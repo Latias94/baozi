@@ -487,21 +487,23 @@ fn push_token<'op, 'session, 'input>(
         usize_amount(&children.services()?, text.len(), "obj-token-bytes")?,
     ];
     let errors = children.error_view();
-    children.run_piece_with_storage::<_, ObjFailure, _>(token_work, amounts, |mut storage| {
-        let column = start
-            .checked_add(1)
-            .and_then(|column| u32::try_from(column).ok())
-            .ok_or_else(|| errors.resource_limit_exceeded("line-columns", u64::MAX))?;
-        storage.push_vec(
-            tokens,
-            Token {
-                text,
-                column,
-                start,
-                end,
-            },
-        )?;
-        Ok(((), amounts))
+    children.child(token_work, amounts, |work| {
+        work.run_returned_with_storage::<_, ObjFailure>(|mut storage| {
+            let column = start
+                .checked_add(1)
+                .and_then(|column| u32::try_from(column).ok())
+                .ok_or_else(|| errors.resource_limit_exceeded("line-columns", u64::MAX))?;
+            storage.push_vec(
+                tokens,
+                Token {
+                    text,
+                    column,
+                    start,
+                    end,
+                },
+            )?;
+            Ok(((), amounts))
+        })
     })
 }
 
