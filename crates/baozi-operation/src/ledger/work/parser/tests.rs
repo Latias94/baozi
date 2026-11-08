@@ -302,9 +302,214 @@ fn read_row_completion_preserves_pending_competition_on_failure() {
     assert_eq!(counters(&view), [(7, 0, 3)]);
     assert_eq!(channels(&view), (false, true, 1));
     assert!(!view.header.integrity_fault);
+    {
+        let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+        assert_eq!(
+            row.complete(3),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: 1,
+                value: 6,
+                limit: 5,
+            })
+        );
+        row.complete(2).unwrap();
+        assert_eq!(
+            row.complete(1),
+            Err(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: 1,
+                value: 6,
+                limit: 5,
+            })
+        );
+        row.complete(0).unwrap();
+    }
+    assert_eq!(frame.remaining, [2]);
+    assert_eq!(counters(&view), [(7, 2, 3)]);
     frame.resolve(&mut view).unwrap();
     internal.resolve(&roles, &mut view, false).unwrap();
     check_quiescent(view.rows, view.header).unwrap();
+}
+
+#[test]
+fn read_row_exact_frame_capacity_commits_each_prefix_before_overrun() {
+    for prefix in [1, 3] {
+        let (catalog, mut work) = owner([(1, 20, 20)]);
+        let roles = work
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
+            .unwrap();
+        let mut view = work.view(&catalog);
+        let mut unused = roles
+            .begin_parser(&mut view, [3], [None], ParserChannel::Parent)
+            .unwrap();
+        unused.resolve(&mut view).unwrap();
+        let mut frame = roles
+            .begin_parser(&mut view, [3], [None], ParserChannel::Parent)
+            .unwrap();
+        {
+            let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+            row.complete(1).unwrap();
+            if prefix == 3 {
+                row.complete(2).unwrap();
+                row.complete(0).unwrap();
+                assert_eq!(row.complete(1), Err(LedgerCause::InactiveLinearWorkPermit));
+            }
+        }
+        assert_eq!(frame.remaining, [3 - prefix]);
+        assert_eq!(counters(&view), [(6, prefix, 0)]);
+        frame.resolve(&mut view).unwrap();
+        check_quiescent(view.rows, view.header).unwrap();
+    }
+}
+
+#[test]
+fn read_row_attempted_ceiling_precedes_larger_consumed_limit_and_frame_remainder() {
+    let (catalog, mut work) = owner([(1, 20, 10)]);
+    let roles = work
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
+        .unwrap();
+    let mut view = work.view(&catalog);
+    let mut frame = roles
+        .begin_parser(&mut view, [2], [None], ParserChannel::Child)
+        .unwrap();
+    view.rows[0].state = WorkDimensionState {
+        attempted: 4,
+        consumed: 2,
+        pending_consumed: 1,
+    };
+    {
+        let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+        row.complete(1).unwrap();
+        assert_eq!(
+            row.complete(1),
+            Err(LedgerCause::ConsumedExceedsAttempted {
+                dimension: 1,
+                consumed: 5,
+                attempted: 4,
+            })
+        );
+        row.complete(0).unwrap();
+    }
+    assert_eq!(frame.remaining, [1]);
+    assert_eq!(counters(&view), [(4, 3, 1)]);
+    assert_eq!(channels(&view), (false, true, 0));
+    assert!(!view.header.integrity_fault);
+    frame.resolve(&mut view).unwrap();
+}
+
+#[test]
+fn read_row_invalid_numeric_entry_preserves_zero_overrun_and_exact_failure_order() {
+    let overflow = LedgerCause::ArithmeticOverflow {
+        class: CounterClass::Consumed,
+        dimension: 1,
+    };
+    for (consumed, pending, attempted, limit, remaining, expected) in [
+        (
+            2,
+            1,
+            2,
+            2,
+            2,
+            LedgerCause::ConsumedExceedsAttempted {
+                dimension: 1,
+                consumed: 4,
+                attempted: 2,
+            },
+        ),
+        (
+            2,
+            1,
+            10,
+            2,
+            2,
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: 1,
+                value: 4,
+                limit: 2,
+            },
+        ),
+        (u64::MAX, 1, u64::MAX, u64::MAX, 1, overflow.clone()),
+        (u64::MAX, 0, u64::MAX, u64::MAX, 1, overflow.clone()),
+        (u64::MAX - 1, 1, u64::MAX, u64::MAX, 1, overflow),
+    ] {
+        let (catalog, mut work) = owner([(1, u64::MAX, limit)]);
+        let roles = work
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
+            .unwrap();
+        let mut view = work.view(&catalog);
+        let mut frame = roles
+            .begin_parser(&mut view, [remaining], [None], ParserChannel::Child)
+            .unwrap();
+        view.rows[0].state = WorkDimensionState {
+            attempted,
+            consumed,
+            pending_consumed: pending,
+        };
+        {
+            let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+            row.complete(0).unwrap();
+            assert_eq!(
+                row.complete(remaining + 1),
+                Err(LedgerCause::InactiveLinearWorkPermit)
+            );
+            assert_eq!(row.complete(1), Err(expected));
+            row.complete(0).unwrap();
+        }
+        assert_eq!(frame.remaining, [remaining]);
+        assert_eq!(counters(&view), [(attempted, consumed, pending)]);
+        assert_eq!(channels(&view), (false, true, 0));
+        assert!(!view.header.integrity_fault);
+        frame.resolve(&mut view).unwrap();
+    }
+}
+
+#[test]
+fn read_row_success_near_max_preserves_later_consumed_and_effective_overflow() {
+    for pending in [0, 1] {
+        for prefix in [0, 1] {
+            let (catalog, mut work) = owner([(1, u64::MAX, u64::MAX)]);
+            let roles = work
+                .as_read(&catalog)
+                .bind_layout([1], WorkGrant::Ordinary)
+                .unwrap();
+            let mut view = work.view(&catalog);
+            let mut frame = roles
+                .begin_parser(&mut view, [2], [None], ParserChannel::Child)
+                .unwrap();
+            let initial_consumed = u64::MAX - 1 - pending;
+            view.rows[0].state = WorkDimensionState {
+                attempted: u64::MAX,
+                consumed: initial_consumed,
+                pending_consumed: pending,
+            };
+            {
+                let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+                row.complete(0).unwrap();
+                if prefix == 1 {
+                    row.complete(1).unwrap();
+                    assert_eq!(
+                        row.complete(1),
+                        Err(LedgerCause::ArithmeticOverflow {
+                            class: CounterClass::Consumed,
+                            dimension: 1,
+                        })
+                    );
+                    row.complete(0).unwrap();
+                }
+            }
+            assert_eq!(frame.remaining, [2 - prefix]);
+            assert_eq!(
+                counters(&view),
+                [(u64::MAX, initial_consumed + prefix, pending)]
+            );
+            frame.resolve(&mut view).unwrap();
+        }
+    }
 }
 
 #[test]
