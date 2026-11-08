@@ -948,3 +948,29 @@ negative case only for a genuinely new boundary, not for incidental private layo
   GNU builds and measurements remain pending in the current repository/target,
   followed by separate calibrated heap attribution. Native convergence,
   local-main runtime integration and release remain HOLD.
+- Later checkpoints supersede that pending GNU/heap status without repairing
+  its missing campaigns: the [finite consumer GNU attempt](../reviews/2026-11-08-finite-consumer-gnu.md)
+  completes C0 only; N0/N1/C1 terminate not started. The separate
+  [instruction and calibrated eighteen-worker heap report](../reviews/2026-11-08-finite-consumer-attribution.md)
+  retains six small instruction increases, 25 fewer allocation calls in five
+  tasks and 31 fewer in repeated OBJ, rounded peaks, interception limits and
+  independent actual evidence review. No candidate GNU ordinary interval or
+  native convergence follows.
+- The [actual-row text-emission experiment](../reviews/2026-11-08-closed-text-emission.md)
+  qualifies `3da8893` with the original seven gates and 1,058 stable inputs.
+  Fresh matched instruction profiles reduce grid OBJ by 7.14259617% and repeated
+  OBJ by 1.59745099%, retaining all four smaller increases and profiler warnings.
+  Its [native attempt](../reviews/2026-11-08-closed-text-emission-native.md)
+  terminates partial on both platforms: Windows has no ordinary samples and
+  GNU completes only C0. Independent actual reviews retain every missing cell;
+  the instruction improvement establishes no candidate native-speed acceptance.
+- The [glTF field-layout experiment](../reviews/2026-11-08-gltf-field-layout.md)
+  implements `7b8c5f3`, reusing stable mapping within each query while retaining
+  every real comparison, admission, completion and control checkpoint. Source3
+  passes all seven gates with 3,958 workspace tests, 218 doctests, 138 consumer
+  tests and 1,059 stable committed inputs. Two failed fixture attempts and their
+  corrections remain. Independent source, actual QA and raw instruction reviews
+  close with GO. Fresh glTF1 instructions decrease 2.32029303% and glTF32 decrease
+  0.77512688%; the unchanged six-task integer predicate passes with every adverse
+  sign retained. Ordinary native qualification remains separate and pending;
+  main/runtime integration and release remain HOLD.
