@@ -988,3 +988,16 @@ negative case only for a genuinely new boundary, not for incidental private layo
   2,140,762 whole-worker Ir. Independent source tracing identifies duplicate
   temporary owners; the next owner-reuse design is under review, with no
   implementation or measured gain claimed.
+- The [import policy-owner experiment](../reviews/2026-11-08-import-policy-owner.md)
+  implements `bdc92b3`: entry retains the original validated import policies,
+  requirements borrows them, and bootstrap consumes them. Two duplicate
+  constructions and the retired private error path are deleted; the genuine
+  Store-keyed owner and checked completeness/partition boundaries remain.
+  Source1 passes the original seven gates with 3,959 workspace tests, 218
+  doctests, 138 consumer tests and 1,059 stable committed inputs. Independent
+  source/actual QA reviews close. All six fresh instruction pairs decrease;
+  glTF1 -1.72953523% and F64 PLY -3.97271493% accompany full literal output
+  equality and exact integer selection PASS. Actual evidence review preserves
+  both grid warnings, unknown labels and the extra tiny-STL three-to-one
+  constructor attribution. New ordinary and calibrated heap results remain
+  pending. Source retention, main/runtime integration and release remain HOLD.
