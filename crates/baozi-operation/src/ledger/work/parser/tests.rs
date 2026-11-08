@@ -272,6 +272,85 @@ fn direct_completion_accounts_for_internal_pending_after_policy_tightening() {
 }
 
 #[test]
+fn read_row_prefix_bound_uses_actual_ceilings_without_committing() {
+    for (consumed, pending, attempted, limit, remaining, maximum, bound, next_bound) in [
+        (0, 0, 10, 10, 4, 99, 4, 0),
+        (2, 1, 4, 10, 2, 99, 1, 0),
+        (2, 1, 10, 5, 8, 99, 2, 0),
+        (0, 3, 7, 5, 4, 99, 2, 0),
+        (0, 0, 10, 10, 10, 3, 3, 7),
+        (0, 0, 10, 10, 4, 0, 0, 4),
+        (0, 0, 10, 10, 0, 99, 0, 0),
+        (2, 1, 2, 2, 2, 99, 0, 0),
+        (2, 1, 10, 2, 2, 99, 0, 0),
+        (u64::MAX, 1, u64::MAX, u64::MAX, 1, 99, 0, 0),
+        (u64::MAX, 0, u64::MAX, u64::MAX, 1, 99, 0, 0),
+        (u64::MAX - 1, 1, u64::MAX, u64::MAX, 1, 99, 0, 0),
+        (u64::MAX - 2, 1, u64::MAX, u64::MAX, 2, 99, 1, 0),
+    ] {
+        let (catalog, mut work) = owner([(1, u64::MAX, limit)]);
+        let roles = work
+            .as_read(&catalog)
+            .bind_layout([1], WorkGrant::Ordinary)
+            .unwrap();
+        let mut view = work.view(&catalog);
+        let mut frame = roles
+            .begin_parser(&mut view, [remaining], [None], ParserChannel::Child)
+            .unwrap();
+        view.rows[0].state = WorkDimensionState {
+            attempted,
+            consumed,
+            pending_consumed: pending,
+        };
+        {
+            let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+            assert_eq!(row.successful_prefix_bound(maximum), bound);
+            row.complete(bound).unwrap();
+            assert_eq!(row.successful_prefix_bound(u64::MAX), next_bound);
+        }
+        assert_eq!(frame.remaining, [remaining - bound]);
+        assert_eq!(counters(&view), [(attempted, consumed + bound, pending)]);
+        assert!(!view.header.integrity_fault);
+        frame.resolve(&mut view).unwrap();
+    }
+}
+
+#[test]
+fn read_row_prefix_bound_recomputes_after_real_pending_work_is_released() {
+    let (catalog, mut work) = owner([(1, 20, 5)]);
+    let roles = work
+        .as_read(&catalog)
+        .bind_layout([1], WorkGrant::Ordinary)
+        .unwrap();
+    let mut view = work.view(&catalog);
+    let mut frame = roles
+        .begin_parser(&mut view, [4], [None], ParserChannel::Child)
+        .unwrap();
+    let mut internal = roles
+        .admit_observed(&mut view, [3], WorkLane::Internal)
+        .unwrap();
+    assert_eq!(
+        frame
+            .borrow_read_row(&roles, &mut view)
+            .unwrap()
+            .successful_prefix_bound(10),
+        2
+    );
+    assert_eq!(counters(&view), [(7, 0, 3)]);
+    assert_eq!(frame.remaining, [4]);
+    internal.resolve(&roles, &mut view, false).unwrap();
+    {
+        let mut row = frame.borrow_read_row(&roles, &mut view).unwrap();
+        assert_eq!(row.successful_prefix_bound(10), 4);
+        row.complete(4).unwrap();
+    }
+    assert_eq!(counters(&view), [(7, 4, 0)]);
+    assert_eq!(frame.remaining, [0]);
+    frame.resolve(&mut view).unwrap();
+    check_quiescent(view.rows, view.header).unwrap();
+}
+
+#[test]
 fn read_row_completion_preserves_pending_competition_on_failure() {
     let (catalog, mut work) = owner([(1, 20, 20)]);
     let roles = work

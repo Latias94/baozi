@@ -10,6 +10,7 @@ use crate::retained::{
     checked_action_debt, record_terminal_cause_with_precedence,
 };
 use std::cell::Cell;
+use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
@@ -1193,6 +1194,21 @@ pub struct StoreParserReadRow<'read> {
 }
 
 impl StoreParserReadRow<'_> {
+    /// Bounds unit-width reads by the actual numerical row and current control headroom.
+    /// The result reserves no work; a returned physical prefix must still be completed.
+    #[inline]
+    pub fn read_span_bound(&self, maximum: u64) -> u64 {
+        if self.stopped {
+            return 0;
+        }
+        let cadence = crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64;
+        let maximum = maximum.min(cadence);
+        let maximum = self.debt.map_or(maximum, |debt| {
+            maximum.min(cadence.saturating_sub(u64::from(debt.get())))
+        });
+        self.row.successful_prefix_bound(maximum)
+    }
+
     /// Returns false before a direct-mode checkpoint is due. End this loan and checkpoint
     /// through the parser host before reading another unit; loan entry never resets debt.
     #[inline]
@@ -1211,21 +1227,39 @@ impl StoreParserReadRow<'_> {
     /// Numeric failure leaves row/remainder unchanged and stops every later call in this loan.
     #[inline]
     pub fn complete_read(&mut self, amount: u64) -> Result<(), StoreInvocationError> {
+        self.complete_read_with_cost(amount, 1)
+    }
+
+    /// Immediately completes normally returned reads of one work unit each.
+    /// Their literal count is also their bounded action cost, including in a batch.
+    #[inline]
+    pub fn complete_read_units(&mut self, units: NonZeroU64) -> Result<(), StoreInvocationError> {
+        self.complete_read_with_cost(units.get(), units.get())
+    }
+
+    #[inline]
+    fn complete_read_with_cost(
+        &mut self,
+        amount: u64,
+        cost: u64,
+    ) -> Result<(), StoreInvocationError> {
         if self.stopped {
             return Err(StoreRuntimeError::FallbackOnly.into());
         }
-        let next_debt = match self.debt.map(|debt| checked_action_debt(debt.get(), 1)) {
-            None => None,
-            Some(Ok(Some(next))) => Some(next),
-            Some(Ok(None) | Err(())) => return Err(self.reject_cost()),
+        let Ok(cost) = u16::try_from(cost) else {
+            return Err(self.reject_cost());
+        };
+        let next_debt = match checked_action_debt(self.debt.map_or(0, Cell::get), cost) {
+            Ok(Some(next)) => next,
+            Ok(None) | Err(()) => return Err(self.reject_cost()),
         };
         if let Err(cause) = self.row.complete(amount) {
             self.stopped = true;
             record(self.failure, PreparationFailureCode::ledger());
             return Err(StoreRuntimeError::Ledger(cause).into());
         }
-        if let Some((debt, next)) = self.debt.zip(next_debt) {
-            debt.set(next);
+        if let Some(debt) = self.debt {
+            debt.set(next_debt);
         }
         Ok(())
     }

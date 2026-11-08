@@ -279,6 +279,190 @@ fn read_row_debt_checkpoint_cancellation_retains_only_the_first_classification()
 }
 
 #[test]
+fn read_span_two_units_reach_checkpoint_after_the_real_scalar_anchor() {
+    let cancellation = CancellationToken::new();
+    with_cancellable_parser_operation(cancellation.clone(), |operation, key, polls| {
+        let classified = Cell::new(0);
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result =
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [4], [None], |child| {
+                    child.host.context.parts.ordinary.debt.set(253);
+                    child.with_read_row(
+                        &mut |row| -> Result<(), StoreInvocationError> {
+                            let bytes = b"abcd";
+                            assert!(row.ready_for_read()?);
+                            assert!(bytes[0].is_ascii());
+                            classified.set(1);
+                            row.complete_read(1)?;
+                            assert!(row.ready_for_read()?);
+                            let bound = row.read_span_bound(3);
+                            assert_eq!(bound, 2);
+                            let prefix = &bytes[1..1 + usize::try_from(bound).unwrap()];
+                            assert!(prefix.is_ascii());
+                            classified.set(classified.get() + prefix.len());
+                            row.complete_read_units(NonZeroU64::new(bound).unwrap())?;
+                            assert!(!row.ready_for_read()?);
+                            assert_eq!(row.read_span_bound(1), 0);
+                            Ok(())
+                        },
+                        |cause| cause,
+                        |_, cause| cause,
+                    )?;
+                    assert_eq!(classified.get(), 3);
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (4, 3, 0));
+                    assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                    cancellation.cancel();
+                    let cause = child.checkpoint().unwrap_err();
+                    assert!(matches!(
+                        &cause,
+                        StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                            crate::ControlCause::Cancelled {
+                                origin: crate::CancellationOrigin::Signal
+                            }
+                        ))
+                    ));
+                    assert_eq!(polls.load(Ordering::SeqCst), 2);
+                    assert!(
+                        child
+                            .with_read_row(
+                                &mut |_| -> Result<(), StoreInvocationError> {
+                                    panic!("cancelled span classified the fourth byte")
+                                },
+                                |cause| cause,
+                                |_, cause| cause,
+                            )
+                            .is_err()
+                    );
+                    assert_eq!(classified.get(), 3);
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (4, 3, 0));
+                    assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                    Err::<(), _>(cause)
+                });
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(context.work_counters(key)?, (4, 3, 0));
+            result
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                crate::ControlCause::Cancelled {
+                    origin: crate::CancellationOrigin::Signal
+                }
+            )))
+        ));
+        assert_eq!(classified.get(), 3);
+    });
+}
+
+#[test]
+fn read_spans_in_registry_mode_neither_change_direct_debt_nor_poll() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        assert!(boundary.begin());
+        operation
+            .with_parser_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [257],
+                    [None],
+                    |child| {
+                        let before = polls.load(Ordering::SeqCst);
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                assert!(row.ready_for_read()?);
+                                assert_eq!(row.read_span_bound(u64::MAX), 256);
+                                row.complete_read_units(NonZeroU64::new(256).unwrap())?;
+                                assert!(row.ready_for_read()?);
+                                assert_eq!(row.read_span_bound(u64::MAX), 1);
+                                row.complete_read_units(NonZeroU64::MIN)
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(polls.load(Ordering::SeqCst), before);
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 0);
+                        assert_eq!(child.work_counters(key)?, (257, 257, 0));
+                        Ok(())
+                    },
+                )?;
+                assert_eq!(context.parts.ordinary.debt.get(), 1);
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+
+#[test]
+fn read_span_rejection_keeps_the_successful_prefix_and_debt_atomic() {
+    for (units, ledger_failure) in [(3, true), (257, false), (u64::MAX, false)] {
+        with_parser_operation(|operation, key, _| {
+            let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                let result = context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |child| {
+                        child.host.context.parts.ordinary.debt.set(0);
+                        let result = child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                row.complete_read_units(NonZeroU64::MIN)?;
+                                let cause = row
+                                    .complete_read_units(NonZeroU64::new(units).unwrap())
+                                    .unwrap_err();
+                                if ledger_failure {
+                                    assert!(matches!(
+                                        &cause,
+                                        StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                                            LedgerCause::InactiveLinearWorkPermit
+                                        ))
+                                    ));
+                                } else {
+                                    assert!(matches!(
+                                        &cause,
+                                        StoreInvocationError::Runtime(
+                                            StoreRuntimeError::FallbackOnly
+                                        )
+                                    ));
+                                }
+                                assert_eq!(row.read_span_bound(1), 0);
+                                assert!(row.complete_read_units(NonZeroU64::MIN).is_err());
+                                assert!(row.complete_read(0).is_err());
+                                assert!(row.ready_for_read().is_err());
+                                Err(cause)
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        );
+                        assert_eq!(child.host.frame.remaining, [1]);
+                        assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 1);
+                        result
+                    },
+                );
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                assert_eq!(
+                    context.parts.ordinary.failure.get(),
+                    Some(if ledger_failure {
+                        PreparationFailureCode::ledger()
+                    } else {
+                        PreparationFailureCode::product_graph(INVALID_COST)
+                    })
+                );
+                context.parts.work.check_quiescent().unwrap();
+                result
+            });
+            assert!(result.is_err());
+        });
+    }
+}
+
+#[test]
 fn read_row_registry_units_do_not_change_direct_debt() {
     with_parser_operation(|operation, key, _| {
         let boundary = StoreImporterBoundary::default();

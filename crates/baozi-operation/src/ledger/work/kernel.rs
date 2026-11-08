@@ -919,6 +919,27 @@ pub(crate) struct ParserReadRow<'loan, D> {
 }
 
 impl<D: Copy> ParserReadRow<'_, D> {
+    /// Bounds a successful prefix from the current exclusive row without reserving it.
+    /// Invalid arithmetic leaves the original completion to report its exact failure.
+    #[inline]
+    pub(crate) fn successful_prefix_bound(&self, maximum: u64) -> u64 {
+        let Some(effective) = self
+            .row
+            .state
+            .consumed
+            .checked_add(self.row.state.pending_consumed)
+        else {
+            return 0;
+        };
+        let Some(attempted) = self.row.state.attempted.checked_sub(effective) else {
+            return 0;
+        };
+        let Some(limit) = self.row.policy.consumed_limit.checked_sub(effective) else {
+            return 0;
+        };
+        maximum.min(*self.remaining).min(attempted).min(limit)
+    }
+
     pub(crate) fn complete(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
         if amount > *self.remaining {
             return Err(LedgerCause::InactiveLinearWorkPermit);

@@ -16,6 +16,7 @@ use crate::scope::{
 use baozi_operation::__retained_store_integration::activation::StoreScanReturn;
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::ops::Range;
 
 const TEXT_INPUT_WORK_CHUNK_BYTES: usize = METERED_COPY_POLL_INTERVAL;
@@ -1534,8 +1535,32 @@ fn build_text_input<'session>(
                     if !reads.ready_for_read()? {
                         return Ok(TextEmissionRegionExit::DebtPoll);
                     }
-                    let unit = TextEmission::read(bytes, offset);
-                    reads.complete_read(unit.raw_len() as u64)?;
+                    let ascii_len = if offset == valid_run_start {
+                        0
+                    } else {
+                        let maximum = (bytes.len() - offset)
+                            .min(cursor.next_poll_at.saturating_sub(offset))
+                            .min(
+                                TEXT_INPUT_WORK_CHUNK_BYTES
+                                    .saturating_sub(offset - valid_run_start),
+                            );
+                        let bound = reads.ascii_span_bound(maximum as u64) as usize;
+                        bytes[offset..offset + bound]
+                            .iter()
+                            .take_while(|&&byte| byte.is_ascii() && !matches!(byte, b'\r' | b'\n'))
+                            .count()
+                    };
+                    let unit = if let Some(units) = NonZeroU64::new(ascii_len as u64) {
+                        reads.complete_ascii_span(units)?;
+                        TextEmission::Valid {
+                            raw_len: ascii_len,
+                            newline: false,
+                        }
+                    } else {
+                        let unit = TextEmission::read(bytes, offset);
+                        reads.complete_read(unit.raw_len() as u64)?;
+                        unit
+                    };
                     let unit_end =
                         checked_add_usize(errors, offset, unit.raw_len(), options.resource)?;
                     match unit {
@@ -2012,6 +2037,8 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
+    mod ascii_spans;
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) enum ScanPass {
         Planning,
@@ -2027,6 +2054,7 @@ mod tests {
         pass: ScanPass,
         trigger_offset: usize,
         completed: usize,
+        endpoints: Vec<usize>,
         raised_at: Option<usize>,
         action: Option<FrontierAction>,
     }
@@ -2046,6 +2074,7 @@ mod tests {
                     pass,
                     trigger_offset,
                     completed: 0,
+                    endpoints: Vec::new(),
                     raised_at: None,
                     action: Some(action),
                 });
@@ -2077,6 +2106,7 @@ mod tests {
                 return None;
             }
             probe.completed = completed;
+            probe.endpoints.push(completed);
             if completed == probe.trigger_offset && probe.raised_at.is_none() {
                 probe.raised_at = Some(completed);
                 probe.action.take()
