@@ -1030,3 +1030,21 @@ negative case only for a genuinely new boundary, not for incidental private layo
   with GO; the performance-candidate rejection remains unchanged.
   No ordinary/heap run, native acceptance, main/runtime integration or release
   follows for this rejected candidate. The original convergence targets remain.
+- The [single-piece parser experiment](../reviews/2026-11-09-single-piece-parser.md)
+  qualifies `2bdc37a` with 3,976 workspace tests, 220 doctests, 138 consumer
+  tests, both strict Clippy gates and both formats. Independent source,
+  actual QA, committed archive and concrete generated-code reviews close GO.
+  Its unchanged seven-task instruction screen nevertheless fails: repeated
+  OBJ decreases 0.14196591% and grid OBJ 0.34216840%, neither reaching the
+  required 1%. All seven literal non-clock pairs match and all seven increase
+  ceilings pass; three increases and four decreases remain. Independent actual
+  evidence review verifies all fourteen profiles, 42 commands, 84 streams,
+  112 export cells and 99 retained raw archive members, including both grid
+  warnings and unresolved labels. The added route and candidate-only fixtures
+  are retired at `84f68b8`; independent retirement review proves all 1,059
+  runtime/test inputs exactly equal qualified `0452a73`, reusing its existing
+  seven-gate results without claiming a new test invocation. No ordinary/heap
+  worker, native source retention, main/runtime integration or release follows.
+  Text emission span coalescing is a separate prospective source investigation;
+  it must preserve actual numerical prefixes, unit-based control debt and
+  existing copy/poll/failure boundaries before any implementation is selected.

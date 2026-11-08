@@ -1,7 +1,9 @@
 # Single parser pieces execute through their original host
 
-Status: source-only implementation `2bdc37a28bd00fffe8c70b4bd4b8ad28a769a227`
-from qualified baseline `0452a73`.
+Status: candidate `2bdc37a28bd00fffe8c70b4bd4b8ad28a769a227` is source-qualified
+but fails the original instruction screen. Retirement `84f68b8` removes the
+new route and its dedicated fixtures, restoring all 1,059 qualified baseline
+`0452a73` inputs exactly. No ordinary or heap worker runs for this candidate.
 Independent five-file production source review closes GO before formatting.
 Frozen source2 passes affected all-target/all-feature checking and all 1,403
 Operation tests with zero skips, all 665 Import/OBJ tests with zero skips, and
@@ -9,11 +11,13 @@ affected strict Clippy. Independent test/format binding review closes GO,
 including its initially unknown original-ParseFailure fixture after actual
 runtime evidence. All original seven integrated gates pass on the same source2
 inputs. Independent terminal-receipt and exact staged-byte review closes GO.
-The committed archive matches all 1,061 qualified inputs; independent narrow
-commit-association review remains pending. No measured source-retention,
-codegen, native or release acceptance is claimed at this checkpoint.
+The committed candidate archive matches all 1,061 qualified inputs and its
+independent narrow commit-association review closes GO. Actual instruction
+fidelity, generated-code condition and retirement identity reviews also close
+GO; the original instruction selection remains FAIL. No measured source
+retention, native or release acceptance is claimed.
 
-## Actual owner and consumer change
+## Candidate owner and consumer change
 
 The [reviewed plan](../plans/2026-11-09-0400-single-piece-parser-plan.md)
 identifies OBJ/MTL token sinks that open a child solely to execute one returned
@@ -109,8 +113,8 @@ retained source archive has SHA-256
 `03fb4dc00861587406a6990872e847fc26933853cd758f1d16e87560832cc90d`;
 all 1,061 archive/frozen/QA/current hashes match. QA ran before committing
 those exact bytes; it is not relabeled a postcommit run. All five current user
-note identities remain unchanged. The narrow independent commit/archive
-association review is the remaining source prerequisite.
+note identities remain unchanged. Independent narrow commit/archive review
+closes GO for these actual committed bytes, without another QA invocation.
 
 Local records under `.git/baozi-review/performance-convergence/` are:
 
@@ -131,16 +135,106 @@ Local records under `.git/baozi-review/performance-convergence/` are:
   QA GO, preserving the earlier pending checkpoint).
 - `single-piece-parser-staged-source-1.json` and
   `single-piece-parser-source-commit-association-1.json` (actual nine-path
-  staging/commit/archive identities; independent commit review pending).
+  staging/commit/archive identities).
+- `single-piece-parser-source-commit-review-1.md` (actual committed association
+  GO; inherited QA is not relabeled a postcommit run).
 
-## Remaining measured decision
+## Actual fixed instruction screen
 
-Complete independent narrow commit/archive review for the source-qualified
-implementation and passed original seven integrated gates.
-Then inspect actual generated code for the migrated call sites and run the
-fixed seven-task diagnostic screen: all literal non-clock pairs equal, at
-least one original OBJ Ir decrease of at least 1%, and no task increase above
-1%. Source structure or passed tests do not establish that screen.
+Fresh matched Rust1.95 GNU opt3/debug1/System workers are built serially in
+the current repository's existing target. Both actual compiler, argument and
+environment vectors match. Empty consumer features, generic CPU and absence
+of instrumentation/flag overrides remain verified. Symbol workers are not
+ordinary timing workers.
+
+| Role | Source | Actual ELF SHA-256 |
+| --- | --- | --- |
+| Control | `0452a73e66bd5d8e002d3b2850502423efd7875a` | `959f95f5f5fbe6b8fe5c43ee061cdc5d9e8a5b59f8040f91a3aa9aa46c6d35bf` |
+| Candidate | `2bdc37a28bd00fffe8c70b4bd4b8ad28a769a227` | `6d763eedfbace25176204f7cbbc521a5a9a7cf8fc5c1599f748e88f28c638477` |
+
+All fourteen fresh workers and twenty-eight annotations complete successfully:
+42 commands, seven original pipeline/memory tasks. All seven complete literal
+non-clock output pairs match after removing only `stage_ns`, including work,
+output and numeric spelling/type.
+
+| Original task | Control Ir | Candidate Ir | Change |
+| --- | ---: | ---: | ---: |
+| glTF1 | 5,621,852 | 5,652,018 | +0.53658474% |
+| glTF32 | 25,281,590 | 25,430,035 | +0.58716639% |
+| F64 PLY neighbors | 2,389,705 | 2,386,566 | -0.13135513% |
+| Binary STL1024 | 12,107,371 | 12,133,432 | +0.21524904% |
+| Repeated OBJ16384 | 711,709,601 | 710,699,216 | -0.14196591% |
+| Grid OBJ128 | 2,107,466,996 | 2,100,255,910 | -0.34216840% |
+| Binary STL1 | 2,030,327 | 2,025,468 | -0.23932106% |
+
+The unchanged integer predicate fails: neither original OBJ satisfies
+`100*candidate <= 99*control`. All seven independently satisfy
+`100*candidate <= 101*control`, and literal equality passes. Those two passes
+do not substitute for the required gain. Collector exit0 and collection
+`completed` therefore coexist with `instruction_predicate_passed=false`.
+The [complete fourteen-row export](2026-11-09-single-piece-parser-instructions.csv)
+preserves both identities and every increase. Whole-worker Ir includes setup,
+validation, observation, serialization and teardown; it is not native time,
+stage CPU, RSS or an Assimp instruction comparison.
+
+Both grid workers retain their `brk segment overflow in thread #1` warnings,
+at `0x5418000` and `0x53b0000`, plus the manual limitations and suppressed
+further-instance notices. Matching warning classes do not establish equal
+native allocation behavior. Raw unresolved annotation labels remain retained.
+Independent actual evidence review closes fidelity GO and selection FAIL.
+All fourteen profiles, 42 actual commands, 84 streams, seven literal pairs,
+112 CSV data cells and 99 archive members are verified. Every annotation's
+46 rows containing `???` remain.
+
+Independent matched generated-code review also closes its separate condition
+with GO. In the exact candidate ELF, the actual OBJ and MTL storage callbacks
+execute in their original host's piece bodies at `0x364c60` and `0x3658e0`.
+Their literal returned amounts reach the original frame, then common finish
+and exact close; the former nested single-piece guard/runner is absent from
+those concrete paths. The remaining compound-route guard is legitimate.
+Every token still performs original admission, physical metered insertion,
+numeric prefix settlement, exact close and prescribed exit control. A real
+layer removal therefore does not establish a large removable cost. This
+witness does not quantitatively attribute the measured deltas to individual
+sites and cannot rescue the failed selection predicate.
+
+After all collection clocks end, all 99 artifact files are retained unchanged
+both in the original target directory and in the private compressed archive
+`single-piece-parser-instructions-1-raw.tar.gz` (9,044,029 bytes, SHA-256
+`7733e813a37db160895b1eb10b440c19b31a2a33e891640b9fbf5231f1662390`).
+The original report SHA-256 is
+`0981f5e68a2f4d4a59260b53c0bc30974e9e321da48857808da1edf6c0f53b10`.
+
+## Retirement and remaining convergence
+
+The gain does not earn the new route and public adapters. Retirement commit
+`84f68b8e1482bd4d63d10fdadcbc6363ff9aa5b3` applies the exact inverse of the
+nine candidate Rust paths, including the candidate-only API fixtures. All
+original baseline source and assertions remain byte-identical. Every one of
+the 1,059 actual committed-archive inputs equals qualified `0452a73` and its
+`late-edit-error-slot-final-1/report.json` input map; no additional crate Rust
+or TOML input remains. Its existing seven-gate qualification is reused by
+exact source identity, not claimed as a new post-retirement test run. That
+baseline invocation has 3,963 passing workspace tests with six existing manual
+skips and 138 passing consumer tests with one existing manual skip.
+Independent retirement review confirms the exact inverse nine-path blob/mode
+delta, all 1,059 committed/current input identities, the 760 crate Rust/TOML
+paths with no additions or omissions, and all five user-note identities.
+
+The final bounded review identities under the private evidence root are:
+
+| Actual review | SHA-256 |
+| --- | --- |
+| Instruction/equality/export/archive fidelity | `d225f632751df61ddbac2c99d0135435cbcf9b87fb285d1697e0fa0d936e46c6` |
+| Matched generated-code condition | `4243286129e513bb391f2be2377c6f58d01f61a32ccb5e07e77158ec817a82e3` |
+| Retirement identity/association | `9e952dd77713a66ba5c73014cefeac5ec7f79b4b74da102501b0c7ea6ceaefa8` |
+
+The candidate commits, its passed source qualification and failed screen remain
+history. Prepared ordinary/heap/export scripts are unexecuted, unused private
+artifacts; the native-launch prerequisite is never created. No ordinary or
+heap result is inferred for this failed experiment. The next cost owner must
+be selected independently, without changing this screen or preserving the
+unhelpful route merely to support another optimization.
 
 Original Windows/GNU fourteen-case/110-lane 3+20 native comparisons, comparable
 whole-child memory and separate heap remain necessary after a selected

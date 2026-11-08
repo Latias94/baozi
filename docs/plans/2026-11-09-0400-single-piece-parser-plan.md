@@ -1,16 +1,15 @@
 # Finish one parser piece through its original host
 
-Status: independent design and production source reviews close GO. The
-Implementation `2bdc37a` passes affected checking, all 1,403 Operation
-tests, all 665 Import/OBJ tests and affected strict Clippy on frozen source2.
-Test/format binding review closes GO. The original seven integrated gates all
-pass: 3,976 workspace tests, 220 doctests, 138 consumer tests, both strict
-Clippy gates and both formats. Independent terminal-receipt review closes GO
-for the exact source2 bytes and staged blobs. All 1,061 committed archive,
-frozen, QA and current input hashes match; independent commit-association
-review and measurements remain pending. The implementation baseline is qualified
-`0452a73`; rejected root-local body candidate `d62cf67` remains isolated.
-Original release/main gates remain HOLD.
+Status: source-qualified experiment, instruction selection FAIL, production
+route retired. Candidate `2bdc37a` passes all seven original integrated gates
+and independent source/QA/commit reviews, but neither original OBJ task reaches
+the required 1% instruction reduction. All seven literal non-clock pairs equal
+and all seven increase ceilings pass. Retirement `84f68b8` restores all 1,059
+build inputs exactly to qualified baseline `0452a73`, without claiming a new
+test invocation. Actual instruction fidelity, generated-code condition and
+retirement identity reviews close GO; instruction selection remains FAIL. No
+ordinary or heap worker runs for this candidate. Original release/main gates
+remain HOLD. Rejected root-local body candidate `d62cf67` remains isolated.
 
 ## Problem and attribution
 
