@@ -974,3 +974,17 @@ negative case only for a genuinely new boundary, not for incidental private layo
   0.77512688%; the unchanged six-task integer predicate passes with every adverse
   sign retained. Ordinary native qualification remains separate and pending;
   main/runtime integration and release remain HOLD.
+- The [glTF native checkpoint](../reviews/2026-11-08-gltf-field-layout-native.md)
+  is terminal partial: Windows C0/N0/C1 complete all original lanes with
+  zero worker failures; N1 remains not started. The sole candidate retains
+  nine pipeline medians above 3x and 31 endpoint medians at least 10x, with
+  both whole-child memory metrics below 3x. GNU has functional success but
+  zero ordinary samples. Its monitor replacement failure, 316.337363-second
+  observation gap and attached recovery remain explicit; no worker restarts.
+  Independent actual evidence reviews verify both complete 440-row exports,
+  including every missing cell and sampled-load fact. No native acceptance
+  follows. A separate [tiny-STL locating profile](../reviews/2026-11-08-small-stl-fixed-cost-attribution.md)
+  verifies three import-policy constructor calls, totaling 149,718 of
+  2,140,762 whole-worker Ir. Independent source tracing identifies duplicate
+  temporary owners; the next owner-reuse design is under review, with no
+  implementation or measured gain claimed.

@@ -134,3 +134,22 @@ widening scope. Independent raw evidence review closes with GO and retains
 both grid brk warnings. Ordinary builds and original Windows/GNU campaigns
 remain separate qualification; no native or source-retention decision follows
 from these diagnostic results.
+
+The [ordinary native attempt](../reviews/2026-11-08-gltf-field-layout-native.md)
+is now terminal partial on both platforms. Windows C0/N0/C1 each complete all
+110 lanes, but N1 does not start. All three measured campaigns retain nine
+pipeline breaches above 3x Assimp; the single candidate has 31 endpoint
+medians at least 10x. Whole-child memory medians stay below 3x. GNU functional
+matrices pass, but all ordinary opportunities remain unstarted. Its failed
+Windows monitor, recovered observation gap and original worker continuation
+remain explicit. Independent actual Windows/GNU and recovery reviews close.
+The missing candidate repetition and GNU intervals prevent native acceptance.
+
+An [additional tiny-STL locating profile](../reviews/2026-11-08-small-stl-fixed-cost-attribution.md)
+identifies three actual import-policy constructions on one successful read.
+Independent raw call-arc and source traces confirm entry validation discards
+the first owner and requirements/bootstrap reconstruct it. The next bounded
+design is under review: retain that original immutable owner, borrow it for
+requirements, then consume it in bootstrap while preserving the genuinely
+different Store-keyed policy owner. No saving, allocation or native result
+is inferred before implementation and measurement.
