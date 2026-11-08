@@ -916,18 +916,10 @@ pub(crate) struct ParserReadRow<'loan, D> {
     row: &'loan mut WorkEntry<D>,
     remaining: &'loan mut u64,
     dimension: D,
-    // Exact positive-success capacity for this exclusive loan, never a counter owner.
-    success_remaining: u64,
 }
 
 impl<D: Copy> ParserReadRow<'_, D> {
     pub(crate) fn complete(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
-        if amount <= self.success_remaining {
-            self.row.state.consumed += amount;
-            *self.remaining -= amount;
-            self.success_remaining -= amount;
-            return Ok(());
-        }
         if amount > *self.remaining {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
@@ -1028,25 +1020,10 @@ impl ParserFrame<1> {
             return Err(LedgerCause::InactiveLinearWorkPermit);
         }
         self.validate(state)?;
-        let row = &mut state.rows[group.positions[0]];
-        let remaining = &mut self.remaining[0];
-        let success_remaining = row
-            .state
-            .consumed
-            .checked_add(row.state.pending_consumed)
-            .and_then(|effective| {
-                row.state
-                    .attempted
-                    .min(row.policy.consumed_limit)
-                    .checked_sub(effective)
-            })
-            .unwrap_or(0)
-            .min(*remaining);
         Ok(ParserReadRow {
-            row,
-            remaining,
+            row: &mut state.rows[group.positions[0]],
+            remaining: &mut self.remaining[0],
             dimension: state.catalog[group.positions[0]],
-            success_remaining,
         })
     }
 
