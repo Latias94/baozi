@@ -1,8 +1,11 @@
 # Reuse exact success capacity within one parser read-row loan
 
-Status: bounded design reviewed; current source revalidated, not implemented.
-The fixed import policy-owner measurements are terminal and remain separate.
-Native convergence, main/runtime integration and release remain HOLD.
+Status: implemented and qualified, then rejected by its fixed instruction
+predicate. The production allowance is removed; meaningful behavior tests remain.
+Retirement source3 passes its own seven gates and independent source/commit
+association review closes with GO. The fixed
+import policy-owner measurements remain separate. Native convergence,
+main/runtime integration and release remain HOLD.
 
 ## Demonstrated work and selected interface
 
@@ -109,3 +112,30 @@ no confirmed endpoint >=10x and comparable whole-child memory <=3x remain the
 full-goal targets. Preserve missing campaigns, failures, load observations and
 all earlier regressions. No main/runtime integration or release follows until
 the original required evidence and targets actually close.
+
+## Rejected experiment checkpoint
+
+Source `292a5630ce596e9630ba70670838f3d278b5088b` passes independent
+production proof, amended independent frame/attempted test oracles and full
+source2 seven-gate QA: 3,963 workspace tests, 218 doctests, 138 consumer tests,
+both strict Clippy and both formats. All 1,059 inputs match frozen/QA/archive/
+committed maps. A stale source1 QA reference rejects the first symbol launcher
+before Cargo; its archive/error are retained, corrected builder2/profile2 close
+with bounded STATIC GO and the actual GNU symbol build succeeds.
+
+The [complete experiment report](../reviews/2026-11-08-parser-read-success-budget.md)
+retains all twelve fresh profiles, six literal equalities and raw evidence GO.
+Repeated OBJ instructions increase 0.11526267%, grid OBJ 0.52802284%; neither
+meets the required >=1% decrease. The no-six->1%-increase ceiling passes but
+does not repair selection FAIL. All five increases, glTF32's tiny decrease,
+grid warnings and attribution limits remain. No ordinary/heap campaign is
+run for this failed candidate and no predicate is changed to retain it.
+
+The production allowance is removed exactly back to the qualified bdc kernel;
+four new behavioral tests plus the existing pending-test strengthening remain.
+Source3 differs from source2 only at the kernel and passes its own original seven
+gates: 3,963 workspace tests, 218 doctests, 138 consumer tests, both strict and
+both formats. Retirement commit `17f74d5` preserves the exact frozen inputs;
+its independent source/commit association review closes with GO. The next actual-owner
+lead is the independently identified late optional-error carrier copy, a
+separate proposal rather than a redesign to rescue this rejected allowance.

@@ -1013,3 +1013,20 @@ negative case only for a genuinely new boundary, not for incidental private layo
   GO, locating the reduction in policy construction while preserving calibration,
   unresolved frames and temporary-count differences. No native source-speed acceptance, runtime
   main integration or release follows.
+- The [parser-read success-capacity experiment](../reviews/2026-11-08-parser-read-success-budget.md)
+  implements and qualifies `292a563` with independent production/F1-test/actual
+  seven-gate reviews: 3,963 workspace tests, 218 doctests, 138 consumer tests,
+  both strict and both formats, 1,059 stable committed inputs. Its fixed
+  instruction predicate fails: repeated OBJ +0.11526267%, grid OBJ +0.52802284%,
+  with no original OBJ >=1% reduction. Every literal pair matches and no case
+  exceeds the 1% regression ceiling, but that does not satisfy required gain.
+  Independent actual raw evidence review closes with fidelity GO/selection FAIL,
+  preserving all signs, both grid warnings, unknown symbols and the pre-Cargo
+  stale-QA launcher failure. The production allowance is removed back to the
+  qualified bdc kernel; four behavior tests and the strengthened pending test
+  remain. Retirement source3 independently passes all seven gates with the same
+  3,963/218/138 counts and existing skips; source-only retirement `17f74d5` matches
+  all 1,059 frozen inputs. Independent retirement QA/source association closes
+  with GO; the performance-candidate rejection remains unchanged.
+  No ordinary/heap run, native acceptance, main/runtime integration or release
+  follows for this rejected candidate. The original convergence targets remain.
