@@ -4,8 +4,9 @@ The first original ordinary attempt is incomplete on both hosts. Windows has
 no ordinary campaign; GNU completes only the closing **d81 control** C1. No
 b918 candidate ordinary clock exists in that attempt. The missing samples are
 retained, and source-speed retention, main integration and release remain
-**HOLD**. A second complete attempt is in progress under the same protocol;
-it does not overwrite or fill this first attempt's cells.
+**HOLD**. A second complete attempt also finishes partial under the same
+protocol, with only GNU control C1 available. It does not overwrite or fill
+this first attempt's cells; its separate outcome appears below.
 
 The [diagnostic checkpoint](2026-11-09-gltf-owner-directory.md) separately
 qualifies source `b918256`, the original seven source gates, exact physical
@@ -108,6 +109,58 @@ actual reviews close bounded fidelity/functional GO; neither grants ordinary
 candidate acceptance. The sealed partial decisions and supplied outer tool
 exit codes are distinct evidence layers; the observed tool codes are not
 rewritten to infer a different partial outcome.
+
+## Second complete attempt: candidate clocks still unavailable
+
+The second Windows attempt completes both 110-lane role-functional matrices
+and all raw contracts, then records every ordinary campaign NOT_STARTED.
+Gate waits are 181.730773000/181.728078100/181.763236300/180.099209900 seconds
+for C0/N0/N1/C1. A passed one-pair functional matrix does not populate those
+missing ordinary cells.
+
+The second GNU attempt likewise passes both 110-lane functional matrices.
+C0/N0/N1 fail their joint quiet opportunities after
+180.659805906/180.660057813/180.677726517 seconds. Control C1 obtains its
+20-second quiet interval at 88.350962079 seconds and completes all 110 lanes,
+5,062 commands, 5,060 comparison children and all 2,530 raw Baozi contracts,
+with zero worker failures. It retains 49 Windows-busy samples out of 57 runtime
+load samples, zero local named-tool samples and zero stale Windows snapshots.
+Passed prelaunch quiet does not remove that later contention.
+
+| GNU second C1 control ratio of medians | Pipelines >3x / 28 | Endpoints >3x / 110 | Endpoints >=10x / 110 | Maximum ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Stage | 14 | 70 | 30 | 211.565965583174x |
+| Parent elapsed | 4 | 14 | 0 | 4.059670344945x |
+| Whole-child RSS | 0 | 0 | 0 | 1.978906999041x |
+
+The worst stage is STL1/prepare/file; its memory ratio is 211.034926470588x,
+followed by F64 PLY/prepare/memory at 159.661807580175x. These are the retained
+control's tiny endpoints and their original timing scope, not b918 candidate
+regressions. Five Baozi and fourteen Assimp stage lanes have IQR above 25% of
+their medians; eight Assimp parent-clock lanes also exceed that ratio. No
+sample is filtered. The parent and stage metrics are not substituted for one
+another, and neither a single control's RSS nor heaptrack qualifies candidate
+ordinary memory.
+
+The separate [second Windows export](2026-11-09-gltf-owner-directory-native-windows-attempt-2-lanes.csv)
+retains all 440 unavailable rows; the [second GNU export](2026-11-09-gltf-owner-directory-native-linux-attempt-2-lanes.csv)
+retains 330 missing rows and 110 actual control rows, all 41 columns, signs,
+unavailable metrics and load context. Independent actual review authenticates
+both role-functional matrices, the whole C1 statistics and every exported
+cell. It reads the sealed workers and artifacts, not the later selection
+implementation worktree. Its report is
+`gltf-directory-native-attempt2-actual-review-1.md`, SHA-256
+`e4feb279227b171905799cd183502facf81fe98c4f2d581e8d55aeb2b322ff77`.
+
+Both attempts therefore lack C0/N0/N1/C1 brackets and all candidate ordinary
+samples. Two closing controls are not pooled or relabeled as opening controls;
+they cannot establish candidate repeatability, bracket drift, normalized
+improvement, candidate memory or a measured keep decision. No quiet threshold,
+timeout, task, sampling count or raw sign is changed to obtain an apparent
+success. The glTF source remains qualified for correctness and diagnostic
+instructions, with ordinary speed retention/main/release HOLD. Work can proceed
+on the independently reviewed next selection plan while these historical
+measurement gaps remain explicit; new source has a separate identity.
 
 ## Separate whole-worker heap capture
 
