@@ -78,6 +78,76 @@ struct OwnerSourceRange {
     length: usize,
 }
 
+const OWNER_CLASSES: usize = 19;
+
+fn owner_key(owner: ProfileOwner) -> (usize, u32) {
+    match owner {
+        ProfileOwner::Scene => (0, 0),
+        ProfileOwner::SyntheticRoot => (1, 0),
+        ProfileOwner::Node(id) => (2, id.index()),
+        ProfileOwner::Camera(index) => (3, index),
+        ProfileOwner::Light(index) => (4, index),
+        ProfileOwner::Image(index) => (5, index),
+        ProfileOwner::Sampler(index) => (6, index),
+        ProfileOwner::Texture(index) => (7, index),
+        ProfileOwner::TextureBinding(index) => (8, index),
+        ProfileOwner::Material(index) => (9, index),
+        ProfileOwner::LogicalMesh(index) => (10, index),
+        ProfileOwner::Primitive(index) => (11, index),
+        ProfileOwner::Attribute(index) => (12, index),
+        ProfileOwner::MeshInstance(index) => (13, index),
+        ProfileOwner::Skin(index) => (14, index),
+        ProfileOwner::MorphDefinition(index) => (15, index),
+        ProfileOwner::MorphDelta(index) => (16, index),
+        ProfileOwner::AnimationClip(index) => (17, index),
+        ProfileOwner::AnimationChannel(index) => (18, index),
+    }
+}
+
+/// Addressing for the compact owner keys actually observed during range coverage.
+/// Canonical owner validity and completeness remain the Core validator's responsibility.
+struct OwnerDirectoryShape {
+    offsets: [usize; OWNER_CLASSES + 1],
+}
+
+impl OwnerDirectoryShape {
+    fn from_maxima(
+        maxima: [usize; OWNER_CLASSES],
+        invalid_domain: bool,
+        owners: usize,
+    ) -> Result<Self> {
+        if invalid_domain {
+            return Err(GltfFailure::internal("glTF source owner directory exceeds usize").into());
+        }
+        let mut offsets = [0_usize; OWNER_CLASSES + 1];
+        for (class, length) in maxima.into_iter().enumerate() {
+            offsets[class + 1] = offsets[class].checked_add(length).ok_or_else(|| {
+                GltfFailure::internal("glTF source owner directory exceeds usize")
+            })?;
+        }
+        if offsets[OWNER_CLASSES] > owners {
+            return Err(GltfFailure::internal("glTF source owner directory is not compact").into());
+        }
+        Ok(Self { offsets })
+    }
+
+    fn len(&self) -> usize {
+        self.offsets[OWNER_CLASSES]
+    }
+
+    fn slot(&self, owner: ProfileOwner) -> Option<usize> {
+        let (class, local) = owner_key(owner);
+        let slot = self.offsets[class].checked_add(usize::try_from(local).ok()?)?;
+        (slot < self.offsets[class + 1]).then_some(slot)
+    }
+}
+
+struct OwnerDirectory<'scope> {
+    shape: OwnerDirectoryShape,
+    // Missing slots are usize::MAX. Each real value indexes an append-order range.
+    ranges: MeteredVec<'scope, usize>,
+}
+
 pub(super) struct OwnerSourceRun<'scope> {
     owner: Option<ProfileOwner>,
     ordinals: MeteredVec<'scope, SelectedEntryOrdinal>,
@@ -130,6 +200,7 @@ pub(super) struct SelectedSourceProfile<'scope> {
     entries: MeteredVec<'scope, SelectedSource<'scope>>,
     ordinals: MeteredVec<'scope, SelectedEntryOrdinal>,
     owners: MeteredVec<'scope, OwnerSourceRange>,
+    directory: Option<OwnerDirectory<'scope>>,
     finished: bool,
     extras: MeteredVec<'scope, SourceExtras>,
 }
@@ -217,6 +288,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
                 ImportStorageClass::FormatNormalization,
                 "gltf-selected-source-owner-ranges",
             ),
+            directory: None,
             finished: false,
             extras,
         };
@@ -362,7 +434,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
     pub(super) fn finish(
         &mut self,
-        ctx: &mut ParseRoot<'_, '_, '_>,
+        ctx: &mut ParseRoot<'_, '_, 'scope>,
         ordinary: &OwnerSourceRun<'_>,
         suspended: &OwnerSourceRun<'_>,
     ) -> Result<()> {
@@ -371,6 +443,7 @@ impl<'scope> SelectedSourceProfile<'scope> {
         ctx.child(&group, [1], |child| {
             child.run([1], || {
                 if self.finished
+                    || self.directory.is_some()
                     || ordinary.owner.is_some()
                     || suspended.owner.is_some()
                     || !ordinary.ordinals.is_empty()
@@ -383,13 +456,15 @@ impl<'scope> SelectedSourceProfile<'scope> {
                 Ok::<_, ContentError>(())
             })
         })?;
+        let mut maxima = [0_usize; OWNER_CLASSES];
+        let mut invalid_domain = false;
         let covered = ctx.child(&group, [0], |work| {
             work.poll()?;
             let mut covered = 0;
             for (index, range) in self.owners.as_slice().iter().enumerate() {
                 work.replenish(1)?;
                 covered = work.run([1], || -> Result<_> {
-                    range
+                    let end = range
                         .start
                         .checked_add(range.length)
                         .filter(|&end| {
@@ -398,9 +473,24 @@ impl<'scope> SelectedSourceProfile<'scope> {
                                 && end <= self.ordinals.len()
                         })
                         .ok_or_else(|| {
-                            GltfFailure::internal("glTF source owner range is invalid").into()
-                        })
+                            ContentError::from(GltfFailure::internal(
+                                "glTF source owner range is invalid",
+                            ))
+                        })?;
+                    let (class, local) = owner_key(range.owner);
+                    if let Some(length) = usize::try_from(local)
+                        .ok()
+                        .and_then(|index| index.checked_add(1))
+                    {
+                        maxima[class] = maxima[class].max(length);
+                    } else {
+                        // Keep all original range/coverage errors ahead of domain errors.
+                        invalid_domain = true;
+                    }
+                    Ok(end)
                 })?;
+                #[cfg(test)]
+                tests::directory_range_covered();
                 if (index + 1) % COMPARISONS_BETWEEN_POLLS as usize == 0 {
                     work.poll()?;
                 }
@@ -408,44 +498,76 @@ impl<'scope> SelectedSourceProfile<'scope> {
             work.poll()?;
             Ok::<_, ContentError>(covered)
         })?;
-        ctx.child(&group, [1], |child| {
+        let shape = ctx.child(&group, [1], |child| {
             child.run([1], || {
                 if covered != self.ordinals.len() {
                     return Err(
                         GltfFailure::internal("glTF source owner ranges are incomplete").into(),
                     );
                 }
-                Ok::<_, ContentError>(())
+                OwnerDirectoryShape::from_maxima(maxima, invalid_domain, self.owners.len())
             })
         })?;
-        if self.owners.len() > 1 {
-            ctx.child(&group, [0], |ledger_work| {
-                let mut work = ProfileComparisonWork::new(ledger_work);
+        let mut directory = OwnerDirectory {
+            shape,
+            ranges: ctx.services()?.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "gltf-selected-source-owner-directory",
+            ),
+        };
+        directory
+            .ranges
+            .try_reserve(&mut ctx.services()?, directory.shape.len())?;
+        ctx.child(&group, [0], |work| {
+            work.poll()?;
+            for index in 0..directory.shape.len() {
+                work.replenish(1)?;
+                work.run([1], || {
+                    directory.ranges.try_push_reserved(usize::MAX)?;
+                    Ok::<_, ContentError>(())
+                })?;
                 #[cfg(test)]
-                tests::comparison_scope(tests::ComparisonSite::DirectorySort);
-                self.owners
-                    .try_sort_unstable_by(|left, right| work.run(|| left.owner.cmp(&right.owner)))
-            })?;
-        }
-        ctx.poll()?;
-        ctx.child(&group, [0], |ledger_work| {
-            ledger_work.poll()?;
-            {
-                let mut work = ProfileComparisonWork::new(ledger_work);
-                #[cfg(test)]
-                tests::comparison_scope(tests::ComparisonSite::OwnerUnique);
-                for pair in self.owners.as_slice().windows(2) {
-                    if work.run(|| pair[0].owner == pair[1].owner)? {
+                tests::directory_initialized();
+                if (index + 1) % COMPARISONS_BETWEEN_POLLS as usize == 0 {
+                    work.poll()?;
+                }
+            }
+            work.poll()?;
+            Ok::<_, ContentError>(())
+        })?;
+        ctx.child(&group, [0], |work| {
+            work.poll()?;
+            for (index, range) in self.owners.as_slice().iter().enumerate() {
+                work.replenish(1)?;
+                work.run([1], || {
+                    let entry = directory
+                        .shape
+                        .slot(range.owner)
+                        .and_then(|slot| directory.ranges.as_mut_slice().get_mut(slot))
+                        .ok_or_else(|| {
+                            GltfFailure::internal("glTF source owner directory is invalid")
+                        })?;
+                    if *entry != usize::MAX {
                         return Err(
                             GltfFailure::internal("glTF source owner was completed twice").into(),
                         );
                     }
+                    *entry = index;
+                    Ok::<_, ContentError>(())
+                })?;
+                #[cfg(test)]
+                tests::directory_registered();
+                if (index + 1) % COMPARISONS_BETWEEN_POLLS as usize == 0 {
+                    work.poll()?;
                 }
             }
-            ledger_work.poll()?;
+            work.poll()?;
             Ok::<_, ContentError>(())
         })?;
+        #[cfg(test)]
+        tests::before_directory_publication();
         ctx.poll()?;
+        self.directory = Some(directory);
         self.finished = true;
         Ok(())
     }
@@ -455,15 +577,28 @@ impl<'scope> SelectedSourceProfile<'scope> {
         ctx: &mut ParseRoot<'_, '_, '_>,
         owner: ProfileOwner,
     ) -> Result<&[SelectedEntryOrdinal]> {
-        let range = lookup(ctx, self.owners.len(), 1, || {
-            self.owners
-                .as_slice()
-                .binary_search_by_key(&owner, |range| range.owner)
-                .ok()
-                .and_then(|index| self.owners.as_slice().get(index))
-        })?
-        .ok_or_else(|| GltfFailure::internal("glTF canonical owner has no source mapping"))?;
         let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
+        let range = ctx.child(&group, [1], |child| {
+            child.run([1], || {
+                self.directory
+                    .as_ref()
+                    .and_then(|directory| {
+                        directory
+                            .shape
+                            .slot(owner)
+                            .and_then(|slot| directory.ranges.as_slice().get(slot))
+                    })
+                    .and_then(|&index| self.owners.as_slice().get(index))
+                    .filter(|range| range.owner == owner)
+                    .ok_or_else(|| {
+                        ContentError::from(GltfFailure::internal(
+                            "glTF canonical owner has no source mapping",
+                        ))
+                    })
+            })
+        })?;
+        #[cfg(test)]
+        tests::directory_query_completed(1);
         ctx.child(&group, [1], |child| {
             child.run([1], || {
                 if !self.finished || range.length == 0 {

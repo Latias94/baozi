@@ -1,4 +1,7 @@
 use super::*;
+
+mod directory;
+mod populations;
 use baozi_import::{
     CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor,
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
@@ -27,15 +30,20 @@ pub(super) enum ComparisonSite {
     ExtrasSort,
     RunSort,
     RunDedup,
-    DirectorySort,
-    OwnerUnique,
+    DirectoryInit,
+    DirectoryRegister,
     OrdinalTransfer,
 }
 
 struct CompletionProbe {
     site: ComparisonSite,
     completed: [usize; 7],
+    directory_covered: usize,
+    directory_queries: usize,
+    directory_query_work: u64,
     cancel_on: Option<(ComparisonSite, usize, CancellationToken)>,
+    panic_on: Option<(ComparisonSite, usize)>,
+    cancel_before_directory_publication: Option<CancellationToken>,
 }
 
 thread_local! {
@@ -53,14 +61,19 @@ impl CompletionGuard {
             *slot = Some(CompletionProbe {
                 site: ComparisonSite::Direct,
                 completed: [0; 7],
+                directory_covered: 0,
+                directory_queries: 0,
+                directory_query_work: 0,
                 cancel_on,
+                panic_on: None,
+                cancel_before_directory_publication: None,
             });
         });
         Self(PhantomData)
     }
 
-    fn finish(self) -> [usize; 7] {
-        COMPLETION_PROBE.with(|slot| slot.borrow_mut().take().unwrap().completed)
+    fn finish(self) -> CompletionProbe {
+        COMPLETION_PROBE.with(|slot| slot.borrow_mut().take().unwrap())
     }
 }
 
@@ -90,21 +103,68 @@ pub(super) fn ordinal_transferred() {
     completed_at(ComparisonSite::OrdinalTransfer);
 }
 
-fn completed_at(completed_site: ComparisonSite) {
+pub(super) fn directory_initialized() {
+    completed_at(ComparisonSite::DirectoryInit);
+}
+
+pub(super) fn directory_registered() {
+    completed_at(ComparisonSite::DirectoryRegister);
+}
+
+pub(super) fn before_directory_publication() {
     let token = COMPLETION_PROBE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let probe = slot.as_mut()?;
-        probe.completed[completed_site as usize] += 1;
-        let (site, count, _) = probe.cancel_on.as_ref()?;
-        if *site == completed_site && *count == probe.completed[completed_site as usize] {
-            probe.cancel_on.take().map(|(_, _, token)| token)
-        } else {
-            None
-        }
+        slot.borrow_mut()
+            .as_mut()
+            .and_then(|probe| probe.cancel_before_directory_publication.take())
     });
     if let Some(token) = token {
         token.cancel();
     }
+}
+
+pub(super) fn directory_range_covered() {
+    COMPLETION_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow_mut().as_mut() {
+            probe.directory_covered += 1;
+        }
+    });
+}
+
+pub(super) fn directory_query_completed(query_work: u64) {
+    COMPLETION_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow_mut().as_mut() {
+            probe.directory_queries += 1;
+            probe.directory_query_work += query_work;
+        }
+    });
+}
+
+fn completed_at(completed_site: ComparisonSite) {
+    let (token, panic) = COMPLETION_PROBE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(probe) = slot.as_mut() else {
+            return (None, false);
+        };
+        probe.completed[completed_site as usize] += 1;
+        let completed = probe.completed[completed_site as usize];
+        let token = if probe
+            .cancel_on
+            .as_ref()
+            .is_some_and(|(site, count, _)| *site == completed_site && *count == completed)
+        {
+            probe.cancel_on.take().map(|(_, _, token)| token)
+        } else {
+            None
+        };
+        (token, probe.panic_on == Some((completed_site, completed)))
+    });
+    if let Some(token) = token {
+        token.cancel();
+    }
+    assert!(
+        !panic,
+        "interrupt directory construction before publication"
+    );
 }
 
 type ComparisonAction = for<'region, 'session> fn(
@@ -159,13 +219,22 @@ struct Observation {
     failure: ImportFailure,
     physical: usize,
     completed: [usize; 7],
+    directory_covered: usize,
+    directory_queries: usize,
+    directory_query_work: u64,
 }
 
 impl Observation {
     fn comparisons(&self) -> u64 {
-        self.completed[..ComparisonSite::OrdinalTransfer as usize]
-            .iter()
-            .sum::<usize>() as u64
+        [
+            ComparisonSite::Direct,
+            ComparisonSite::ExtrasSort,
+            ComparisonSite::RunSort,
+            ComparisonSite::RunDedup,
+        ]
+        .into_iter()
+        .map(|site| self.completed[site as usize] as u64)
+        .sum()
     }
 }
 
@@ -232,10 +301,14 @@ fn run_with_assets(
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(failure.ledger().active_reservations(), 0);
     assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    let population = guard.finish();
     Observation {
         failure,
         physical: physical.load(AtomicOrdering::Relaxed),
-        completed: guard.finish(),
+        completed: population.completed,
+        directory_covered: population.directory_covered,
+        directory_queries: population.directory_queries,
+        directory_query_work: population.directory_query_work,
     }
 }
 
@@ -260,7 +333,7 @@ fn assert_ledger_denial(failure: &ImportFailure) {
         ImportCause::OperationTerminal(terminal) => {
             assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
         }
-        cause => panic!("expected comparison admission failure, got {cause:?}"),
+        cause => panic!("expected work admission failure, got {cause:?}"),
     }
 }
 
@@ -326,10 +399,16 @@ fn ordinal_run<'session>(
 }
 
 fn relation(profile: &SelectedSourceProfile<'_>) -> Vec<(ProfileOwner, SourceEntityId)> {
+    assert!(profile.finished);
     profile
-        .owners
+        .directory
+        .as_ref()
+        .expect("a finished profile publishes its directory")
+        .ranges
         .as_slice()
         .iter()
+        .filter(|&&index| index != usize::MAX)
+        .map(|&index| &profile.owners.as_slice()[index])
         .flat_map(|range| {
             profile.ordinals.as_slice()[range.start..range.start + range.length]
                 .iter()
@@ -489,8 +568,14 @@ fn completed_runs_preserve_the_literal_relation_and_reuse_charged_scratch() {
                 assert!(ordinary.ordinals.is_empty());
                 assert_eq!(ordinary.owner, None);
             }
-            assert!(selected.for_owner(ctx, ProfileOwner::Scene).is_err());
+            assert!(!selected.finished);
+            assert!(selected.directory.is_none());
             selected.finish(ctx, &ordinary, &suspended)?;
+            assert_eq!(
+                selected.owners.as_slice().iter().map(|range| range.owner).collect::<Vec<_>>(),
+                [ProfileOwner::Attribute(1), ProfileOwner::Attribute(0), ProfileOwner::SyntheticRoot, ProfileOwner::Scene],
+            );
+            assert_eq!(selected.directory.as_ref().unwrap().ranges.as_slice(), &[3, 2, 1, 0]);
             assert_eq!(relation(&selected), expected);
             assert_eq!(selected.link_count(), expected.len());
             assert_eq!(selected.owners.len(), 4);
@@ -519,10 +604,13 @@ fn completed_runs_preserve_the_literal_relation_and_reuse_charged_scratch() {
         8
     );
     assert!(observation.completed[ComparisonSite::RunSort as usize] > 0);
-    assert!(observation.completed[ComparisonSite::DirectorySort as usize] > 0);
     assert_eq!(
-        observation.completed[ComparisonSite::OwnerUnique as usize],
-        3
+        observation.completed[ComparisonSite::DirectoryInit as usize],
+        4
+    );
+    assert_eq!(
+        observation.completed[ComparisonSite::DirectoryRegister as usize],
+        4
     );
     let (attempted, consumed) = counts(&observation.failure);
     assert_eq!(attempted, consumed);
@@ -640,10 +728,10 @@ fn empty_singleton_order_has_no_comparison_work_and_still_observes_entry_cancell
 fn duplicate_completed_owners_and_unfinished_runs_never_authorize_lookup() {
     // A rejected parser child closes its execution channel. Each independent fault
     // needs a fresh import, and its original error must reach the format boundary.
-    for (case, unique_comparisons) in [
+    for (case, registrations) in [
         ("unfinished", 0),
         ("unfinished-lookup", 0),
-        ("duplicate", 1),
+        ("duplicate", 2),
     ] {
         let primary = serde_json::to_vec(&serde_json::json!({"case": case})).unwrap();
         let observation = run(
@@ -671,13 +759,35 @@ fn duplicate_completed_owners_and_unfinished_runs_never_authorize_lookup() {
                             selected.link(ctx, &mut ordinary, ProfileOwner::Scene, DOCUMENT)?;
                             selected.complete_owner(ctx, &mut ordinary, ProfileOwner::Scene)?;
                         }
-                        selected
+                        let original_ranges = selected
+                            .owners
+                            .as_slice()
+                            .iter()
+                            .map(|range| (range.owner, range.start, range.length))
+                            .collect::<Vec<_>>();
+                        let original_ordinals = selected.ordinals.as_slice().to_vec();
+                        let error = selected
                             .finish(ctx, &ordinary, &suspended)
-                            .expect_err("a completed owner may not recur")
+                            .expect_err("a completed owner may not recur");
+                        assert_eq!(
+                            selected
+                                .owners
+                                .as_slice()
+                                .iter()
+                                .map(|range| (range.owner, range.start, range.length))
+                                .collect::<Vec<_>>(),
+                            original_ranges
+                        );
+                        assert_eq!(selected.ordinals.as_slice(), original_ordinals.as_slice());
+                        error
                     }
                     _ => panic!("known owner-rejection fixture"),
                 };
                 assert!(!selected.finished);
+                assert!(selected.directory.is_none());
+                if case["case"] == "duplicate" {
+                    assert_eq!(error.to_string(), "glTF source owner was completed twice");
+                }
                 physical.store(1, AtomicOrdering::Relaxed);
                 Err(error)
             },
@@ -692,8 +802,13 @@ fn duplicate_completed_owners_and_unfinished_runs_never_authorize_lookup() {
         );
         assert_eq!(observation.physical, 1, "{case}");
         assert_eq!(
-            observation.completed[ComparisonSite::OwnerUnique as usize],
-            unique_comparisons,
+            observation.completed[ComparisonSite::DirectoryInit as usize],
+            if case == "duplicate" { 2 } else { 0 },
+            "{case}",
+        );
+        assert_eq!(
+            observation.completed[ComparisonSite::DirectoryRegister as usize],
+            registrations,
             "{case}",
         );
     }
@@ -1099,7 +1214,7 @@ fn completed_nodes<'session>(
 }
 
 #[test]
-fn directory_ordering_and_uniqueness_observe_bounded_and_short_scope_cancellation() {
+fn directory_initialization_and_registration_observe_bounded_and_short_scope_cancellation() {
     for length in [2, 130] {
         let primary = serde_json::to_vec(
             &serde_json::json!({ "nodes": vec![serde_json::json!({}); length] }),
@@ -1117,25 +1232,58 @@ fn directory_ordering_and_uniqueness_observe_bounded_and_short_scope_cancellatio
             &primary,
         );
         assert_cancelled(&setup.failure);
-        for site in [ComparisonSite::DirectorySort, ComparisonSite::OwnerUnique] {
+        for (site, cancel_after) in [
+            (ComparisonSite::DirectoryInit, 1),
+            (ComparisonSite::DirectoryInit, 64),
+            (ComparisonSite::DirectoryInit, 65),
+            (ComparisonSite::DirectoryInit, length),
+            (ComparisonSite::DirectoryRegister, 1),
+            (ComparisonSite::DirectoryRegister, 64),
+            (ComparisonSite::DirectoryRegister, 65),
+            (ComparisonSite::DirectoryRegister, length),
+        ] {
+            if cancel_after > length {
+                continue;
+            }
             let observation = run(
                 |ctx, _, _| {
                     let (mut selected, ordinary, suspended) = completed_nodes(ctx)?;
                     let result = selected.finish(ctx, &ordinary, &suspended);
                     assert!(result.is_err());
                     assert!(!selected.finished);
+                    assert!(selected.directory.is_none());
+                    assert_eq!(selected.owners.len(), selected.ordinals.len());
                     result
                 },
                 None,
-                Some((site, 1)),
+                Some((site, cancel_after)),
                 &primary,
             );
             assert_cancelled(&observation.failure);
             assert_eq!(
                 observation.completed[site as usize],
-                if length == 2 { 1 } else { 64 }
+                if length == 2 || cancel_after == length {
+                    length
+                } else if cancel_after <= 64 {
+                    64
+                } else {
+                    128
+                }
             );
-            let expected = counts(&setup.failure).1 + length as u64 + 2 + observation.comparisons();
+            let initialized = observation.completed[ComparisonSite::DirectoryInit as usize];
+            let registered = observation.completed[ComparisonSite::DirectoryRegister as usize];
+            assert_eq!(observation.directory_covered, length);
+            assert_eq!(observation.comparisons(), 0);
+            if site == ComparisonSite::DirectoryInit {
+                assert_eq!(registered, 0);
+            } else {
+                assert_eq!(initialized, length);
+            }
+            let expected = counts(&setup.failure).1
+                + length as u64
+                + 2
+                + initialized as u64
+                + registered as u64;
             assert_eq!(counts(&observation.failure), (expected, expected));
         }
     }
