@@ -964,6 +964,7 @@ impl<D: Copy> ParserReadRow<'_, D> {
 
 impl<const N: usize> ParserFrame<N> {
     /// Records one exact group prefix without reserving a pending-consumed envelope.
+    #[inline]
     pub(crate) fn complete<D: Copy>(
         &mut self,
         group: &WorkLayout<N>,
