@@ -1079,3 +1079,18 @@ negative case only for a genuinely new boundary, not for incidental private layo
   ordinary launch records and final helper bytes are not rewritten for that
   later phase. Main integration, measured source retention and release remain
   HOLD; continue the original convergence goal.
+- The [plain parser-completion hint](../reviews/2026-11-09-parser-completion-inline.md)
+  qualifies `20ea126` with 3,972 workspace tests, 218 doctests, 138 independent
+  consumer tests, both strict Clippy gates and both formats. Independent exact
+  source/QA/commit review authenticates the single ordinary annotation and
+  1,060 inputs. The original seven-task instruction predicate fails: repeated
+  OBJ increases 1.24991264% and grid OBJ 3.53262580%, both above the increase
+  ceiling with no required OBJ gain. All seven complete literal non-clock
+  pairs match; all fourteen profiles, 42 commands, 84 streams and signed
+  changes remain retained. The annotation is removed at `97d475e`, returning
+  all 1,060 runtime/test inputs to qualified d81 bytes. Actual instruction,
+  generated-code and retirement-identity reviews have their own closures;
+  source correctness cannot rescue failed performance selection. No ordinary
+  or heap worker is run for this rejected candidate, and no main/runtime or
+  release acceptance follows. Continue attributing actual owner costs under
+  the original convergence requirements.
