@@ -1,11 +1,17 @@
 # Resolve a preparation selection once and retain its actual readers
 
-Status: independently reviewed PLAN GO, with no material P1/P2 amendment.
-Implementation has not started. The fixed glTF directory candidate b918 remains
-under ordinary attempt 2; do not mix this algorithm into those workers or source
-identities. Finish that fixed measurement disposition before implementing this
-bounded follow-up after the actual finite Core/Postprocess cut and fresh
-attribution. Native retention/main/release remain HOLD.
+Status: source `6203ce2` is implemented and passes all seven integrated gates,
+the prospective seven-task instruction predicate and independent actual
+source/QA/archive, instruction and compiled-owner reviews. Both ordinary
+candidate builds complete in the existing repository/target. Original
+Windows/GNU ordinary and separate heap qualification remain pending;
+native retention/main/release remain HOLD. See the
+[actual checkpoint](../reviews/2026-11-09-prepare-selection-owner.md).
+
+The fixed b918 ordinary attempt 2 ends incomplete before this implementation
+starts; its missing candidate clocks remain unavailable. The prospective design
+below is retained as the source and measurement contract. New workers use the
+separate `6203ce2` identity and do not alter the earlier b918 evidence.
 
 The exact private reviewed draft SHA-256 is
 `425b6ea499ff7bf91682f9c77bfe3a86fbe683e3083e476657bb45d04db0b640`.

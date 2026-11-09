@@ -1094,3 +1094,29 @@ negative case only for a genuinely new boundary, not for incidental private layo
   or heap worker is run for this rejected candidate, and no main/runtime or
   release acceptance follows. Continue attributing actual owner costs under
   the original convergence requirements.
+- The [glTF source-owner directory](../reviews/2026-11-09-gltf-owner-directory.md)
+  qualifies `b918256` with 3,984 workspace tests, 218 doctests, 138 independent
+  consumer tests, both strict Clippy gates and both formats. Its seven-task
+  instruction predicate and positive compiled-owner review pass; GLB32 whole
+  worker Ir falls 2.38503569%. Two later ordinary attempts remain incomplete,
+  with no candidate ordinary clock and only GNU closing controls available.
+  Their [native/heap report](../reviews/2026-11-09-gltf-owner-directory-native-heap.md)
+  retains those missing cells and actual load. Separate eighteen-worker heap
+  capture and actual stack/interception review close bounded GO, including
+  the added real directory allocation. No native speed or main/release keep
+  follows from instruction reduction or incomplete ordinary brackets.
+- The [resolved preparation selection](../reviews/2026-11-09-prepare-selection-owner.md)
+  qualifies `6203ce2` with 3,992 workspace tests, 218 doctests, 138 independent
+  consumer tests, both strict Clippy gates and both formats. Independent
+  source, actual QA/commit/archive, instruction and compiled-owner reviews
+  close GO. One actual Empty/One/Many reader owner replaces sorted-ID scratch,
+  repeated resolution, full-Scene traversal and binary membership search.
+  Caller-order first lookup failure is an explicit breaking contract; successful
+  source order and existing error/control/cleanup ownership remain. All seven
+  complete literal non-clock pairs, including import work, match. The frozen
+  same-case owner/whole-worker predicate passes: GLB1/GLB32/STL1 prepare-entry
+  Ir falls 30.82170468%/21.91881901%/31.26408374%, with whole-worker reductions
+  0.21928198%/0.37857734%/0.66895345%. All seven signs remain; OBJ improvements
+  are small. Both new ordinary candidate builds complete serially in the
+  current repository/target. Actual Windows/GNU ordinary and separate heap
+  qualification remain pending; native retention, main and release remain HOLD.

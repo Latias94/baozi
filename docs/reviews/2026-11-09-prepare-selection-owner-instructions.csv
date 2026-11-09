@@ -1,0 +1,8 @@
+case,control_Ir,candidate_Ir,change_Ir,change_percent,change_sign,control_prepare_Ir,candidate_prepare_Ir,prepare_change_Ir,prepare_change_percent,prepare_change_sign,complete_nonclock_equal,prepare_decrease_atleast10pct,wholeworker_decrease_atleast0_2pct,same_case_prepare_and_wholeworker_decrease,increase_atmost1pct
+gltf-shared-1,5623353,5611022,-12331,-0.21928198354255904,decrease,41779,28902,-12877,-30.821704684171475,decrease,True,True,True,True,True
+gltf-shared-32,24740255,24646594,-93661,-0.3785773428770237,decrease,425543,332269,-93274,-21.918819014764665,decrease,True,True,True,True,True
+ply-f64-neighbors,2375303,2361853,-13450,-0.5662435487177846,decrease,,,,,,True,,True,,True
+stl-repeated-1024,12176675,12164370,-12305,-0.10105385911999787,decrease,,,,,,True,,False,,True
+obj-repeated-16384,709670195,709644780,-25415,-0.003581241001674024,decrease,,,,,,True,,False,,True
+obj-grid-128,1988093668,1988080614,-13054,-0.0006566089017894302,decrease,,,,,,True,,False,,True
+stl-repeated-1,2025552,2012002,-13550,-0.668953450713682,decrease,41271,28368,-12903,-31.264083739187324,decrease,True,True,True,True,True
