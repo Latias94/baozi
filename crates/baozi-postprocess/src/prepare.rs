@@ -61,6 +61,9 @@ impl SelectionEvidenceWork {
 
 /// Prepare a generation-qualified selection atomically with explicit policies and limits.
 /// Source positions and all retained attributes remain borrowed until the one final transaction.
+/// Requested handles are resolved in caller order; the first failed lookup is reported before
+/// duplicate-target or topology checks. Successfully resolved targets are processed in canonical
+/// Scene mesh/primitive order, independently of the caller's order.
 #[allow(clippy::result_large_err)]
 pub fn prepare_triangles(
     input: ValidatedScene,

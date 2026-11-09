@@ -1131,6 +1131,282 @@ fn many_primitives_materialize_into_one_typed_geometry_owner() {
 }
 
 #[test]
+fn published_primitive_id_order_matches_logical_enumeration_across_shared_edits() {
+    use baozi_operation::OperationControl;
+
+    use crate::canonical_scene::store::construction::node_scene::edit::{
+        NodeSceneEditTerminal, NodeTransformEditStart, try_begin_node_transform_edit,
+    };
+    use crate::canonical_scene::store::production::{
+        GeometryMeshInstanceAuthoring, LogicalMeshLocalId, MeshInstanceDeformationAuthoring,
+    };
+    use crate::provenance::OptionsDigest;
+    use crate::{
+        AttributeData, AttributeElement, PrimitiveRef, SceneEntityKind, SceneLookupError,
+        ValidatedScene,
+    };
+
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let position_values = [
+        [11.0, 0.0, 0.0, 111.0, 0.0, 0.0],
+        [12.0, 0.0, 0.0, 112.0, 0.0, 0.0],
+        [21.0, 0.0, 0.0, 121.0, 0.0, 0.0],
+        [22.0, 0.0, 0.0, 122.0, 0.0, 0.0],
+        [31.0, 0.0, 0.0, 131.0, 0.0, 0.0],
+        [32.0, 0.0, 0.0, 132.0, 0.0, 0.0],
+    ];
+    let attributes = position_values
+        .iter()
+        .enumerate()
+        .map(|(index, values)| {
+            if index % 2 == 0 {
+                GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    values,
+                    Presence::Absent,
+                )
+            } else {
+                GeometryAttributeAuthoring::sparse_f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    2,
+                    &[1],
+                    &values[3..],
+                    &values[..3],
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let primitives = (0..6)
+        .map(|index| {
+            GeometryPrimitiveAuthoring::new(
+                GeometryTopologyAuthoring::Points,
+                Presence::Absent,
+                crate::MaterialAssignment::Unspecified,
+                AuthoringRange::new(index, 1),
+            )
+        })
+        .collect::<Vec<_>>();
+    let meshes = [
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 2)).with_name("earlier"),
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(2, 2)).with_name("later"),
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(4, 2)).with_name("uninstanced"),
+    ];
+    let instances = [
+        GeometryMeshInstanceAuthoring::new(NodeLocalId::new(0), LogicalMeshLocalId::new(1)),
+        GeometryMeshInstanceAuthoring::new(NodeLocalId::new(0), LogicalMeshLocalId::new(0)),
+        GeometryMeshInstanceAuthoring::new(NodeLocalId::new(0), LogicalMeshLocalId::new(1)),
+    ];
+    let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]); 3];
+    let primitive_deformations = [PrimitiveDeformationAuthoring::new(Presence::Absent, &[]); 6];
+    let instance_deformations =
+        [MeshInstanceDeformationAuthoring::new(Presence::Absent, Presence::Absent); 3];
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let nodes = single_trs_batch();
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &instances);
+    let deformation = DeformationAuthoringBatch::new(
+        &[],
+        &[],
+        &logical_morphs,
+        &primitive_deformations,
+        &instance_deformations,
+    );
+    let animation = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(spatial, nodes, appearance, geometry, deformation, animation);
+    let mut construction_root = SceneCanonicalInvocationHost::new();
+    let parts = successful_parts(
+        NodeSceneTestTransaction::with_account(
+            &mut construction_root,
+            &account,
+            test_limits(),
+            SceneAuthoringBatch::new(
+                spatial,
+                nodes,
+                appearance,
+                geometry,
+                deformation,
+                animation,
+                profile.batch(),
+            ),
+            SceneValidationLimits::default(),
+        )
+        .expect("primitive order fixture admission")
+        .finish_draft()
+        .expect("primitive order fixture activation")
+        .publish_for_test()
+        .expect("primitive order fixture publication"),
+    );
+    let source = ValidatedScene::from_node_scene(parts.scene);
+    let target = source.roots().next().expect("authored root").id();
+    let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+        source.as_node_scene(),
+        target,
+        trs_transform(42.0),
+        OptionsDigest::sha256([0x42; 32]),
+    )
+    .expect("shared geometry edit planning") else {
+        panic!("the node transform must change");
+    };
+    let mut edit_root = SceneCanonicalInvocationHost::new();
+    let NodeSceneEditTerminal::Success(edited) = pending
+        .prepare(
+            &mut edit_root,
+            source.as_node_scene(),
+            test_limits(),
+            OperationControl::default(),
+        )
+        .expect("shared geometry edit publication")
+        .handoff()
+    else {
+        panic!("the node transform edit must publish");
+    };
+    let destination = ValidatedScene::from_node_scene(edited.scene);
+    assert_ne!(source.generation(), destination.generation());
+    assert!(
+        destination
+            .roots()
+            .next()
+            .expect("edited root")
+            .authored_transform()
+            .has_same_authored_bits(trs_transform(42.0))
+    );
+    assert!(std::ptr::eq(
+        source.as_node_scene().read_geometry(),
+        destination.as_node_scene().read_geometry(),
+    ));
+
+    let expected_order = [11.0, 12.0, 21.0, 22.0, 31.0, 32.0];
+    let position_order = |primitives: &[PrimitiveRef<'_>]| {
+        primitives
+            .iter()
+            .map(|primitive| {
+                let Some(AttributeElement::F32(values)) = primitive
+                    .positions()
+                    .expect("authored positions")
+                    .element(0)
+                else {
+                    panic!("the first authored position must be F32");
+                };
+                values[0]
+            })
+            .collect::<Vec<_>>()
+    };
+    for (scene, other) in [(&source, &destination), (&destination, &source)] {
+        let ordered = scene
+            .meshes()
+            .flat_map(|mesh| mesh.primitives())
+            .collect::<Vec<_>>();
+        assert_eq!(scene.mesh_count(), 3);
+        assert_eq!(scene.primitive_count(), 6);
+        assert_eq!(
+            scene.meshes().map(|mesh| mesh.name()).collect::<Vec<_>>(),
+            [Some("earlier"), Some("later"), Some("uninstanced")],
+        );
+        assert!(scene.meshes().all(|mesh| mesh.primitive_count() == 2));
+        assert_eq!(position_order(&ordered), expected_order);
+        assert!(ordered[0].id() < ordered[1].id());
+        assert!(
+            ordered[1].id() < ordered[2].id(),
+            "earlier mesh local one must precede later mesh local zero",
+        );
+        assert!(ordered.windows(2).all(|pair| pair[0].id() < pair[1].id()));
+        for (index, primitive) in ordered.iter().enumerate() {
+            let id = primitive.id();
+            assert_eq!(
+                scene.primitive(id).expect("Scene lookup round trip").id(),
+                id
+            );
+            assert_eq!(
+                primitive
+                    .mesh()
+                    .primitive(id)
+                    .expect("mesh lookup round trip")
+                    .id(),
+                id,
+            );
+            let positions = primitive.positions().expect("authored positions");
+            assert_eq!(positions.len(), 2);
+            assert_eq!(
+                positions.element(1),
+                Some(AttributeElement::F32(&[
+                    expected_order[index] + 100.0,
+                    0.0,
+                    0.0,
+                ])),
+            );
+            if index % 2 == 0 {
+                assert!(matches!(positions.data(), AttributeData::DenseF32 { .. }));
+            } else {
+                assert!(matches!(positions.data(), AttributeData::SparseF32 { .. }));
+            }
+        }
+        let mut scrambled = [4, 1, 3, 0, 5, 2].map(|index| {
+            scene
+                .primitive(ordered[index].id())
+                .expect("scrambled reader lookup")
+        });
+        scrambled.sort_unstable_by_key(|primitive| primitive.id());
+        assert_eq!(position_order(&scrambled), expected_order);
+        assert!(
+            scrambled
+                .iter()
+                .zip(&ordered)
+                .all(|(actual, expected)| actual.id() == expected.id())
+        );
+
+        let placed_meshes = scene
+            .mesh_instances()
+            .map(|instance| instance.mesh())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            placed_meshes
+                .iter()
+                .map(|mesh| mesh.name())
+                .collect::<Vec<_>>(),
+            [Some("later"), Some("earlier"), Some("later")],
+        );
+        assert!(
+            placed_meshes[0]
+                .primitives()
+                .zip(placed_meshes[2].primitives())
+                .all(|(first, repeated)| first.id() == repeated.id())
+        );
+        for foreign in other.meshes().flat_map(|mesh| mesh.primitives()) {
+            assert!(matches!(
+                scene.primitive(foreign.id()),
+                Err(SceneLookupError::GenerationMismatch {
+                    kind: SceneEntityKind::Primitive,
+                    expected,
+                    actual,
+                }) if expected == scene.generation() && actual == other.generation()
+            ));
+        }
+    }
+    drop(source);
+    drop(parts.report);
+    drop(construction_root);
+    assert_eq!(
+        position_order(
+            &destination
+                .meshes()
+                .flat_map(|mesh| mesh.primitives())
+                .collect::<Vec<_>>()
+        ),
+        expected_order,
+    );
+    drop(destination);
+    drop(edited.report);
+    drop(edit_root);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn present_empty_scene_publishes_all_domains() {
     let factory = test_factory();
     let account = test_account(&factory, 256);

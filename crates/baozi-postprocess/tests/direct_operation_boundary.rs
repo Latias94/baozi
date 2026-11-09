@@ -49,7 +49,8 @@ fn unchanged_operation_preserves_input_identity_and_import_evidence() {
     drop(scene);
     drop(evidence);
     assert_eq!(report.input_generation(), generation);
-    assert!(report.resources().peak_administrative_bytes() > 0);
+    assert_eq!(report.resources().peak_administrative_bytes(), 0);
+    assert_eq!(report.resources().peak_staging_bytes(), 0);
     assert_eq!(report.resources().published_outcome_evidence_bytes(), 0);
     assert_eq!(report.resources().published_terminal_evidence_records(), 0);
 }

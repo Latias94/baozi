@@ -28,6 +28,7 @@ const UVS: [f64; 8] = [0.0, -0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 #[derive(Clone, Copy)]
 struct Fixture {
     count: usize,
+    primitives_per_mesh: Option<usize>,
     topology: TopologyKind,
     indexed: bool,
     degenerate: bool,
@@ -41,6 +42,7 @@ impl Fixture {
     fn lists(count: usize) -> Self {
         Self {
             count,
+            primitives_per_mesh: None,
             topology: TopologyKind::TriangleList,
             indexed: true,
             degenerate: false,
@@ -179,10 +181,17 @@ impl Format for Importer {
                 AuthoringRange::new(first as u32, (attributes.len() - first) as u32),
             ));
         }
-        let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
-            0,
-            primitives.len() as u32,
-        ))];
+        let primitives_per_mesh = f.primitives_per_mesh.unwrap_or(f.count.max(1));
+        let meshes = primitives
+            .chunks(primitives_per_mesh)
+            .enumerate()
+            .map(|(index, primitives)| {
+                GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
+                    (index * primitives_per_mesh) as u32,
+                    primitives.len() as u32,
+                ))
+            })
+            .collect::<Vec<_>>();
         let space = SceneSpace {
             front_face_winding: f.winding,
             ..SceneSpace::STANDARD_TARGET
@@ -264,12 +273,12 @@ fn empty_and_unchanged_preparation_finish_without_retained_terminal_publication(
         assert_eq!(resources.committed_canonical_bytes(), 0);
         assert_eq!(resources.published_outcome_evidence_bytes(), 0);
         assert_eq!(resources.published_terminal_evidence_records(), 0);
+        assert_eq!(resources.peak_staging_bytes(), 0);
         assert_eq!(
             resources.attempted_work_actions(),
             resources.consumed_work_actions()
         );
         if !empty {
-            assert!(resources.peak_staging_bytes() > 0);
             assert!(resources.consumed_work_actions() > 0);
         }
     }
@@ -383,6 +392,108 @@ fn foreign_and_stale_handles_reject_before_no_effect_duplicate_selection() {
         assert_eq!(resources.committed_canonical_bytes(), 0);
         assert_eq!(resources.published_outcome_evidence_bytes(), 0);
         assert_eq!(resources.published_terminal_evidence_records(), 0);
+    }
+}
+
+#[test]
+fn caller_order_lookup_failures_precede_valid_duplicates_and_unsupported_topology() {
+    let (scene, _) = import(Fixture {
+        topology: TopologyKind::LineList,
+        outer_lists: true,
+        ..Fixture::lists(3)
+    })
+    .into_parts();
+    let stale = targets(&scene)[0];
+    let (mut scene, evidence) =
+        prepare_triangles(scene, &[stale], recipe(), PostProcessControl::default())
+            .unwrap()
+            .into_parts();
+    let generation = scene.generation();
+    assert_ne!(stale.generation(), generation);
+    let (foreign_scene, _) = import(Fixture::lists(1)).into_parts();
+    let foreign = targets(&foreign_scene)[0];
+    assert_ne!(foreign.generation(), generation);
+    assert_ne!(foreign.generation(), stale.generation());
+    drop(foreign_scene);
+    let original_targets = targets(&scene);
+    let target = original_targets[1];
+    assert_eq!(
+        scene.primitive(target).unwrap().topology(),
+        TopologyKind::LineList
+    );
+    let original = field_bits(&scene);
+    for (requested, expected_invalid) in [
+        (
+            vec![target, foreign, target, stale],
+            Some(foreign.generation()),
+        ),
+        (
+            vec![target, stale, target, foreign],
+            Some(stale.generation()),
+        ),
+        (vec![foreign], Some(foreign.generation())),
+        (vec![stale], Some(stale.generation())),
+        (vec![target, target], None),
+        (vec![target], None),
+    ] {
+        let rejection = prepare_triangles(
+            scene,
+            &requested,
+            TrianglePreparationOptions::default(),
+            PostProcessControl::default(),
+        )
+        .expect_err("lookup, duplicate, and topology failures retain their priority");
+        assert_eq!(rejection.input().generation(), generation);
+        assert_eq!(targets(rejection.input()), original_targets);
+        assert_eq!(field_bits(rejection.input()), original);
+        assert!(evidence.matches_scene(rejection.input()));
+        let baozi_postprocess::PostProcessRunError::Preparation { failure } = rejection.error()
+        else {
+            panic!("selection rejection retains its typed preparation cause")
+        };
+        if let Some(expected_invalid) = expected_invalid {
+            let baozi_postprocess::PreparationCause::Target(
+                baozi_core::SceneLookupError::GenerationMismatch {
+                    expected, actual, ..
+                },
+            ) = failure.cause()
+            else {
+                panic!(
+                    "the first caller-ordered lookup failure precedes duplicate and topology checks"
+                )
+            };
+            assert_eq!(*expected, generation);
+            assert_eq!(*actual, expected_invalid);
+        } else if requested.len() == 2 {
+            assert!(matches!(
+                failure.cause(),
+                baozi_postprocess::PreparationCause::DuplicateTarget
+            ));
+        } else {
+            assert!(matches!(
+                failure.cause(),
+                baozi_postprocess::PreparationCause::UnsupportedTopology(TopologyKind::LineList)
+            ));
+        }
+        let resources = failure
+            .resources()
+            .expect("selection prework retains real facts");
+        assert!(resources.consumed_work_actions() > 0);
+        assert_eq!(
+            resources.attempted_work_actions(),
+            resources.consumed_work_actions()
+        );
+        if requested.len() > 1 {
+            assert!(resources.peak_staging_bytes() > 0);
+        } else {
+            assert_eq!(resources.peak_staging_bytes(), 0);
+        }
+        assert_eq!(resources.current_live_bytes(), 0);
+        assert_eq!(resources.active_reservations(), 0);
+        assert_eq!(resources.committed_canonical_bytes(), 0);
+        assert_eq!(resources.published_outcome_evidence_bytes(), 0);
+        assert_eq!(resources.published_terminal_evidence_records(), 0);
+        scene = rejection.into_parts().0;
     }
 }
 
@@ -677,6 +788,159 @@ fn mixed_selection_reports_complete_source_order_and_final_unchanged_identities(
 }
 
 #[test]
+fn cross_mesh_subsets_preserve_authored_report_order_and_unchanged_prefix() {
+    for requested_indices in [[5, 3, 2, 0], [3, 0, 5, 2]] {
+        let (scene, evidence) = import(Fixture {
+            primitives_per_mesh: Some(3),
+            topology: TopologyKind::TriangleStrip,
+            outer_lists: true,
+            ..Fixture::lists(6)
+        })
+        .into_parts();
+        assert_eq!(scene.mesh_count(), 2);
+        assert!(scene.meshes().all(|mesh| mesh.primitive_count() == 3));
+        let generation = scene.generation();
+        let space = scene.space();
+        let ids = targets(&scene);
+        assert_ne!(ids[0], ids[3]);
+        assert_ne!(ids[2], ids[5]);
+        assert_ne!(ids[0].logical_mesh(), ids[3].logical_mesh());
+        let before = field_bits(&scene);
+        let selected_indices = [0, 2, 3, 5];
+        let expected_inputs = selected_indices.map(|index| ids[index]);
+        let requested = requested_indices.map(|index| ids[index]);
+        let (scene, report) = prepare_triangles(
+            scene,
+            &requested,
+            TrianglePreparationOptions::default(),
+            PostProcessControl::default(),
+        )
+        .unwrap()
+        .into_parts();
+        let output_generation = scene.generation();
+        let output_targets = targets(&scene);
+        let expected_outputs = selected_indices.map(|index| output_targets[index]);
+        assert_ne!(output_generation, generation);
+        assert!(!evidence.matches_scene(&scene));
+        assert!(report.matches_scene(&scene));
+        assert_eq!(scene.space(), space);
+        assert_eq!(scene.mesh_count(), 2);
+        assert!(scene.meshes().all(|mesh| mesh.primitive_count() == 3));
+        assert_eq!(output_targets.len(), ids.len());
+        let after = field_bits(&scene);
+        for index in [0, 1, 4, 5] {
+            assert_eq!(after[index], before[index]);
+            let primitive = scene.primitive(output_targets[index]).unwrap();
+            let unchanged_list = matches!(index, 0 | 5);
+            assert_eq!(
+                primitive.topology(),
+                if unchanged_list {
+                    TopologyKind::TriangleList
+                } else {
+                    TopologyKind::TriangleStrip
+                }
+            );
+            assert_eq!(
+                primitive.indices().unwrap(),
+                if unchanged_list {
+                    &[0, 1, 2][..]
+                } else {
+                    &[0, 1, 2, 3][..]
+                }
+            );
+            let mut provenance = scene.owner_provenance(primitive.metadata_owner()).unwrap();
+            assert!(matches!(
+                provenance
+                    .next()
+                    .expect("retained source provenance")
+                    .kind(),
+                baozi_core::ProvenanceKindRef::Source(_)
+            ));
+            assert!(
+                provenance
+                    .all(|node| matches!(node.kind(), baozi_core::ProvenanceKindRef::Source(_)))
+            );
+        }
+        let origins = [0, 1, 2, 1, 3, 2];
+        for index in [2, 3] {
+            let primitive = scene.primitive(output_targets[index]).unwrap();
+            assert_eq!(primitive.topology(), TopologyKind::TriangleList);
+            assert_eq!(primitive.indices().unwrap(), origins);
+            assert_eq!(primitive.corner_count(), 6);
+            assert_eq!(primitive.face_count(), 2);
+            assert_eq!(after[index][0], before[index][0]);
+            assert_eq!(after[index][1], before[index][1]);
+            assert_eq!(
+                after[index][2],
+                origins.map(|origin| before[index][2][origin as usize])
+            );
+            assert_eq!(after[index][3], before[index][3]);
+        }
+        for &id in &ids {
+            let Err(baozi_core::SceneLookupError::GenerationMismatch {
+                expected, actual, ..
+            }) = scene.primitive(id)
+            else {
+                panic!("every original target becomes stale after the shared publication")
+            };
+            assert_eq!(expected, output_generation);
+            assert_eq!(actual, generation);
+        }
+        let effects = report.geometry_preparation().unwrap();
+        assert_eq!(effects.len(), selected_indices.len());
+        assert_eq!(effects.geometry_reconstruction_count(), 1);
+        assert_eq!(effects.reconstructed_primitive_count(), ids.len());
+        let resources = report.resources();
+        assert!(resources.consumed_work_actions() > 0);
+        assert_eq!(
+            resources.attempted_work_actions(),
+            resources.consumed_work_actions()
+        );
+        assert_eq!(resources.current_live_bytes(), 0);
+        assert_eq!(resources.active_reservations(), 0);
+        drop(scene);
+        let effects = report.geometry_preparation().unwrap();
+        assert_eq!(
+            effects
+                .targets()
+                .map(|target| target.input_target())
+                .collect::<Vec<_>>(),
+            expected_inputs
+        );
+        assert_eq!(
+            effects
+                .targets()
+                .map(|target| target.output_target())
+                .collect::<Vec<_>>(),
+            expected_outputs
+        );
+        for (report_index, source_index) in selected_indices.into_iter().enumerate() {
+            let target = effects.target(report_index).unwrap();
+            assert_eq!(target.input_target().generation(), generation);
+            assert_eq!(target.output_target().generation(), output_generation);
+            assert!(target.output_normal_attribute_index().is_none());
+            assert!(target.output_tangent_attribute_index().is_none());
+            assert!(!target.removed_tangents());
+            if matches!(source_index, 0 | 5) {
+                assert_eq!(
+                    target.disposition(),
+                    baozi_postprocess::PostProcessRunDisposition::Unchanged
+                );
+                assert!(target.source_corner_origins().is_none());
+                assert!(target.source_face_triangle_offsets().is_none());
+            } else {
+                assert_eq!(
+                    target.disposition(),
+                    baozi_postprocess::PostProcessRunDisposition::Changed
+                );
+                assert_eq!(target.source_corner_origins().unwrap(), origins);
+                assert_eq!(target.source_face_triangle_offsets().unwrap(), [0, 1, 2]);
+            }
+        }
+    }
+}
+
+#[test]
 fn batch_matches_actual_single_target_lowering_normal_and_tangent_semantics() {
     for topology in [
         TopologyKind::TriangleList,
@@ -883,12 +1147,14 @@ fn later_target_failure_and_limits_return_exact_original_generation_and_payload(
 
 #[test]
 fn pre_cancelled_selection_preserves_the_original_scene() {
-    for (empty, options) in [
-        (false, recipe()),
-        (true, TrianglePreparationOptions::default()),
-        (false, TrianglePreparationOptions::default()),
+    for (count, empty, options) in [
+        (8, false, recipe()),
+        (8, true, TrianglePreparationOptions::default()),
+        (8, false, TrianglePreparationOptions::default()),
+        (1, false, recipe()),
+        (1, false, TrianglePreparationOptions::default()),
     ] {
-        let (scene, evidence) = import(Fixture::lists(8)).into_parts();
+        let (scene, evidence) = import(Fixture::lists(count)).into_parts();
         let generation = scene.generation();
         let original_targets = targets(&scene);
         let ids = if empty {
