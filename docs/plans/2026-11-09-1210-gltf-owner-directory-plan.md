@@ -1,14 +1,19 @@
 # Index the glTF source-owner directory by normalized owner domain
 
-Status: architecture/work amendments and the bounded Stage1 A/B topology
-clarification are adopted. Conditional Stage1 readiness review is closed; real
-baseline population qualification is next. No dense algorithm edit or candidate
-sampling is accepted yet.
+Status: source `b918256` passes the original seven integrated gates, actual A/B
+work/configuration qualification, the fixed seven-task instruction screen and
+independent actual generated-owner/source-effect review. GLB32 whole-worker
+instructions decrease 2.385035693408%; all seven tasks satisfy the original
+increase ceiling. The [diagnostic checkpoint](../reviews/2026-11-09-gltf-owner-directory.md)
+retains every limitation and failure. Original Windows/GNU ordinary comparison,
+whole-child peaks, separate heap, source-speed retention, main and release remain
+HOLD. GNU native-file absolute work qualification is still required before its
+future ordinary observations can be accepted.
 This copy adopts the smaller coverage-derived shape and every bounded
 architecture/work-contract amendment from the two closed reviews. Their
 original AMEND reports remain immutable. Baseline population qualification
-precedes the algorithm edit; comparator review precedes candidate sampling. Runtime
-is exact qualified d81 at HEAD `5864b55`. The completion hint is retired; the
+precedes the algorithm edit; comparator review precedes candidate sampling. The
+fixed control runtime is qualified d81. The completion hint is retired; the
 persistent comparison region and unary-kernel experiment are closed NO_GO/DEFER.
 This plan changes a private data structure at its owner, without a new executor.
 

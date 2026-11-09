@@ -1,0 +1,8 @@
+case,control_ir,candidate_ir,change_ir,change_percent,control_import_work,candidate_import_work,complete_nonclock_equal,other_nonclock_literal_equal,exact_work_delta_equal
+gltf-shared-1,5638421,5623391,-15030,-0.26656399016674603,11911,11820,False,True,True
+gltf-shared-32,25344736,24740255,-604481,-2.3850356934078887,70332,67834,False,True,True
+ply-f64-neighbors,2377035,2375048,-1987,-0.0835915331494963,959,959,True,True,True
+stl-repeated-1024,12178747,12176707,-2040,-0.01675049165567044,79464,79464,True,True,True
+obj-repeated-16384,709672211,709670223,-1988,-0.0002801293286114337,361025,361025,True,True,True
+obj-grid-128,1988095712,1988093544,-2168,-0.00010904907580266965,3950237,3950237,True,True,True
+stl-repeated-1,2027624,2025636,-1988,-0.09804579152742354,687,687,True,True,True
