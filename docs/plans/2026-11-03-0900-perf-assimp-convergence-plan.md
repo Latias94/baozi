@@ -1048,3 +1048,27 @@ negative case only for a genuinely new boundary, not for incidental private layo
   Text emission span coalescing is a separate prospective source investigation;
   it must preserve actual numerical prefixes, unit-based control debt and
   existing copy/poll/failure boundaries before any implementation is selected.
+- The [bounded ASCII emission candidate](../reviews/2026-11-09-ascii-emission-spans.md)
+  is committed as `d81bbc5`, with 3,972 workspace passes, 218 doctest passes,
+  138 consumer passes, both strict Clippy gates and both formats. The six
+  workspace manual skips and one consumer scale skip remain. Independent
+  source, exact QA/commit/archive, instruction and actual GNU generated-code
+  reviews close GO. The fixed seven-task instruction screen passes: grid OBJ
+  decreases 5.66419386%, repeated OBJ 0.28626704%, all seven complete literal
+  non-clock pairs match and no task increases above 1%. All adverse signs,
+  grid warnings, unresolved labels and prior failed fixture/startup attempts
+  remain recorded.
+  Its [ordinary checkpoint](../reviews/2026-11-09-ascii-emission-spans-native-heap.md)
+  completes both original Windows/GNU brackets: four campaigns per host,
+  110 lanes and 5,062 commands with zero failures per campaign, following both
+  functional matrices. Independent actual raw-evidence reviews close fidelity
+  GO but engineering FAIL. Both Windows candidates retain 9/28 pipeline medians
+  above 3x and 30 common endpoints at least 10x; GNU retains 14/28 and 31 common
+  endpoints. Comparable whole-child memory median ratios remain below 3x.
+  Windows C0/C1 and GNU N1 joint Windows busy samples remain, limiting causal
+  source-speed conclusions. All 880 rows and 36,080 CSV cells remain exported.
+  Fresh bounded calibration3 passes and has its own independent actual GO;
+  fresh Assimp debug1 symbols2 and the separate actual tracked-heap phase
+  remain pending. The immutable ordinary launch records and final helper bytes
+  are not rewritten for that later phase. Main integration, measured source
+  retention and release remain HOLD; continue the original convergence goal.
