@@ -6,8 +6,9 @@ both GNU candidates retain fourteen. Their common endpoint sets at least 10x
 contain 30 Windows and 31 GNU endpoints. All available comparable whole-child
 memory median ratios remain below 3x. Source-speed retention, main integration
 and release remain **HOLD**. Both independent raw-evidence reviews close GO
-for fidelity; separate tracked-heap qualification is pending at this written
-checkpoint.
+for fidelity. The separate eighteen-worker tracked-heap batch and its actual
+stack/interception review also complete with bounded GO; neither grants
+native-speed or convergence acceptance.
 
 The [diagnostic report](2026-11-09-ascii-emission-spans.md) separately qualifies
 the exact source, all seven correctness/lint/format gates, fixed instruction
@@ -142,7 +143,7 @@ N0:C1 -1.777065%, N1:C0 +0.464936%, and N1:C1 +0.556252%. The adverse N1
 signs remain; raw grid Baozi medians decline but normalized results disagree.
 This checkpoint does not establish a material source-speed keep decision.
 
-## Separate heap work and remaining decision
+## Completed separate tracked heap
 
 Both ordinary supervisors terminate successfully before any new diagnostic
 build or profile starts. Missing old calibration 2 and Assimp symbols 1 binaries
@@ -152,17 +153,85 @@ Assimp GNU opt3/debug1 symbols 2 builds are separate from ordinary workers.
 Calibration 3 completes all 19 commands and both controls with the original
 checksums 444/Rust and 778/C++, alignment 128, and expected selected allocation
 weights 2/1/1 and 2/1/1/1. Its independent actual review closes bounded GO for
-those exact known-control paths; symbol attempt 2 builds are in progress.
-Actual symbol/tool identities and worker
-stack/interception qualification require their own independent reviews.
+those exact known-control paths. Assimp symbols 2 also completes, with ten
+F32 and seven F64 consumer semantic CTests, separate actual F32 and F64/whole
+terminal reviews, and these respective binary hashes:
+`0aeaa0d20cd3f167c770ece3233dd7f1063c08f7e00af1ff739b9ee498f4fc89`
+and `9b52c09811afb1e756297f75323d36de538cd43dc659a6bf264a599ef06d9fae`.
+The CTests qualify the comparison consumer, not the upstream Assimp suite.
 
-The final three native helpers and launch prerequisite stay immutable. A
-separate late heap prerequisite will bind the original native prerequisite,
-both terminal ordinary decisions, the fixed heap script and actual new
-calibration/symbol/review identities. Only then may six original pipeline/memory
-cases run eighteen fresh whole-worker heap traces and unmerged analyses.
-Tracked heap is neither ordinary timing, RSS, stage heap nor universal allocator
-coverage; rounded peak displays must remain rounded.
+The final three native helpers and launch prerequisite stay immutable. The
+separate heap prerequisite, SHA-256
+`79aa8d0c281901612645b1e93d2943e82d15758c95d83a110a2a989f05bca03a`,
+binds the original native prerequisite, both terminal ordinary decisions, the
+fixed heap script and actual new calibration/symbol/review identities. The
+guard checks six explicit tool paths and byte identities before and after the
+batch: frontend, analyzer, environment helper, interpreter, preload library
+and injection library. All six remain stable. This finite inventory does not
+establish complete dependent-library or allocator coverage.
+
+All eighteen fresh whole-worker traces and eighteen explicit unmerged analyses
+complete: 36 commands and 72 retained streams. The six complete Baozi
+control/candidate payload pairs match after removing only `stage_ns`, preserving
+numeric spellings/types, work and output. Each table entry is one original
+pipeline/memory task, including setup, validation, observation, serialization
+and teardown. Peak strings are the analyzer's rounded display, not exact
+bytes, stage heap, RSS or native time. Equal displays do not establish equal
+underlying peaks.
+
+| Original case | Control calls | Candidate calls | Assimp calls | Control peak | Candidate peak | Assimp peak |
+| --- | ---: | ---: | ---: | --- | --- | --- |
+| glTF1 | 589 | 589 | 355 | 174.50K | 174.50K | 155.19K |
+| glTF32 | 1,044 | 1,044 | 825 | 389.93K | 389.93K | 174.36K |
+| F64 PLY neighbors | 436 | 436 | 175 | 136.00K | 136.00K | 2.18M |
+| Binary STL1024 | 406 | 406 | 1,174 | 456.58K | 456.58K | 317.09K |
+| Repeated OBJ16384 | 16,914 | 16,914 | 82,142 | 12.18M | 12.18M | 19.91M |
+| Grid OBJ128 | 33,291 | 33,291 | 360,685 | 28.82M | 28.82M | 28.69M |
+
+The [complete eighteen-row export](2026-11-09-ascii-emission-spans-heap.csv)
+also retains analyzer temporary-allocation counts and exact source/binary
+identities. No candidate allocation-count reduction is observed in these six
+tasks. Its higher counts than Assimp for both glTF tasks and F64 PLY, and higher
+displayed peaks for both glTF tasks, STL1024 and grid OBJ, remain visible.
+
+Independent actual-worker review closes bounded GO for all eighteen genuine
+Rust System-backed or C++ native allocation paths, allocation totals, traces,
+unmerged analyses, six complete literal pairs and all 144 CSV data cells.
+For example, the large Assimp F64 PLY result includes two distinct
+1,048,576-byte buffer allocation sites in `IOStreamBuffer` construction and
+`getNextBlock`; that concrete stack evidence does not turn its aggregate
+rounded 2.18M display into exact bytes or generalize to other formats.
+
+Dependent-library symbols remain incomplete: each Baozi trace has one
+unresolved loader allocation event, while each Assimp trace has seventeen
+events with at least one unresolved function, including filesystem paths.
+Rust System implementation frames can be inlined or absent; its allocator
+identity also relies on the matched build association. The CSV's
+`temporary_allocations` means the analyzer footer statistic. Distinct
+collector counters and an interpreted-event adjacency count remain in the
+review; they are not reconciled into an exact application-temporary count.
+Single whole-worker traces, finite calibration and visible application stacks
+do not establish universal interception or a repeated-run distribution.
+
+The first offline export attempt parses the entire profiler stdout, including
+its banner, as JSON and fails before creating an export or launching any new
+worker. The corrected export requires exactly one worker-object line from the
+same stdout. Original streams and the failed attempt remain; neither workers
+nor analyzers are rerun for this correction.
+
+The actual heap receipt SHA-256 is
+`4ea6b5b0fae69301e798b8c50fa9cad6a3f0ebc68c9a153134ec06dfab291419`.
+After collection, all 109 existing raw files are additionally archived and
+byte-verified by the coordinator: 1,740,448 bytes, SHA-256
+`8ebd7fb8c7f128c1881bcc6f39c5a9a18aa674a388637914dc00e3e3f422ee13`.
+The independent heap review inspects the original target files; it does not
+repeat that archive-member audit. Its private report is
+`ascii-emission-spans-actual-heap-review-1.md`, SHA-256
+`6cc04c39d4f0e08379ab15ffa429e48c0d32fc8e3a78e916f3d13f07fb75379f`.
+Earlier receipts' then-pending worker-review notes remain historical snapshots;
+the later review closes the exact batch without rewriting producer records.
+
+## Remaining decision
 
 Independent Windows and GNU reviews each authenticate 20,680 comparison
 workers, 41,384 raw streams and all 18,040 CSV cells. GNU's six retained
@@ -179,8 +248,9 @@ and `ascii-emission-spans-linux-native-actual-review-1.md` (SHA-256
 `ea78aab0d9597c956619225cb89fdaf780872fa832b647b0e2829d5f5c9faf7d`).
 Their verdict is evidence fidelity GO and engineering convergence FAIL.
 
-The actual heap phase remains pending. Complete ordinary collection, passed source QA and a diagnostic win
-do not imply Assimp convergence. Continue attributing demonstrated fixed and
+Ordinary collection and separate bounded heap qualification are complete.
+Passed source QA and a diagnostic win do not imply Assimp convergence.
+Continue attributing demonstrated fixed and
 per-element costs at their owners; keep original successful tasks, actual
 physical work, cancellation and failure ownership while reviewing the next
 refactor. No main merge, native promotion or release is accepted here.

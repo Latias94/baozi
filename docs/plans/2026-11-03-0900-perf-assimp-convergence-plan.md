@@ -1067,8 +1067,15 @@ negative case only for a genuinely new boundary, not for incidental private layo
   endpoints. Comparable whole-child memory median ratios remain below 3x.
   Windows C0/C1 and GNU N1 joint Windows busy samples remain, limiting causal
   source-speed conclusions. All 880 rows and 36,080 CSV cells remain exported.
-  Fresh bounded calibration3 passes and has its own independent actual GO;
-  fresh Assimp debug1 symbols2 and the separate actual tracked-heap phase
-  remain pending. The immutable ordinary launch records and final helper bytes
-  are not rewritten for that later phase. Main integration, measured source
-  retention and release remain HOLD; continue the original convergence goal.
+  Fresh bounded calibration3, Assimp debug1 symbols2 and their separate actual
+  reviews complete. Eighteen fresh whole-worker heap traces and eighteen
+  unmerged analyses complete with 36 commands and 72 streams; all six complete
+  literal non-clock Baozi pairs match. Independent actual worker-stack and
+  interception review closes bounded GO, including all 144 exported cells.
+  Every candidate allocation total and rounded peak display equals its control;
+  no allocation-count reduction or exact-peak equality follows. Adverse Assimp
+  comparisons, incomplete library symbols, distinct collector/analyzer temporary
+  statistics and single whole-worker scope remain explicit. The immutable
+  ordinary launch records and final helper bytes are not rewritten for that
+  later phase. Main integration, measured source retention and release remain
+  HOLD; continue the original convergence goal.
