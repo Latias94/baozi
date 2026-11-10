@@ -289,3 +289,15 @@ Windows control, missing second GNU candidate, actual contention and unreviewed
 raw evidence remain explicit. The existing instruction reductions do not
 establish ordinary elapsed benefit. Main integration, measured retention and
 release remain **HOLD**.
+
+## User-authorized main integration
+
+After the device closeout, the user explicitly requests merging into remote
+main and deleting other branches. Merge `892c8823faafde17e03256fdb19d768628693bfe`
+preserves both the original local main and the `83426d1` development history.
+Its complete tree is byte-identical to the previously pushed `83426d1`
+checkpoint. The later integration documentation does not change qualified
+runtime inputs, timing samples or acceptance criteria. The
+[main handoff](2026-11-10-main-handoff.md) supersedes the earlier continuation
+branch name. This is repository integration under the user's explicit request;
+ordinary performance acceptance and release remain HOLD.

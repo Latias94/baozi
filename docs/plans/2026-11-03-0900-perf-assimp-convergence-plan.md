@@ -14,12 +14,12 @@ ownership, execution and representation changes may break compatibility. Publica
 closed while this plan is incomplete.
 
 Execution is paused for the user's device handoff on 2026-11-10. The
-[handoff](../reviews/2026-11-10-device-handoff.md) records the current development
-branch, qualified source, partial terminal Windows/GNU attempts and evidence
-that a Git clone can carry. Release acceptance remains HOLD. The user's latest
-request authorizes committing and pushing this development checkpoint to the
-Baozi GitHub remote; it does not accept native performance or merge the runtime
-into main.
+[main handoff](../reviews/2026-11-10-main-handoff.md) records the integrated
+checkpoint, qualified source, partial terminal Windows/GNU attempts and
+evidence that a Git clone can carry. The user's subsequent request explicitly
+authorizes merging into remote main and deleting other branches for the device
+transfer. That repository integration does not establish native performance
+acceptance; release remains HOLD.
 
 ## Evidence and Acceptance
 
