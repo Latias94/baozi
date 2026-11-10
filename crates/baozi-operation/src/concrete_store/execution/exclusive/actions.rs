@@ -134,7 +134,7 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreActionExecution
         runtime_ledger(
             self.context.parts.ordinary.failure,
             self.context.parts.work.tighten_policy(
-                &self.context.parts.ordinary.storage,
+                &mut self.context.parts.ordinary.storage,
                 dimension,
                 policy,
             ),
@@ -306,6 +306,25 @@ impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L>
     ) -> Result<R, E> {
         execute_action_region(self.invocation_context()?, work_dimension, body)
     }
+}
+
+pub(in crate::concrete_store) fn execute_store_action_parts<'op, O, PP, U, R, E>(
+    parts: ExclusiveOperationParts<'op, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+    domain: &'op StoreKeyDomain,
+    work_dimension: StoreDimensionKey,
+    body: impl for<'region> FnOnce(&mut StoreActionExecution<'region, O, PP, U>) -> Result<R, E>,
+) -> Result<R, E>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    E: From<StoreRuntimeError>,
+{
+    execute_action_region(
+        bind_invocation_context(parts, domain, None)?,
+        work_dimension,
+        body,
+    )
 }
 
 fn execute_action_region<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, R, E>(

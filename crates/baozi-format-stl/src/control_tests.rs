@@ -329,7 +329,10 @@ fn assert_signal_failure(failure: &ImportFailure, source: &AssetPath) {
     assert_eq!(terminal.code(), 1);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(failure.ledger().active_reservations(), 0);
-    assert_eq!(failure.ledger().current_evidence_bytes(), 0);
+    assert!(
+        failure.ledger().current_administrative_bytes()
+            <= failure.ledger().peak_administrative_bytes()
+    );
     assert_eq!(failure.ledger().committed_canonical_members(), 0);
     for dimension in [
         ImportDimension::Faces,

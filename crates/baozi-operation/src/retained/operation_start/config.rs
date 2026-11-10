@@ -272,6 +272,96 @@ impl<P: Copy, D: Copy> RetainedOperationStartPlan<P, D> {
     }
 }
 
+/// The real one-part startup plan of a finite invocation.
+///
+/// Fixed numerical facts remain in the invocation; no numerical-evidence owner or
+/// snapshot commitment is admitted by this plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FiniteRetainedOperationStartPlan<P, D> {
+    pub(in crate::retained) terminal_writer: RetainedWriterPlan<P, D>,
+    pub(in crate::retained) terminal_account_share_work: RetainedHandleSharePlan<D>,
+    pub(in crate::retained) fallback_plan: RetainedAllocationPlan,
+    pub(in crate::retained) fallback_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
+    pub(in crate::retained) failure_terminal_work: Option<RetainedFailureTerminalWorkPlan<D>>,
+}
+
+impl<P: Copy, D: Copy> FiniteRetainedOperationStartPlan<P, D> {
+    pub(crate) const fn new(
+        terminal_writer: RetainedWriterPlan<P, D>,
+        terminal_account_share_work: RetainedHandleSharePlan<D>,
+        fallback_plan: RetainedAllocationPlan,
+        fallback_commitment: OutputCommitment<D, OutcomeEvidenceDestination>,
+    ) -> Self {
+        Self {
+            terminal_writer,
+            terminal_account_share_work,
+            fallback_plan,
+            fallback_commitment,
+            failure_terminal_work: None,
+        }
+    }
+
+    pub(crate) const fn for_publication(
+        terminal_writer: RetainedWriterPlan<P, D>,
+        terminal_account_share_work: RetainedHandleSharePlan<D>,
+        fallback_plan: RetainedAllocationPlan,
+        fallback_dimension: D,
+        fallback_amount: u64,
+    ) -> Self {
+        Self::new(
+            terminal_writer,
+            terminal_account_share_work,
+            fallback_plan,
+            OutputCommitment::new(fallback_dimension, fallback_amount),
+        )
+    }
+
+    pub(crate) const fn with_failure_terminal_work(
+        mut self,
+        plan: RetainedFailureTerminalWorkPlan<D>,
+    ) -> Self {
+        self.failure_terminal_work = Some(plan);
+        self
+    }
+}
+
+pub(in crate::retained) type QualifiedFailureTerminalWork<D> = Option<(
+    RetainedFailureTerminalWorkPlan<D>,
+    RetainedFailureTerminalWorkRequirement,
+)>;
+
+/// Qualifies only actual requested terminal commitments, for either concrete owner.
+pub(in crate::retained) fn qualify_terminal_plan<P: Copy, D: Copy + Eq>(
+    writer: RetainedWriterPlan<P, D>,
+    share_work: RetainedHandleSharePlan<D>,
+    commitments: &[OutputCommitment<D, OutcomeEvidenceDestination>],
+    failure_work: Option<RetainedFailureTerminalWorkPlan<D>>,
+) -> Result<QualifiedFailureTerminalWork<D>, RetainedOperationStartError<D>> {
+    if writer.limits.attribution_slots == 0 || writer.limits.commitment_slots == 0 {
+        return Err(RetainedOperationStartError::InvalidTerminalLimits);
+    }
+    let Some(plan) = failure_work else {
+        return Ok(None);
+    };
+    let dimension = plan.dimension();
+    if writer.capacity_dimension == dimension
+        || writer.attribution_dimension == dimension
+        || share_work
+            .charges()
+            .iter()
+            .any(|(ordinary_dimension, _)| *ordinary_dimension == dimension)
+        || commitments
+            .iter()
+            .any(|commitment| commitment.dimension() == dimension)
+    {
+        return Err(RetainedOperationStartError::InvalidTerminalLimits);
+    }
+    let requirement = plan
+        .requirement()
+        .map_err(|()| RetainedOperationStartError::InvalidTerminalLimits)?;
+    Ok(Some((plan, requirement)))
+}
+
 #[allow(
     dead_code,
     reason = "crate-private until the U4 canonical consumers switch atomically"

@@ -94,7 +94,7 @@ fn build_fixture<'scope>(
     scope: &mut ParseRoot<'_, '_, 'scope>,
     fault: FixtureFault,
 ) -> Result<NormalizedGltf<'scope>> {
-    use source_profile::{DOCUMENT, SelectedSourceProfile, entity};
+    use source_profile::{DOCUMENT, OwnerSourceRun, SelectedSourceProfile, entity};
     let map = GltfSourceMap::from_primary_for_test(scope)?;
     if matches!(fault, FixtureFault::InspectSourceMap) {
         inspect_source_inventory(scope, &map)?;
@@ -118,31 +118,43 @@ fn build_fixture<'scope>(
         inventory.contains(&id)
             && !(matches!(fault, FixtureFault::MissingNodeSource) && id == node_source)
     })?;
-    for (owner, source) in [
-        (ProfileOwner::Scene, DOCUMENT),
-        (ProfileOwner::SyntheticRoot, DOCUMENT),
-        (ProfileOwner::Node(NodeLocalId::new(0)), node_source),
-        (ProfileOwner::LogicalMesh(0), mesh_source),
-        (ProfileOwner::Primitive(0), primitive_source),
-        (ProfileOwner::Attribute(0), primitive_source),
-        (ProfileOwner::Attribute(0), position_source),
-        (ProfileOwner::MeshInstance(0), node_source),
-        (ProfileOwner::MeshInstance(0), mesh_source),
-        (ProfileOwner::MorphDefinition(0), mesh_source),
-        (ProfileOwner::MorphDelta(0), primitive_source),
-        (ProfileOwner::MorphDelta(0), delta_source),
+    let mut run = OwnerSourceRun::new(scope)?;
+    let suspended = OwnerSourceRun::new(scope)?;
+    for (owner, identities) in [
+        (ProfileOwner::Scene, &[DOCUMENT][..]),
+        (ProfileOwner::SyntheticRoot, &[DOCUMENT][..]),
+        (ProfileOwner::Node(NodeLocalId::new(0)), &[node_source][..]),
+        (ProfileOwner::LogicalMesh(0), &[mesh_source][..]),
+        (ProfileOwner::Primitive(0), &[primitive_source][..]),
+        (
+            ProfileOwner::Attribute(0),
+            &[primitive_source, position_source][..],
+        ),
+        (
+            ProfileOwner::MeshInstance(0),
+            &[node_source, mesh_source][..],
+        ),
+        (ProfileOwner::MorphDefinition(0), &[mesh_source][..]),
+        (
+            ProfileOwner::MorphDelta(0),
+            &[primitive_source, delta_source][..],
+        ),
     ] {
         if matches!(fault, FixtureFault::MissingNodeOwner)
             && owner == ProfileOwner::Node(NodeLocalId::new(0))
         {
             continue;
         }
-        sources.link(scope, owner, source)?;
+        for &source in identities {
+            sources.link(scope, &mut run, owner, source)?;
+        }
+        sources.complete_owner(scope, &mut run, owner)?;
     }
     if matches!(fault, FixtureFault::Light) {
-        sources.link(scope, ProfileOwner::Light(0), light_source)?;
+        sources.link(scope, &mut run, ProfileOwner::Light(0), light_source)?;
+        sources.complete_owner(scope, &mut run, ProfileOwner::Light(0))?;
     }
-    sources.finish(scope)?;
+    sources.finish(scope, &run, &suspended)?;
     let positions = AttributeStorage {
         semantic: AttributeSemantic::Position,
         lanes: 3,
@@ -490,7 +502,7 @@ fn inspect_source_inventory(
     scope: &mut ParseRoot<'_, '_, '_>,
     map: &GltfSourceMap<'_>,
 ) -> Result<()> {
-    use source_profile::{DOCUMENT, SelectedSourceProfile, entity};
+    use source_profile::{DOCUMENT, OwnerSourceRun, SelectedSourceProfile, entity};
     let mut sources = SelectedSourceProfile::from_source_map(scope, map, |id| {
         id.kind != SourceEntityKind::Node || id.source_index < 2
     })?;
@@ -551,19 +563,56 @@ fn inspect_source_inventory(
             )
         );
     }
-    sources.link(scope, ProfileOwner::Node(NodeLocalId::new(1)), node_one)?;
-    sources.link(scope, ProfileOwner::Node(NodeLocalId::new(0)), node_zero)?;
-    sources.link(scope, ProfileOwner::Node(NodeLocalId::new(0)), node_zero)?;
-    sources.finish(scope)?;
+    let mut run = OwnerSourceRun::new(scope)?;
+    let suspended = OwnerSourceRun::new(scope)?;
+    let owner = ProfileOwner::Node(NodeLocalId::new(1));
+    sources.link(scope, &mut run, owner, node_one)?;
+    sources.complete_owner(scope, &mut run, owner)?;
+    let owner = ProfileOwner::Node(NodeLocalId::new(0));
+    sources.link(scope, &mut run, owner, node_zero)?;
+    sources.link(scope, &mut run, owner, node_zero)?;
+    sources.complete_owner(scope, &mut run, owner)?;
+    sources.finish(scope, &run, &suspended)?;
     assert_eq!(sources.link_count(), 2);
-    assert_eq!(
-        sources.for_owner(scope, ProfileOwner::Node(NodeLocalId::new(0)))?[0].source,
-        node_zero
-    );
+    let ordinal = sources.for_owner(scope, owner)?[0];
+    assert_eq!(sources.source(scope, ordinal)?.entity.id, node_zero);
     assert_ne!(
         sources.source_index(scope, 1, node_zero)?,
         sources.source_index(scope, 1, node_one)?
     );
+    let mut owners = scope.services()?.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "fixture-source-order-owners",
+    );
+    let mut provenance = scope.services()?.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "fixture-source-order-values",
+    );
+    push_owner_sources(
+        scope,
+        &mut owners,
+        &mut provenance,
+        &sources,
+        3,
+        owner,
+        [0, 1, 2],
+    )?;
+    let other = ProfileOwner::Node(NodeLocalId::new(1));
+    push_owner_sources(
+        scope,
+        &mut owners,
+        &mut provenance,
+        &sources,
+        3,
+        other,
+        [0, 2],
+    )?;
+    assert_eq!(
+        provenance.as_slice(),
+        [0, 1, 2, 3, 0, 2, 4].map(ProvenanceLocalId::new)
+    );
+    assert_eq!(owners.as_slice()[0].provenance_count, 4);
+    assert_eq!(owners.as_slice()[1].provenance_offset, 4);
     Ok(())
 }
 

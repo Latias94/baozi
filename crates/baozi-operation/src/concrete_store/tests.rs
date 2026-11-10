@@ -24,18 +24,18 @@ use crate::{
 
 mod mapped_record_append;
 
-struct TestOwner;
+pub(super) struct TestOwner;
 
 impl OperationOwner for TestOwner {}
 
-struct TestActivationDescription<P> {
+pub(super) struct TestActivationDescription<P> {
     request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
     execution: P,
 }
 
 impl<P> TestActivationDescription<P> {
-    fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
+    pub(super) fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
         let (identity, request) = mint_canonical_activation_request()
             .expect("the test activation request identity must remain available");
         Self {
@@ -79,11 +79,11 @@ const fn test_dimension_semantic(local: u64) -> StoreDimensionSemanticId {
 }
 
 #[derive(Clone, Copy)]
-struct TestKeys {
-    phase: StorePhaseKey,
+pub(super) struct TestKeys {
+    pub(super) phase: StorePhaseKey,
     unregistered_phase: StorePhaseKey,
-    dimension: StoreDimensionKey,
-    work_dimension: StoreDimensionKey,
+    pub(super) dimension: StoreDimensionKey,
+    pub(super) work_dimension: StoreDimensionKey,
     failure_terminal_dimension: StoreDimensionKey,
     unregistered_dimension: StoreDimensionKey,
 }
@@ -114,7 +114,7 @@ fn test_vocabulary() -> (StoreKeyDomain, TestKeys) {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum TestProgress {
+pub(super) enum TestProgress {
     Build,
 }
 
@@ -129,7 +129,7 @@ impl ProgressPhase for TestProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum TestUnit {
+pub(super) enum TestUnit {
     Items,
 }
 
@@ -163,14 +163,14 @@ fn test_failure_terminal_plan(
     .expect("test failure-terminal work plan")
 }
 
-fn test_factory() -> PhysicalStorageAccountFactory {
+pub(super) fn test_factory() -> PhysicalStorageAccountFactory {
     PhysicalStorageAccountFactory::try_new(
         PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1).expect("test factory limits"),
     )
     .expect("test factory")
 }
 
-fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccount {
+pub(super) fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccount {
     factory
         .try_create_account(
             PhysicalStorageAccountLimits::new(u64::MAX, 256).expect("test account limits"),
@@ -459,7 +459,7 @@ fn test_body_operation<'inv>(
     )
 }
 
-fn test_operation_plan(
+pub(super) fn test_operation_plan(
     evidence_limit: u64,
     attempted_limit: u64,
     consumed_limit: u64,
@@ -583,6 +583,7 @@ fn test_simple_controlled_validation_graph<'inv>(
     OutcomeEvidenceSequenceRef<u8, TestTag>,
 ) {
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
             TestRootTag,
@@ -590,6 +591,7 @@ fn test_simple_controlled_validation_graph<'inv>(
         )
         .expect("canonical root");
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence sequence plan"),
             TestTag,
@@ -1440,11 +1442,12 @@ fn type_declaration<'a>(source: &'a str, marker: &str) -> &'a str {
 
 fn concrete_store_source() -> String {
     let root = include_str!("../concrete_store.rs");
+    let ordinary = include_str!("ordinary.rs");
     let batch = include_str!("batch.rs");
     let validation = include_str!("validation.rs");
     let vocabulary = include_str!("vocabulary.rs");
     let terminal = include_str!("terminal_output.rs");
-    format!("{root}\n{batch}\n{validation}\n{vocabulary}\n{terminal}")
+    format!("{root}\n{ordinary}\n{batch}\n{validation}\n{vocabulary}\n{terminal}")
 }
 
 #[test]
@@ -1553,18 +1556,21 @@ fn verified_work_rejection_activates_failure_terminal_work_before_evidence_appen
         .expect("success-capable publication");
 
     assert!(matches!(
-        assembly.try_retain_canonical_sequence_controlled(
-            SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
-            keys.work_dimension,
-            TestRootTag,
-            |_writer, control| {
-                control.charge_observed(33)?;
-                Ok(())
-            },
-        ),
+        assembly
+            .ordinary()
+            .try_retain_canonical_sequence_controlled(
+                SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
+                keys.work_dimension,
+                TestRootTag,
+                |_writer, control| {
+                    control.charge_observed(33)?;
+                    Ok(())
+                },
+            ),
         Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded { .. }))
     ));
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("failure evidence plan"),
             TestTag,
@@ -1573,6 +1579,7 @@ fn verified_work_rejection_activates_failure_terminal_work_before_evidence_appen
         .expect("verified rejection must activate protected evidence work");
     let protected = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.failure_terminal_dimension)
         .expect("protected failure-terminal dimension");
     assert_eq!((protected.attempted(), protected.consumed()), (2, 2));
@@ -1610,24 +1617,28 @@ fn protected_commitment_failure_seals_success_assembly_evidence() {
         .expect("success-capable publication");
 
     assert!(matches!(
-        assembly.try_retain_canonical_sequence_controlled(
-            SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
-            keys.work_dimension,
-            TestRootTag,
-            |_writer, control| {
-                control.charge_observed(33)?;
-                Ok(())
-            },
-        ),
+        assembly
+            .ordinary()
+            .try_retain_canonical_sequence_controlled(
+                SequencePlan::<u8>::new(1).expect("canonical sequence plan"),
+                keys.work_dimension,
+                TestRootTag,
+                |_writer, control| {
+                    control.charge_observed(33)?;
+                    Ok(())
+                },
+            ),
         Err(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded { .. }))
     ));
     assert!(matches!(
-        assembly.try_commit_outcome_evidence(keys.failure_terminal_dimension, 1),
+        assembly
+            .ordinary()
+            .try_commit_outcome_evidence(keys.failure_terminal_dimension, 1),
         Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension { dimension }))
             if dimension == keys.failure_terminal_dimension
     ));
     assert!(matches!(
-        assembly.try_retain_outcome_evidence_sequence(
+        assembly.ordinary().try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("failure evidence plan"),
             TestTag,
             |writer| writer.push(9),
@@ -1899,6 +1910,7 @@ fn unregistered_publication_keys_preserve_failure_terminal_retry_authority() {
         ))
         .expect("corrected publication plan must retain the original terminal authority");
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("corrected evidence plan"),
             TestTag,
@@ -2047,7 +2059,7 @@ fn phase_completion_validates_domain_and_catalog_before_monotonic_progress() {
         failure_terminal_work,
     );
     let mut invocation_root = TestInvocationRoot::new();
-    let operation = TestOperation::try_start(
+    let mut operation = TestOperation::try_start(
         &mut invocation_root,
         OperationControl::default(),
         ledger_plan,
@@ -2213,6 +2225,7 @@ fn record_capacity_plan_allocator_and_physical_accounting_are_exact() {
     snapshots.push(account.snapshot());
     for fields in [3, 4, 5] {
         let _ = assembly
+            .ordinary()
             .try_retain_canonical_records(
                 RecordPlan::new(1, fields).expect("record plan"),
                 TestTag,
@@ -2259,7 +2272,7 @@ fn membership_rollback_storage_failure_poisoned_the_store_and_quarantines_accoun
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("membership rollback assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     let before_physical = account.snapshot();
@@ -2270,6 +2283,7 @@ fn membership_rollback_storage_failure_poisoned_the_store_and_quarantines_accoun
     test_fail_next_membership_assignment();
     test_panic_final_owner_drop_after(0);
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             TestTag,
@@ -2289,7 +2303,7 @@ fn membership_rollback_storage_failure_poisoned_the_store_and_quarantines_accoun
         after_physical.live_retained_allocations() > before_physical.live_retained_allocations()
     );
     assert!(matches!(
-        assembly.try_retain_outcome_evidence_sequence(
+        assembly.ordinary().try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             TestTag,
             |writer| writer.push(8),
@@ -2321,19 +2335,19 @@ fn containment_mapping_preserves_retained_charge_and_restricts_the_facade_immedi
         RetainedAllocationError::AccountPoisonedWithRetainedCharge(poisoned),
     ));
 
-    let mapped: Result<(), StoreRuntimeError> = assembly.map_action(Err(error));
+    let mapped: Result<(), StoreRuntimeError> = assembly.ordinary().map_action(Err(error));
     assert!(matches!(
         mapped,
         Err(StoreRuntimeError::AccountPoisonedWithRetainedCharge(cause))
             if cause == poisoned
     ));
-    assert!(assembly.is_fallback_only());
+    assert!(assembly.ordinary().is_fallback_only());
     assert!(matches!(
-        assembly.ensure_writable(),
+        assembly.ordinary().ensure_writable(),
         Err(StoreRuntimeError::FallbackOnly)
     ));
     assert!(matches!(
-        assembly.try_control_checkpoint(),
+        assembly.ordinary().try_control_checkpoint(),
         Err(StoreRuntimeError::FallbackOnly)
     ));
     assert!(publication_error_requires_containment(
@@ -2352,12 +2366,13 @@ fn builder_panic_retains_physical_and_operation_charges_fail_closed() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("builder-panic assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     let before_physical = account.snapshot();
 
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             TestTag,
@@ -2419,7 +2434,7 @@ fn clean_membership_rejection_releases_storage_and_attribution_once() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("clean membership rollback assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     let before_physical = account.snapshot();
@@ -2429,6 +2444,7 @@ fn clean_membership_rejection_releases_storage_and_attribution_once() {
 
     test_fail_next_membership_assignment();
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             TestTag,
@@ -2453,7 +2469,7 @@ fn clean_membership_rejection_releases_storage_and_attribution_once() {
         Some(before_faults + 1)
     );
     assert!(matches!(
-        assembly.try_retain_outcome_evidence_sequence(
+        assembly.ordinary().try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             TestTag,
             |writer| writer.push(8),
@@ -2472,6 +2488,7 @@ fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
         .try_publication_assembly(test_publication_plan(keys, 2, 1))
         .expect("primary rejection assembly");
     let leaf = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             TestTag,
@@ -2479,6 +2496,7 @@ fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
         )
         .expect("canonical leaf");
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_records(
             RecordPlan::new(1, 1).expect("record plan"),
             TestRootTag,
@@ -2486,6 +2504,7 @@ fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
         )
         .expect("canonical root");
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             TestTag,
@@ -2493,9 +2512,10 @@ fn primary_rejection_dependency_unwind_stops_before_attribution_ack() {
         )
         .expect("evidence root");
     assembly
+        .ordinary()
         .try_commit_outcome_evidence(keys.dimension, 4)
         .expect("primary commitment");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     let before_physical = account.snapshot();
@@ -2574,6 +2594,7 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
         .try_publication_assembly(test_publication_plan(keys, 2, 1))
         .expect("controlled assembly");
     let leaf = assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             keys.work_dimension,
@@ -2587,6 +2608,7 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
         )
         .expect("controlled sequence");
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_records_controlled(
             RecordPlan::new(1, 1).expect("record plan"),
             keys.work_dimension,
@@ -2600,6 +2622,7 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
         )
         .expect("controlled records");
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             TestTag,
@@ -2646,7 +2669,8 @@ fn controlled_validation_rejects_released_preexisting_planning_reservation() {
         .expect("controlled assembly");
     let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
     let reservation = {
-        let mut checkpoint = assembly
+        let mut ordinary = assembly.ordinary();
+        let mut checkpoint = ordinary
             .try_control_checkpoint()
             .expect("writable assembly checkpoint");
         checkpoint
@@ -2687,6 +2711,7 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
 
     let before_binary = account.snapshot();
     let binary = assembly
+        .ordinary()
         .try_retain_canonical_bytes_controlled(
             BytesPlan::new(BINARY_PAYLOAD.len()).expect("binary plan"),
             keys.work_dimension,
@@ -2704,6 +2729,7 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
     let after_binary = account.snapshot();
 
     let text = assembly
+        .ordinary()
         .try_retain_canonical_utf8_controlled(
             Utf8Plan::new(TEXT_PAYLOAD.len()).expect("UTF-8 plan"),
             keys.work_dimension,
@@ -2721,6 +2747,7 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
     let after_text = account.snapshot();
 
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_records(
             RecordPlan::new(1, 2).expect("canonical root plan"),
             TestRootTag,
@@ -2733,6 +2760,7 @@ fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
         )
         .expect("canonical root");
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             TestTag,
@@ -2789,12 +2817,13 @@ fn controlled_bytes_map_work_rejection_like_controlled_sequences() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("work-rejection assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_physical = account.snapshot();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
 
     let error = assembly
+        .ordinary()
         .try_retain_canonical_bytes_controlled(
             BytesPlan::new(1).expect("binary plan"),
             keys.work_dimension,
@@ -2808,7 +2837,7 @@ fn controlled_bytes_map_work_rejection_like_controlled_sequences() {
         .expect_err("work budget must reject controlled bytes");
 
     assert!(matches!(error, StoreRuntimeError::Ledger(_)));
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     let after_physical = account.snapshot();
@@ -2821,7 +2850,7 @@ fn controlled_bytes_map_work_rejection_like_controlled_sequences() {
         before_physical.live_retained_allocations()
     );
     assert!(matches!(
-        assembly.try_retain_canonical_sequence(
+        assembly.ordinary().try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("retry sequence plan"),
             TestTag,
             |writer| writer.push(8),
@@ -2847,13 +2876,14 @@ fn controlled_utf8_maps_cancellation_like_controlled_sequences() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("cancellation assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_physical = account.snapshot();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     cancellation.cancel();
 
     let error = assembly
+        .ordinary()
         .try_retain_canonical_utf8_controlled(
             Utf8Plan::new(1).expect("UTF-8 plan"),
             keys.work_dimension,
@@ -2867,7 +2897,7 @@ fn controlled_utf8_maps_cancellation_like_controlled_sequences() {
         .expect_err("cancellation must reject controlled UTF-8");
 
     assert!(matches!(error, StoreRuntimeError::Control(_)));
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     let after_physical = account.snapshot();
@@ -2880,7 +2910,7 @@ fn controlled_utf8_maps_cancellation_like_controlled_sequences() {
         before_physical.live_retained_allocations()
     );
     assert!(matches!(
-        assembly.try_retain_canonical_sequence(
+        assembly.ordinary().try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("retry sequence plan"),
             TestTag,
             |writer| writer.push(8),
@@ -2909,6 +2939,7 @@ fn controlled_work_stops_after_the_first_fault_without_charging_more_work() {
     cancellation.cancel();
 
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             keys.work_dimension,
@@ -2927,6 +2958,7 @@ fn controlled_work_stops_after_the_first_fault_without_charging_more_work() {
     assert!(matches!(error, StoreRuntimeError::Control(_)));
     let work = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.work_dimension)
         .expect("work dimension evidence");
     assert_eq!(work.attempted(), 0);
@@ -2942,12 +2974,13 @@ fn controlled_bytes_underwrite_rolls_back_and_remains_retryable() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("binary retry assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_physical = account.snapshot();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
 
     let error = assembly
+        .ordinary()
         .try_retain_canonical_bytes_controlled(
             BytesPlan::new(3).expect("underwritten binary plan"),
             keys.work_dimension,
@@ -2963,7 +2996,7 @@ fn controlled_bytes_underwrite_rolls_back_and_remains_retryable() {
         error,
         StoreRuntimeError::Build(StoreBuildError::incomplete_write())
     );
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     let after_physical = account.snapshot();
@@ -2975,9 +3008,10 @@ fn controlled_bytes_underwrite_rolls_back_and_remains_retryable() {
         after_physical.live_retained_allocations(),
         before_physical.live_retained_allocations()
     );
-    assert!(!assembly.is_fallback_only());
+    assert!(!assembly.ordinary().is_fallback_only());
 
     let _ = assembly
+        .ordinary()
         .try_retain_canonical_bytes_controlled(
             BytesPlan::new(3).expect("retry binary plan"),
             keys.work_dimension,
@@ -2989,7 +3023,7 @@ fn controlled_bytes_underwrite_rolls_back_and_remains_retryable() {
             },
         )
         .expect("binary retry succeeds");
-    assert_eq!(assembly.canonical_len(), 1);
+    assert_eq!(assembly.ordinary().canonical_len(), 1);
 }
 
 #[test]
@@ -3003,12 +3037,13 @@ fn controlled_utf8_rejects_non_fitting_multibyte_text_and_remains_retryable() {
     let mut assembly = operation
         .try_publication_assembly(test_publication_plan(keys, 1, 1))
         .expect("UTF-8 retry assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_physical = account.snapshot();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
 
     let error = assembly
+        .ordinary()
         .try_retain_canonical_utf8_controlled(
             Utf8Plan::new(1).expect("undersized UTF-8 plan"),
             keys.work_dimension,
@@ -3024,7 +3059,7 @@ fn controlled_utf8_rejects_non_fitting_multibyte_text_and_remains_retryable() {
         error,
         StoreRuntimeError::Build(StoreBuildError::capacity_exceeded())
     );
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     let after_physical = account.snapshot();
@@ -3036,9 +3071,10 @@ fn controlled_utf8_rejects_non_fitting_multibyte_text_and_remains_retryable() {
         after_physical.live_retained_allocations(),
         before_physical.live_retained_allocations()
     );
-    assert!(!assembly.is_fallback_only());
+    assert!(!assembly.ordinary().is_fallback_only());
 
     let _ = assembly
+        .ordinary()
         .try_retain_canonical_utf8_controlled(
             Utf8Plan::new(MULTIBYTE_TEXT.len()).expect("retry UTF-8 plan"),
             keys.work_dimension,
@@ -3050,7 +3086,7 @@ fn controlled_utf8_rejects_non_fitting_multibyte_text_and_remains_retryable() {
             },
         )
         .expect("UTF-8 retry succeeds");
-    assert_eq!(assembly.canonical_len(), 1);
+    assert_eq!(assembly.ordinary().canonical_len(), 1);
 }
 
 #[test]
@@ -3064,6 +3100,7 @@ fn controlled_builder_domain_rejection_rolls_back_and_remains_retryable() {
         .expect("controlled retry assembly");
     let rejection = StoreBuildError::domain(7).expect("test domain code");
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("rejected sequence plan"),
             keys.work_dimension,
@@ -3072,10 +3109,11 @@ fn controlled_builder_domain_rejection_rolls_back_and_remains_retryable() {
         )
         .expect_err("domain builder rejection");
     assert_eq!(error, StoreRuntimeError::Build(rejection));
-    assert_eq!(assembly.canonical_len(), 0);
-    assert!(!assembly.is_fallback_only());
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
+    assert!(!assembly.ordinary().is_fallback_only());
 
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("retry sequence plan"),
             keys.work_dimension,
@@ -3088,6 +3126,7 @@ fn controlled_builder_domain_rejection_rolls_back_and_remains_retryable() {
         )
         .expect("retry succeeds");
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             TestTag,
@@ -3124,6 +3163,7 @@ fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
         .try_publication_assembly(test_publication_plan(keys, 2, 1))
         .expect("sticky assembly");
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("canonical root plan"),
             TestRootTag,
@@ -3131,17 +3171,19 @@ fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
         )
         .expect("complete canonical root");
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence sequence plan"),
             TestTag,
             |writer| writer.push(9),
         )
         .expect("neutral evidence");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_physical = account.snapshot();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("sequence plan"),
             keys.work_dimension,
@@ -3154,7 +3196,7 @@ fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
         )
         .expect_err("ignored budget error remains sticky");
     assert!(matches!(error, StoreRuntimeError::Ledger(_)));
-    assert_eq!(assembly.canonical_len(), 1);
+    assert_eq!(assembly.ordinary().canonical_len(), 1);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     let after_physical = account.snapshot();
@@ -3167,7 +3209,7 @@ fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
         before_physical.live_retained_allocations()
     );
     assert!(matches!(
-        assembly.try_retain_canonical_sequence(
+        assembly.ordinary().try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("retry sequence plan"),
             TestTag,
             |writer| writer.push(8),
@@ -3175,7 +3217,7 @@ fn ignored_control_error_is_sticky_and_permanently_rejects_success() {
         Err(StoreRuntimeError::SuccessOutcomeRejected)
     ));
     assert!(matches!(
-        assembly.try_control_checkpoint(),
+        assembly.ordinary().try_control_checkpoint(),
         Err(StoreRuntimeError::SuccessOutcomeRejected)
     ));
     let failure = match assembly.validate_success(
@@ -3225,6 +3267,7 @@ fn direct_rich_failure_preserves_work_cause_across_rejection_and_fallback() {
         .try_publication_assembly(test_publication_plan(keys, 1, 2))
         .expect("direct rich-failure assembly");
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             TestTag,
@@ -3232,6 +3275,7 @@ fn direct_rich_failure_preserves_work_cause_across_rejection_and_fallback() {
         )
         .expect("evidence root");
     let evidence_detail = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence detail plan"),
             TestRootTag,
@@ -3239,6 +3283,7 @@ fn direct_rich_failure_preserves_work_cause_across_rejection_and_fallback() {
         )
         .expect("evidence detail");
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("canonical plan"),
             keys.work_dimension,
@@ -3295,6 +3340,7 @@ fn controlled_error_from_another_operation_is_not_a_verified_callback_cause() {
         .expect("first assembly");
     let mut captured = None;
     let first_error = first_assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("first sequence plan"),
             first_keys.work_dimension,
@@ -3318,6 +3364,7 @@ fn controlled_error_from_another_operation_is_not_a_verified_callback_cause() {
         .try_publication_assembly(test_publication_plan(second_keys, 1, 1))
         .expect("second assembly");
     let replay_error = second_assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("second sequence plan"),
             second_keys.work_dimension,
@@ -3330,7 +3377,7 @@ fn controlled_error_from_another_operation_is_not_a_verified_callback_cause() {
         StoreRuntimeError::UnverifiedControlledCause
     ));
     assert!(matches!(
-        second_assembly.try_retain_canonical_sequence(
+        second_assembly.ordinary().try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("ordinary sequence plan"),
             TestTag,
             |writer| writer.push(7),
@@ -3368,6 +3415,7 @@ fn controlled_validation_rejects_a_work_cause_from_another_operation() {
         .expect("first assembly");
     let mut captured = None;
     let first_error = first_assembly
+        .ordinary()
         .try_retain_canonical_sequence_controlled(
             SequencePlan::<u8>::new(1).expect("first sequence plan"),
             first_keys.work_dimension,
@@ -4029,7 +4077,8 @@ fn publication_assembly_lends_transient_control_without_mutating_tables() {
         .expect("transient-control assembly");
 
     let mut reservation = {
-        let mut checkpoint = assembly
+        let mut ordinary = assembly.ordinary();
+        let mut checkpoint = ordinary
             .try_control_checkpoint()
             .expect("writable assembly checkpoint");
         checkpoint.poll().expect("assembly checkpoint poll");
@@ -4044,11 +4093,12 @@ fn publication_assembly_lends_transient_control_without_mutating_tables() {
             .expect("assembly checkpoint resize");
         reservation
     };
-    assert_eq!(assembly.canonical_len(), 0);
-    assert_eq!(assembly.outcome_evidence_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
+    assert_eq!(assembly.ordinary().outcome_evidence_len(), 0);
 
     {
-        let mut checkpoint = assembly
+        let mut ordinary = assembly.ordinary();
+        let mut checkpoint = ordinary
             .try_control_checkpoint()
             .expect("second writable assembly checkpoint");
         checkpoint
@@ -4327,16 +4377,12 @@ fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
 
 #[test]
 fn canonical_share_api_requires_derived_lineage_and_the_sealed_shareable_kind() {
-    let source = include_str!("../concrete_store.rs");
+    let source = include_str!("ordinary.rs");
     let method = public_method_block(
         source,
         "pub fn try_share_canonical<SourceRootKind, SourceRootTag, SlotKind, SlotTag>",
     );
-    assert!(
-        source.contains(
-            "RetainedStorePublicationAssembly<'inv, O, PP, U, CanonicalInheritanceSource>"
-        )
-    );
+    assert!(source.contains("StorePublicationLoan<'op, O, PP, U, CanonicalInheritanceSource>"));
     assert!(method.contains("PublishedCanonicalStore<SourceRootKind, SourceRootTag>"));
     assert!(method.contains("source_ref: CanonicalStoreRef<SlotKind, SlotTag>"));
     assert!(method.contains("SlotKind: ShareableStoreKind"));
@@ -4351,7 +4397,7 @@ fn canonical_source_mapping_capacity_is_not_a_public_store_plan_input() {
 
 #[test]
 fn success_evidence_share_api_requires_the_sealed_shareable_kind_at_its_boundary() {
-    let source = include_str!("../concrete_store.rs");
+    let source = include_str!("ordinary.rs");
     let method = public_method_block(
         source,
         "pub fn try_share_outcome_evidence<SourceRootKind, SourceRootTag, SlotKind, SlotTag>",

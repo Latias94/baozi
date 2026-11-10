@@ -15,6 +15,81 @@ pub(crate) struct WorkView<'a, D> {
     pub(in crate::ledger) header: &'a mut WorkHeader,
 }
 
+pub(crate) struct WorkReadView<'a, D> {
+    pub(in crate::ledger) catalog: &'a [D],
+    pub(in crate::ledger) rows: &'a [WorkEntry<D>],
+    pub(in crate::ledger) header: &'a WorkHeader,
+}
+
+impl<D> WorkReadView<'_, D> {
+    pub(in crate::ledger) fn check_integrity(&self) -> Result<(), LedgerCause<D>> {
+        check_row_shape(self.rows, self.header, self.catalog.len())
+    }
+
+    pub(in crate::ledger) fn ensure_active(&self, grant: WorkGrant) -> Result<(), LedgerCause<D>> {
+        self.check_integrity()?;
+        check_active_mode(self.header, grant)
+    }
+
+    pub(in crate::ledger) fn ensure_ordinary_open(&self) -> Result<(), LedgerCause<D>> {
+        self.check_integrity()?;
+        match self.header.mode {
+            super::WorkMode::Ordinary => Ok(()),
+            super::WorkMode::OrdinarySealed => Err(LedgerCause::PublicationAlreadyPending),
+            super::WorkMode::Protected | super::WorkMode::Closed => {
+                Err(LedgerCause::PublicationAlreadyCompleted)
+            }
+        }
+    }
+
+    pub(in crate::ledger) fn check_quiescent(&self) -> Result<(), LedgerCause<D>> {
+        self.check_integrity()?;
+        check_quiescent(self.rows, self.header)
+    }
+}
+
+impl<D: Copy + Ord> WorkReadView<'_, D> {
+    pub(in crate::ledger) fn bind_layout<const N: usize>(
+        &self,
+        dimensions: [D; N],
+        grant: WorkGrant,
+    ) -> Result<WorkLayout<N>, LedgerCause<D>> {
+        let layout = WorkLayout::bind(self.catalog, &dimensions, grant)?;
+        self.ensure_active(grant)?;
+        layout.validate_binding(self.header, &dimensions)?;
+        Ok(layout)
+    }
+}
+
+impl<D> WorkView<'_, D> {
+    pub(in crate::ledger) fn as_read(&self) -> WorkReadView<'_, D> {
+        WorkReadView {
+            catalog: self.catalog,
+            rows: self.rows,
+            header: self.header,
+        }
+    }
+
+    pub(in crate::ledger) fn reborrow(&mut self) -> WorkView<'_, D> {
+        WorkView {
+            catalog: self.catalog,
+            rows: self.rows,
+            header: self.header,
+        }
+    }
+}
+
+pub(in crate::ledger) fn check_row_shape<D>(
+    rows: &[WorkEntry<D>],
+    header: &WorkHeader,
+    catalog_len: usize,
+) -> Result<(), LedgerCause<D>> {
+    if header.integrity_fault || rows.len() != catalog_len {
+        return Err(LedgerCause::FinalSnapshotShapeMismatch);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct WorkLayout<const N: usize> {
     pub(super) positions: [usize; N],
@@ -88,9 +163,7 @@ impl<const N: usize> WorkLayout<N> {
         &self,
         state: &WorkView<'_, D>,
     ) -> Result<(), LedgerCause<D>> {
-        if state.header.integrity_fault || state.rows.len() != state.catalog.len() {
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
-        }
+        state.as_read().check_integrity()?;
         check_active_mode(state.header, self.grant)?;
         self.validate_role_header(state.catalog, state.header)
     }
@@ -390,6 +463,37 @@ pub(crate) struct WorkFrame<const N: usize> {
     pub(crate) faulted: bool,
 }
 
+/// A singleton Producer row whose complete admitted envelope is held by an exclusive loan.
+///
+/// The constructor checks the reserved-state invariant once. While this row exists, the
+/// exclusive borrow prevents policy, lane, reservation, and resolution changes, so each unit
+/// only transfers the already reserved counters and remainder.
+pub(crate) struct ReservedProducerRow<'loan, D> {
+    row: &'loan mut WorkEntry<D>,
+    remaining: &'loan mut u64,
+}
+
+impl<D> ReservedProducerRow<'_, D> {
+    pub(crate) fn remaining(&self) -> u64 {
+        *self.remaining
+    }
+
+    /// Completes one normally returned action after the caller checked actual remaining work.
+    pub(crate) fn complete_unit(&mut self) {
+        debug_assert!(*self.remaining > 0);
+        // At entry C + P is representable and within attempted/limit, and P >= R. Each
+        // transfer preserves C + P and P - R; R > 0 therefore makes all three updates valid.
+        self.row.state.consumed += 1;
+        self.row.state.pending_consumed -= 1;
+        *self.remaining -= 1;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_remaining_mut(&mut self) -> &mut u64 {
+        self.remaining
+    }
+}
+
 impl<const N: usize> WorkFrame<N> {
     pub(crate) fn complete_batch_with_outcome<D: Copy>(
         &mut self,
@@ -519,6 +623,55 @@ impl<const N: usize> WorkFrame<N> {
 }
 
 impl WorkFrame<1> {
+    /// Lends the actual singleton Producer row after checking its reserved envelope once.
+    ///
+    /// The caller must hold this loan through every unit completion. Its lifetime prevents any
+    /// other work or policy operation from changing the row until the loan is dropped.
+    pub(crate) fn borrow_reserved_producer_row<'loan, D: Copy>(
+        &'loan mut self,
+        group: &WorkLayout<1>,
+        state: &'loan mut WorkView<'_, D>,
+    ) -> Result<ReservedProducerRow<'loan, D>, LedgerCause<D>> {
+        if !self.active
+            || self.faulted
+            || self.lane != WorkLane::Producer
+            || group.grant != WorkGrant::Ordinary
+        {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        if group.positions[0] >= state.catalog.len() {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        group.validate_active(state)?;
+        if !lane_is_open(state, self.lane) {
+            state.header.integrity_fault = true;
+            self.faulted = true;
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+
+        let position = group.positions[0];
+        let dimension = state.catalog[position];
+        let row = &state.rows[position];
+        let counters = row.state;
+        check_effective(
+            || dimension,
+            counters.consumed,
+            counters.pending_consumed,
+            counters.attempted,
+            row.policy.consumed_limit,
+        )?;
+        if counters.pending_consumed < self.remaining[0] {
+            state.header.integrity_fault = true;
+            self.faulted = true;
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+
+        Ok(ReservedProducerRow {
+            row: &mut state.rows[position],
+            remaining: &mut self.remaining[0],
+        })
+    }
+
     /// Admits only the next real leaf, retaining the same explicitly owned envelope.
     pub(crate) fn replenish_one<D: Copy>(
         &mut self,
@@ -759,6 +912,56 @@ pub(crate) struct ParserFrame<const N: usize> {
     pub(crate) active: bool,
 }
 
+pub(crate) struct ParserReadRow<'loan, D> {
+    row: &'loan mut WorkEntry<D>,
+    remaining: &'loan mut u64,
+    dimension: D,
+}
+
+impl<D: Copy> ParserReadRow<'_, D> {
+    /// Bounds a successful prefix from the current exclusive row without reserving it.
+    /// Invalid arithmetic leaves the original completion to report its exact failure.
+    #[inline]
+    pub(crate) fn successful_prefix_bound(&self, maximum: u64) -> u64 {
+        let Some(effective) = self
+            .row
+            .state
+            .consumed
+            .checked_add(self.row.state.pending_consumed)
+        else {
+            return 0;
+        };
+        let Some(attempted) = self.row.state.attempted.checked_sub(effective) else {
+            return 0;
+        };
+        let Some(limit) = self.row.policy.consumed_limit.checked_sub(effective) else {
+            return 0;
+        };
+        maximum.min(*self.remaining).min(attempted).min(limit)
+    }
+
+    pub(crate) fn complete(&mut self, amount: u64) -> Result<(), LedgerCause<D>> {
+        if amount > *self.remaining {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        if amount == 0 {
+            return Ok(());
+        }
+        let dimension = self.dimension;
+        let consumed = add_consumed(self.row.state.consumed, amount, || dimension)?;
+        check_effective(
+            || dimension,
+            consumed,
+            self.row.state.pending_consumed,
+            self.row.state.attempted,
+            self.row.policy.consumed_limit,
+        )?;
+        self.row.state.consumed = consumed;
+        *self.remaining -= amount;
+        Ok(())
+    }
+}
+
 impl<const N: usize> ParserFrame<N> {
     /// Records one exact group prefix without reserving a pending-consumed envelope.
     pub(crate) fn complete<D: Copy>(
@@ -825,6 +1028,26 @@ impl<const N: usize> ParserFrame<N> {
 }
 
 impl ParserFrame<1> {
+    pub(crate) fn borrow_read_row<'a, D: Copy>(
+        &'a mut self,
+        group: &WorkLayout<1>,
+        state: &'a mut WorkView<'_, D>,
+    ) -> Result<ParserReadRow<'a, D>, LedgerCause<D>> {
+        if group.positions[0] >= state.catalog.len() {
+            return Err(LedgerCause::FinalSnapshotShapeMismatch);
+        }
+        group.validate_active(state)?;
+        if group.grant != WorkGrant::Ordinary {
+            return Err(LedgerCause::InactiveLinearWorkPermit);
+        }
+        self.validate(state)?;
+        Ok(ParserReadRow {
+            row: &mut state.rows[group.positions[0]],
+            remaining: &mut self.remaining[0],
+            dimension: state.catalog[group.positions[0]],
+        })
+    }
+
     /// Admits another chunk only for a fully consumed scope without a per-item limit.
     pub(crate) fn replenish<D: Copy>(
         &mut self,

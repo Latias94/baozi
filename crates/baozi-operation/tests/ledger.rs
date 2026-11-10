@@ -127,11 +127,11 @@ fn publication_batch(
 }
 
 trait SnapshotTestExt {
-    fn ledger_snapshot(&self) -> LedgerSnapshot<Phase, Dimension>;
+    fn ledger_snapshot(&mut self) -> LedgerSnapshot<Phase, Dimension>;
 }
 
 impl SnapshotTestExt for Coordinator {
-    fn ledger_snapshot(&self) -> LedgerSnapshot<Phase, Dimension> {
+    fn ledger_snapshot(&mut self) -> LedgerSnapshot<Phase, Dimension> {
         self.try_ledger_snapshot()
             .expect("test evidence snapshot must fit the configured bound")
     }
@@ -189,12 +189,34 @@ fn coordinator_with_tight_evidence_limit(
     let mut evidence_limit = 0;
     for _ in 0..16 {
         let limits = build_limits();
-        evidence_limit = evidence_limit.max(limits.frozen_evidence_bytes());
+        evidence_limit = evidence_limit.max(limits.frozen_administrative_bytes());
         let limits = limits
             .try_with_evidence_byte_limit(evidence_limit)
             .expect("the frozen dimension evidence must fit its observed bound");
         match Coordinator::try_new(OperationControl::default(), limits, COMPLETE_PHASES) {
-            Ok(coordinator) => return coordinator,
+            Ok(mut coordinator) => {
+                // This fixture exercises publication after a real independently releasable
+                // token exists. Its tight bound includes that token's actual Shared payload.
+                let reservation =
+                    coordinator
+                        .checkpoint()
+                        .reserve(Phase::Snapshot, Dimension::AssetBytes, 0);
+                match reservation {
+                    Ok(reservation) => {
+                        drop(reservation);
+                        return coordinator;
+                    }
+                    Err(LedgerCause::Evidence {
+                        cause:
+                            LedgerEvidenceError::LimitExceeded {
+                                purpose: LedgerEvidencePurpose::SharedStorage,
+                                value,
+                                ..
+                            },
+                    }) => evidence_limit = value,
+                    Err(cause) => panic!("unexpected tight Shared qualification failure: {cause}"),
+                }
+            }
             Err(LedgerCause::Evidence {
                 cause:
                     LedgerEvidenceError::LimitExceeded {

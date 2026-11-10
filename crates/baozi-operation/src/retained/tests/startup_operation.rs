@@ -39,7 +39,11 @@ fn publication_evidence_precharges_the_capacity_envelope() {
     )
     .unwrap_or_else(|error| panic!("evidence operation must start: {error:?}"));
     assert_eq!(account.share_call_count(), 4);
-    let allocation = operation.retained.baseline.test_evidence_allocation();
+    let allocation = operation
+        .loan()
+        .retained
+        .baseline
+        .test_evidence_allocation();
     let outer_bytes = FinalOwnerAllocation::<
         RetainedFinalOwnerInner<
             RetainedPayload<TerminalLedgerEvidence<TestPhase, u8>>,
@@ -257,10 +261,12 @@ fn block_handle_clone_is_charged_before_builder_or_account_share() {
     let builder_called = AtomicBool::new(false);
 
     assert!(matches!(
-        assembly.try_retain_canonical(empty_plan(), |emplacer| {
-            builder_called.store(true, Ordering::SeqCst);
-            Ok(emplacer.place(11, CanonicalRootTag))
-        }),
+        assembly
+            .loan_mut()
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                builder_called.store(true, Ordering::SeqCst);
+                Ok(emplacer.place(11, CanonicalRootTag))
+            }),
         Err(RetainedPublicationError::Writer(
             RetainedWriterError::Ledger(LedgerCause::LimitExceeded { .. })
         ))

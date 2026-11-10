@@ -1,4 +1,5 @@
 use super::*;
+use crate::ledger::Ledger;
 use crate::ledger::{CounterClass, DimensionPolicy, LedgerCause, LedgerLimits};
 use crate::retained::{
     AdmissionCharge, AdmittedRetainedShareWork, PhysicalStorageAccountFactory,
@@ -49,7 +50,7 @@ fn borrowed_share_uses_one_backing_and_resolves_both_duplicate_row_prefixes() {
     let (account, source) = source();
     let baseline = account.snapshot();
     let share =
-        try_admit_borrowed_retained_share_work(&mut ledger, RetainedHandleSharePlan::new(1, 1))
+        try_admit_borrowed_retained_share_work(ledger.view(), RetainedHandleSharePlan::new(1, 1))
             .unwrap()
             .try_share_allocation(source.allocation())
             .unwrap_or_else(|_| panic!("admitted clone and handle complete"));
@@ -57,7 +58,7 @@ fn borrowed_share_uses_one_backing_and_resolves_both_duplicate_row_prefixes() {
     assert!(std::ptr::eq(source.as_ref(), shared.as_ref()));
     let work = ledger.dimension_evidence(1).unwrap();
     assert_eq!((work.attempted(), work.consumed()), (2, 2));
-    ledger.check_work_quiescent().unwrap();
+    ledger.as_read().check_work_quiescent().unwrap();
     assert_eq!(
         account.snapshot().live_retained_bytes(),
         baseline.live_retained_bytes()
@@ -83,8 +84,10 @@ fn borrowed_share_denial_keeps_attempts_and_never_clones_or_reserves_a_suffix() 
         let mut ledger = ledger(attempted, consumed);
         let (account, source) = source();
         let baseline = account.snapshot();
-        let result =
-            try_admit_borrowed_retained_share_work(&mut ledger, RetainedHandleSharePlan::new(1, 1));
+        let result = try_admit_borrowed_retained_share_work(
+            ledger.view(),
+            RetainedHandleSharePlan::new(1, 1),
+        );
         assert!(matches!(
             result,
             Err(RetainedWriterError::Ledger(LedgerCause::LimitExceeded {
@@ -97,7 +100,7 @@ fn borrowed_share_denial_keeps_attempts_and_never_clones_or_reserves_a_suffix() 
         drop(result);
         let work = ledger.dimension_evidence(1).unwrap();
         assert_eq!((work.attempted(), work.consumed()), (2, 0));
-        ledger.check_work_quiescent().unwrap();
+        ledger.as_read().check_work_quiescent().unwrap();
         assert_eq!(
             account.snapshot().live_retained_bytes(),
             baseline.live_retained_bytes()
@@ -112,15 +115,17 @@ fn borrowed_share_denial_keeps_attempts_and_never_clones_or_reserves_a_suffix() 
 fn borrowed_share_abandonment_preserves_completed_work_and_latches_integrity() {
     for completed in [false, true] {
         let mut ledger = ledger(2, 2);
-        let mut work =
-            try_admit_borrowed_retained_share_work(&mut ledger, RetainedHandleSharePlan::new(1, 1))
-                .unwrap();
+        let mut work = try_admit_borrowed_retained_share_work(
+            ledger.view(),
+            RetainedHandleSharePlan::new(1, 1),
+        )
+        .unwrap();
         if completed {
             work.complete_reference_clone().unwrap();
         }
         drop(work);
         assert!(matches!(
-            ledger.check_work_quiescent(),
+            ledger.as_read().check_work_quiescent(),
             Err(LedgerCause::FinalSnapshotShapeMismatch)
         ));
         let failure = ledger
@@ -142,9 +147,11 @@ fn borrowed_share_abandonment_preserves_completed_work_and_latches_integrity() {
 fn borrowed_share_explicit_partial_resolution_releases_only_the_unfinished_suffix() {
     for completed in [false, true] {
         let mut ledger = ledger(2, 2);
-        let mut work =
-            try_admit_borrowed_retained_share_work(&mut ledger, RetainedHandleSharePlan::new(1, 1))
-                .unwrap();
+        let mut work = try_admit_borrowed_retained_share_work(
+            ledger.view(),
+            RetainedHandleSharePlan::new(1, 1),
+        )
+        .unwrap();
         if completed {
             work.complete_reference_clone().unwrap();
         }
@@ -154,7 +161,7 @@ fn borrowed_share_explicit_partial_resolution_releases_only_the_unfinished_suffi
             (work.attempted(), work.consumed()),
             (2, u64::from(completed))
         );
-        ledger.check_work_quiescent().unwrap();
+        ledger.as_read().check_work_quiescent().unwrap();
     }
 }
 
@@ -180,7 +187,7 @@ fn borrowed_share_clone_completion_failure_returns_its_owner_and_releases_only_t
     let mut ledger = ledger(2, 2);
     let (account, source) = source();
     let work =
-        try_admit_borrowed_retained_share_work(&mut ledger, RetainedHandleSharePlan::new(1, 1))
+        try_admit_borrowed_retained_share_work(ledger.view(), RetainedHandleSharePlan::new(1, 1))
             .unwrap();
     let Err(failure) =
         share_allocation_after_admitted_work(FailAfterClone(work), source.allocation())
@@ -191,7 +198,7 @@ fn borrowed_share_clone_completion_failure_returns_its_owner_and_releases_only_t
     assert!(matches!(cause, LedgerCause::FinalSnapshotShapeMismatch));
     let work = ledger.dimension_evidence(1).unwrap();
     assert_eq!((work.attempted(), work.consumed()), (2, 1));
-    ledger.check_work_quiescent().unwrap();
+    ledger.as_read().check_work_quiescent().unwrap();
     drop(source);
     assert!(account.snapshot().live_retained_bytes() > 0);
     drop(shared);
@@ -235,7 +242,7 @@ fn startup_shares_preserve_non_unit_duplicate_charges_and_the_admitted_physical_
         drop(result);
         let work = ledger.dimension_evidence(1).unwrap();
         assert_eq!((work.attempted(), work.consumed()), (attempted, consumed));
-        ledger.check_work_quiescent().unwrap();
+        ledger.as_read().check_work_quiescent().unwrap();
         assert_eq!(account.share_call_count(), shares_before + completed_shares);
         assert_eq!(
             account.snapshot().live_retained_bytes(),

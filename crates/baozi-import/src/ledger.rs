@@ -423,17 +423,17 @@ impl ImportLedgerSnapshot {
         self.evidence.active_reservations()
     }
 
-    /// Returns the terminal operation's currently retained evidence bytes.
+    /// Returns ledger-owned administrative bytes at terminal capture.
     ///
-    /// A fully published terminal must report zero. The value is an import-owned scalar summary;
-    /// no retained-store evidence or key escapes through this accessor.
-    pub const fn current_evidence_bytes(&self) -> u64 {
-        self.evidence.current_evidence_bytes()
+    /// This includes actual metadata still owned at that boundary. Publication retires those
+    /// owners after capture; the frozen value is not rewritten to describe their later disposal.
+    pub const fn current_administrative_bytes(&self) -> u64 {
+        self.evidence.current_administrative_bytes()
     }
 
-    /// Returns the peak evidence bytes retained while producing this terminal.
-    pub const fn peak_evidence_bytes(&self) -> u64 {
-        self.evidence.peak_evidence_bytes()
+    /// Returns the peak administrative bytes retained while producing this terminal.
+    pub const fn peak_administrative_bytes(&self) -> u64 {
+        self.evidence.peak_administrative_bytes()
     }
 
     /// Returns the sole terminal cause frozen in this import ledger.

@@ -224,27 +224,7 @@ fn measure_inner(
             .flat_map(|mesh| mesh.primitives())
             .any(|primitive| primitive.topology() != TopologyKind::Points)
         {
-            let targets: Vec<_> = scene
-                .meshes()
-                .flat_map(|mesh| mesh.primitives())
-                .map(|primitive| primitive.id())
-                .collect();
-            let (prepared, report) = prepare_triangles(
-                scene,
-                &targets,
-                TrianglePreparationOptions {
-                    lowering: TriangleLowering::Preserve,
-                    normals: options
-                        .generate_missing_normals
-                        .then(NormalOptions::default),
-                    ..TrianglePreparationOptions::default()
-                },
-                PostProcessControl::default(),
-            )?
-            .into_parts();
-            scene = prepared;
-            drop(report);
-            drop(targets);
+            scene = prepare_scene(scene, options.generate_missing_normals)?;
         } else if options.stage == Stage::Prepare {
             return Err(Unsupported("point cases have no preparation endpoint").into());
         }
@@ -311,6 +291,29 @@ fn measure_inner(
         }),
         output,
     })
+}
+
+// Keep the public preparation result local to this endpoint phase.
+fn prepare_scene(scene: ValidatedScene, generate_missing_normals: bool) -> Result<ValidatedScene> {
+    let targets: Vec<_> = scene
+        .meshes()
+        .flat_map(|mesh| mesh.primitives())
+        .map(|primitive| primitive.id())
+        .collect();
+    let (scene, report) = prepare_triangles(
+        scene,
+        &targets,
+        TrianglePreparationOptions {
+            lowering: TriangleLowering::Preserve,
+            normals: generate_missing_normals.then(NormalOptions::default),
+            ..TrianglePreparationOptions::default()
+        },
+        PostProcessControl::default(),
+    )?
+    .into_parts();
+    drop(report);
+    drop(targets);
+    Ok(scene)
 }
 
 pub fn failure(error: &(dyn std::error::Error + 'static), options: Options) -> Value {

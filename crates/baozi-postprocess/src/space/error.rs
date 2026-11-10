@@ -1,9 +1,7 @@
 use std::fmt;
 
 use baozi_core::SourceSpaceError;
-use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
-use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
-use baozi_operation::{StorePrepareError, StoreRuntimeError};
+use baozi_operation::StoreRuntimeError;
 use thiserror::Error;
 
 use super::SpaceConversionIssue;
@@ -24,11 +22,6 @@ pub enum SpaceConversionCause {
         #[source]
         issue: SpaceConversionIssue,
     },
-    #[error("the same-account edit operation could not start: {source}")]
-    Start {
-        #[source]
-        source: RetainedStoreStartError,
-    },
     #[error("scene conversion storage or work admission failed: {source}")]
     Runtime {
         #[source]
@@ -47,16 +40,6 @@ pub enum SpaceConversionCause {
     CentralValidation,
     #[error("the Scene edit could not acquire or bind its final generation")]
     Publication,
-    #[error("the Scene edit requires fail-closed containment: {source}")]
-    Containment {
-        #[source]
-        source: StoreActivationContainment,
-    },
-    #[error("final Scene-edit preparation requires containment: {source}")]
-    Preparation {
-        #[source]
-        source: StorePrepareError,
-    },
 }
 
 impl From<StoreRuntimeError> for SpaceConversionCause {
@@ -71,6 +54,8 @@ impl From<StoreRuntimeError> for SpaceConversionCause {
 }
 
 /// Typed failure and the actual retained terminal evidence, when startup and cleanup permit it.
+///
+/// Invocation failures are returned by the outer run boundary with their original owner.
 pub struct SpaceConversionFailure {
     cause: SpaceConversionCause,
     resources: Option<PostProcessResourceEvidence>,
@@ -104,8 +89,8 @@ impl SpaceConversionFailure {
     }
 }
 
-impl From<crate::scene_edit::EditFailure> for SpaceConversionFailure {
-    fn from(failure: crate::scene_edit::EditFailure) -> Self {
+impl From<crate::scene_edit::EditSemanticFailure> for SpaceConversionFailure {
+    fn from(failure: crate::scene_edit::EditSemanticFailure) -> Self {
         use crate::scene_edit::EditCause;
         let cause = match failure.cause {
             EditCause::Runtime { source } => SpaceConversionCause::Runtime { source },
@@ -117,8 +102,6 @@ impl From<crate::scene_edit::EditFailure> for SpaceConversionFailure {
             EditCause::SpaceIssue { issue } => SpaceConversionCause::Issue { issue },
             EditCause::CentralValidation => SpaceConversionCause::CentralValidation,
             EditCause::Publication => SpaceConversionCause::Publication,
-            EditCause::Containment { source } => SpaceConversionCause::Containment { source },
-            EditCause::Preparation { source } => SpaceConversionCause::Preparation { source },
         };
         Self {
             cause,

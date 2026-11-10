@@ -14,11 +14,354 @@ type ValidatedScalarSuccess<'inv> = ValidatedRetainedSuccess<
     u64,
 >;
 
+fn scalar_decision_assembly_on_account<'inv>(
+    root: &'inv mut TestInvocationRoot<u64, u64>,
+    account: &PhysicalStorageAccount,
+    failure_work: bool,
+) -> TestPublication<'inv, u64, u64> {
+    let operation = if failure_work {
+        test_operation_on_account_with_failure_work(
+            root,
+            account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+            1,
+            7_u32,
+        )
+    } else {
+        test_operation_on_account_with_control(
+            root,
+            account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        )
+    };
+    operation
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("the original scalar decision assembly must open"))
+}
+
+#[test]
+fn borrowed_publication_open_binds_original_fields_without_replaying_admission() {
+    for forgotten in [false, true] {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let mut root = TestInvocationRoot::<u64, u64>::new();
+        let mut operation = test_operation_on_account_with_control(
+            &mut root,
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let opened = {
+            let ordinary = operation
+                .loan_mut()
+                .reborrow()
+                .open_publication_borrow(publication_plan(1, 1))
+                .unwrap_or_else(|_| panic!("the short original-field open must succeed"));
+            let opened = ordinary
+                .opened_stamp()
+                .expect("the original open remains installed");
+            if forgotten {
+                std::mem::forget(ordinary);
+            } else {
+                drop(ordinary);
+            }
+            opened
+        };
+        let physical = account.snapshot();
+        let shares = account.share_call_count();
+        let assembly = match operation.bind_opened_assembly(opened) {
+            Ok(assembly) => assembly,
+            Err(_) => panic!("the original owner must bind its installed tables"),
+        };
+        assert_eq!(account.snapshot(), physical);
+        assert_eq!(account.share_call_count(), shares);
+        assert_eq!(assembly.loan().canonical_len(), 0);
+        assert_eq!(assembly.loan().outcome_evidence_len(), 0);
+        drop(assembly);
+        drop(root);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert_eq!(account.snapshot().poison_event_count(), 0);
+    }
+}
+
+#[test]
+fn borrowed_publication_open_stamp_returns_original_foreign_owner_and_remains_bindable() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let mut source_root = TestInvocationRoot::<u64, u64>::new();
+    let mut target_root = TestInvocationRoot::<u64, u64>::new();
+    let mut source = test_operation_on_account_with_control(
+        &mut source_root,
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let target = test_operation_on_account_with_control(
+        &mut target_root,
+        &account,
+        64,
+        RetainedBatchLimits::new(2, 2),
+        OperationControl::default(),
+    );
+    let opened = {
+        let ordinary = source
+            .loan_mut()
+            .reborrow()
+            .open_publication_borrow(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("the original short publication must open"));
+        ordinary
+            .opened_stamp()
+            .expect("the original opened stamp must exist")
+    };
+    let physical = account.snapshot();
+    let shares = account.share_call_count();
+    let (target, opened) = match target.bind_opened_assembly(opened) {
+        Err(originals) => originals,
+        Ok(_) => panic!("a foreign unopened owner cannot bind an installed publication"),
+    };
+    assert_eq!(account.snapshot(), physical);
+    assert_eq!(account.share_call_count(), shares);
+    let source = match source.bind_opened_assembly(opened) {
+        Ok(assembly) => assembly,
+        Err(_) => panic!("the unchanged original stamp must bind its original fields"),
+    };
+    assert_eq!(account.snapshot(), physical);
+    assert_eq!(account.share_call_count(), shares);
+    let target = target
+        .try_publication_assembly(publication_plan(1, 1))
+        .unwrap_or_else(|_| panic!("the rejected target must remain a writable unopened owner"));
+    drop(source);
+    drop(target);
+    drop(source_root);
+    drop(target_root);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert_eq!(account.snapshot().poison_event_count(), 0);
+}
+
+#[test]
+fn ordinary_success_decision_cannot_restore_success_after_a_later_rejection() {
+    for failure_work in [false, true] {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let mut root = TestInvocationRoot::new();
+        let mut assembly = scalar_decision_assembly_on_account(&mut root, &account, failure_work);
+        let (canonical, evidence) = retain_scalar_success(&mut assembly);
+        let (success, rejected) = {
+            let mut ordinary = assembly.loan_mut().borrow_ordinary();
+            let success = ordinary.validate_success_decision(
+                canonical,
+                evidence,
+                |session, canonical, evidence| {
+                    session.canonical(canonical) == Some(&11)
+                        && session.outcome_evidence(evidence) == Some(&7)
+                },
+            );
+            let rejected = ordinary.validate_success_decision(canonical, evidence, |_, _, _| false);
+            (success, rejected)
+        };
+        let physical = account.snapshot();
+        let shares = account.share_call_count();
+        let (assembly, _original_success) = match assembly.bind_success_decision(success) {
+            Err(originals) => originals,
+            Ok(_) => panic!("an earlier success decision must not bypass actual rejection"),
+        };
+        assert_eq!(account.snapshot(), physical);
+        assert_eq!(account.share_call_count(), shares);
+        assert!(assembly.loan().fields.success_outcome_rejected);
+        assert!(
+            !assembly
+                .loan()
+                .operation
+                .as_ref()
+                .unwrap()
+                .common
+                .terminal_is_outstanding()
+        );
+        let failure = match assembly.bind_success_decision(rejected) {
+            Ok(RetainedSuccessValidation::Rejected(failure)) => failure,
+            _ => panic!("the original later rejection must remain bindable"),
+        };
+        drop(failure);
+        drop(root);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert_eq!(account.snapshot().poison_event_count(), 0);
+    }
+}
+
+#[test]
+fn ordinary_closure_decision_rejects_foreign_assembly_without_changing_either_owner() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let mut source_root = TestInvocationRoot::new();
+    let mut target_root = TestInvocationRoot::new();
+    let mut source = scalar_decision_assembly_on_account(&mut source_root, &account, false);
+    let mut target = scalar_decision_assembly_on_account(&mut target_root, &account, false);
+    let (canonical, evidence) = retain_scalar_success(&mut source);
+    let (target_canonical, target_evidence) = retain_scalar_success(&mut target);
+    let decision = source
+        .loan_mut()
+        .borrow_ordinary()
+        .validate_success_decision(canonical, evidence, |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        });
+    let physical = account.snapshot();
+    let shares = account.share_call_count();
+    let (target, decision) = match target.bind_success_decision(decision) {
+        Err(originals) => originals,
+        Ok(_) => panic!("a foreign set must return the original assembly and decision"),
+    };
+    assert_eq!(account.snapshot(), physical);
+    assert_eq!(account.share_call_count(), shares);
+    assert!(matches!(
+        source.bind_success_decision(decision),
+        Ok(RetainedSuccessValidation::Valid(_))
+    ));
+    assert!(matches!(
+        target.validate_success(
+            target_canonical,
+            target_evidence,
+            |session, canonical, evidence| {
+                session.canonical(canonical) == Some(&11)
+                    && session.outcome_evidence(evidence) == Some(&7)
+            }
+        ),
+        RetainedSuccessValidation::Valid(_)
+    ));
+    drop(source_root);
+    drop(target_root);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert_eq!(account.snapshot().poison_event_count(), 0);
+}
+
+#[test]
+fn ordinary_closure_decisions_preserve_both_kinds_on_wrong_binder_rejection() {
+    for evidence_only in [false, true] {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let mut root = TestInvocationRoot::new();
+        let mut assembly = scalar_decision_assembly_on_account(&mut root, &account, evidence_only);
+        let (canonical, evidence) = retain_scalar_success(&mut assembly);
+        let decision = {
+            let mut ordinary = assembly.loan_mut().borrow_ordinary();
+            if evidence_only {
+                ordinary.validate_evidence_decision(evidence, |session, evidence| {
+                    session.outcome_evidence(evidence) == Some(&7)
+                })
+            } else {
+                ordinary.validate_success_decision(
+                    canonical,
+                    evidence,
+                    |session, canonical, evidence| {
+                        session.canonical(canonical) == Some(&11)
+                            && session.outcome_evidence(evidence) == Some(&7)
+                    },
+                )
+            }
+        };
+        let physical = account.snapshot();
+        let shares = account.share_call_count();
+        if evidence_only {
+            let (assembly, decision) = match assembly.bind_success_decision(decision) {
+                Err(originals) => originals,
+                Ok(_) => panic!("an evidence decision cannot bind success"),
+            };
+            assert_eq!(account.snapshot(), physical);
+            assert_eq!(account.share_call_count(), shares);
+            assert!(matches!(
+                assembly.bind_evidence_decision(decision),
+                Ok(RetainedFailureValidation::Valid(_))
+            ));
+        } else {
+            let (assembly, decision) = match assembly.bind_evidence_decision(decision) {
+                Err(originals) => originals,
+                Ok(_) => panic!("a success decision cannot bind evidence"),
+            };
+            assert_eq!(account.snapshot(), physical);
+            assert_eq!(account.share_call_count(), shares);
+            assert!(matches!(
+                assembly.bind_success_decision(decision),
+                Ok(RetainedSuccessValidation::Valid(_))
+            ));
+        }
+        drop(root);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert_eq!(account.snapshot().poison_event_count(), 0);
+    }
+}
+
+#[test]
+fn dynamic_ordinary_borrow_drop_and_forget_leave_payload_cleanup_with_original_owner() {
+    static DROPS: AtomicU64 = AtomicU64::new(0);
+    for (forgotten, forgotten_assembly) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        DROPS.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let mut root = TestInvocationRoot::<DropCounter, DropCounter>::new();
+        let operation = test_operation_on_account_with_control(
+            &mut root,
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            OperationControl::default(),
+        );
+        let mut assembly = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("the dynamic original assembly must open"));
+        let _canonical = assembly
+            .loan_mut()
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(DropCounter(&DROPS), CanonicalRootTag))
+            })
+            .unwrap_or_else(|_| panic!("the original member must retain"));
+        let physical = account.snapshot();
+        let shares = account.share_call_count();
+        let ordinary = assembly.loan_mut().borrow_ordinary();
+        if forgotten {
+            std::mem::forget(ordinary);
+        } else {
+            drop(ordinary);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        assert_eq!(account.snapshot(), physical);
+        assert_eq!(account.share_call_count(), shares);
+        assert!(
+            !assembly
+                .loan()
+                .operation
+                .as_ref()
+                .unwrap()
+                .common
+                .terminal_is_outstanding()
+        );
+        if forgotten_assembly {
+            std::mem::forget(assembly);
+            assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+            assert_eq!(account.snapshot(), physical);
+        } else {
+            drop(assembly);
+            assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        }
+        drop(root);
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert_eq!(account.snapshot().poison_event_count(), 0);
+    }
+}
+
 fn validated_scalar_success_on_account<'inv>(
     root: &'inv mut TestInvocationRoot<u64, u64>,
     account: &PhysicalStorageAccount,
 ) -> ValidatedScalarSuccess<'inv> {
-    let operation = test_operation_on_account_with_control(
+    let mut operation = test_operation_on_account_with_control(
         root,
         account,
         64,
@@ -26,6 +369,7 @@ fn validated_scalar_success_on_account<'inv>(
         OperationControl::default(),
     );
     operation
+        .loan_mut()
         .try_complete_phase(TestPhase::Build)
         .unwrap_or_else(|_| panic!("joint-commit build phase must complete"));
     let mut assembly: TestPublication<'_, u64, u64> = operation
@@ -33,9 +377,11 @@ fn validated_scalar_success_on_account<'inv>(
         .unwrap_or_else(|_| panic!("joint-commit publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
     assembly
+        .loan_mut()
         .try_commit_canonical(TestDimension::Bytes, 5)
         .unwrap_or_else(|_| panic!("canonical commitment must fit"));
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 6)
         .unwrap_or_else(|_| panic!("outcome-evidence commitment must fit"));
     match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
@@ -64,7 +410,7 @@ fn validated_freeze_success_with_limits<'inv>(
         OutputCommitment::new(TestDimension::Bytes, 1),
         OutputCommitment::new(TestDimension::Bytes, 1),
     );
-    let operation = RetainedOperation::try_start(
+    let mut operation = RetainedOperation::try_start(
         root,
         OperationControl::default(),
         limits,
@@ -74,23 +420,27 @@ fn validated_freeze_success_with_limits<'inv>(
     )
     .unwrap_or_else(|_| panic!("freeze qualification operation must start"));
     operation
+        .loan_mut()
         .try_complete_phase(TestPhase::Build)
         .unwrap_or_else(|_| panic!("freeze qualification build phase must complete"));
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, evidence_members))
         .unwrap_or_else(|_| panic!("freeze qualification publication must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(11, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("freeze canonical root must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("freeze evidence root must retain"));
     let detail = (evidence_members == 2).then(|| {
         assembly
+            .loan_mut()
             .try_retain_outcome_evidence(empty_plan(), |emplacer| {
                 Ok(emplacer.place(9, EvidenceDetailTag))
             })
@@ -103,6 +453,90 @@ fn validated_freeze_success_with_limits<'inv>(
     }) {
         RetainedSuccessValidation::Valid(validated) => validated,
         _ => panic!("freeze qualification publication must validate"),
+    }
+}
+
+#[test]
+fn foreign_or_rejected_success_proof_cannot_stage_destinations_or_run_final_control() {
+    for foreign in [false, true] {
+        let factory = account_factory(1);
+        let account = account(&factory, u64::MAX, 128);
+        let mut source_root = TestInvocationRoot::new();
+        let mut target_root = TestInvocationRoot::new();
+        let ValidatedRetainedSuccess {
+            assembly: _source,
+            proof: source_proof,
+        } = validated_freeze_success_with_limits(&mut source_root, &account, 64, 64, 1);
+        let final_calls = StdArc::new(AtomicU64::new(0));
+        let observed_calls = StdArc::clone(&final_calls);
+        let control = OperationControl::default().with_progress_observer(
+            move |_event: crate::ProgressEvent<TestProgress, TestUnit>| {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                crate::ProgressDecision::Continue
+            },
+        );
+        let mut operation = test_operation_on_account_with_control(
+            &mut target_root,
+            &account,
+            64,
+            RetainedBatchLimits::new(2, 2),
+            control,
+        );
+        operation
+            .loan_mut()
+            .try_complete_phase(TestPhase::Build)
+            .unwrap_or_else(|_| panic!("the original target build phase must complete"));
+        let mut assembly = operation
+            .try_publication_assembly(publication_plan(1, 1))
+            .unwrap_or_else(|_| panic!("the original target publication must open"));
+        let (canonical, evidence) = retain_scalar_success(&mut assembly);
+        let ValidatedRetainedSuccess {
+            mut assembly,
+            proof,
+        } = match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+            session.canonical(canonical) == Some(&11)
+                && session.outcome_evidence(evidence) == Some(&7)
+        }) {
+            RetainedSuccessValidation::Valid(validated) => validated,
+            _ => {
+                panic!("the original target proof must be valid before the adversarial transition")
+            }
+        };
+        if !foreign {
+            let _later_rejection = assembly
+                .loan_mut()
+                .borrow_ordinary()
+                .validate_success_decision(canonical, evidence, |_, _, _| false);
+        }
+        let ledger = assembly.loan().test_ledger_probe();
+        let before = ledger
+            .dimension_evidence(TestDimension::Bytes)
+            .expect("the actual target accounting remains observable");
+        assert_eq!(assembly.loan().canonical_commitment_len(), 0);
+        assert_eq!(assembly.loan().outcome_evidence_commitment_len(), 0);
+        assert!(
+            assembly
+                .loan_mut()
+                .try_issue_freeze_decision(
+                    if foreign { &source_proof } else { &proof },
+                    TestDimension::Bytes,
+                    TestDimension::Bytes,
+                    final_progress(),
+                )
+                .is_err()
+        );
+        assert_eq!(final_calls.load(Ordering::SeqCst), 0);
+        let after = ledger
+            .dimension_evidence(TestDimension::Bytes)
+            .expect("containment retains the original target accounting");
+        assert_eq!(after.committed(), before.committed());
+        assert_eq!(after.pending_publication(), before.pending_publication());
+        assert_eq!(
+            after.published_outcome_evidence(),
+            before.published_outcome_evidence()
+        );
+        assert!(!ledger.is_terminal_qualified());
+        assert!(account.snapshot().poisoned());
     }
 }
 
@@ -320,6 +754,7 @@ fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
         .unwrap_or_else(|_| panic!("ordinary work publication must open"));
 
     let _evidence = assembly
+        .loan_mut()
         .try_retain_success_outcome_evidence_controlled(
             TestDimension::Work,
             empty_plan(),
@@ -359,6 +794,7 @@ fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
         .unwrap_or_else(|_| panic!("exact ordinary work evidence must retain"));
 
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 3));
@@ -382,7 +818,7 @@ fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
         .unwrap_or_else(|_| panic!("incomplete-work publication must open"));
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::Work,
             empty_plan(),
             |_emplacer, control| {
@@ -406,6 +842,7 @@ fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("incomplete ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 2));
@@ -429,7 +866,7 @@ fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
         .unwrap_or_else(|_| panic!("partial-work publication must open"));
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::Work,
             empty_plan(),
             |_emplacer, mut control| {
@@ -452,6 +889,7 @@ fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("borrowed work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 2));
@@ -475,7 +913,7 @@ fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
         .unwrap_or_else(|_| panic!("abandoned borrowed-work publication must open"));
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::Work,
             empty_plan(),
             |_emplacer, mut control| {
@@ -498,6 +936,7 @@ fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("abandoned borrowed-work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 1));
@@ -762,7 +1201,7 @@ fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
         .unwrap_or_else(|_| panic!("cancellable borrowed-work publication must open"));
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::Work,
             empty_plan(),
             |_emplacer, mut control| {
@@ -787,6 +1226,7 @@ fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("cancellable borrowed-work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 1));
@@ -810,7 +1250,7 @@ fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion(
         .unwrap_or_else(|_| panic!("overrun publication must open"));
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::Work,
             empty_plan(),
             |_emplacer, control| {
@@ -834,6 +1274,7 @@ fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion(
         )) if cause == BUILD_FAILED
     ));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("overrun ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 0));
@@ -859,7 +1300,7 @@ fn ordinary_work_admission_rejects_short_consumed_capacity_before_action() {
     let mut action_ran = false;
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::Work,
             empty_plan(),
             |_emplacer, control| {
@@ -887,6 +1328,7 @@ fn ordinary_work_admission_rejects_short_consumed_capacity_before_action() {
         "the protected action must not start after rejection"
     );
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("short-capacity ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (3, 0));
@@ -915,7 +1357,7 @@ fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_w
     let mut action_ran = false;
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::Work,
             empty_plan(),
             |_emplacer, control| {
@@ -936,6 +1378,7 @@ fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_w
         "cancelled work must not enter the protected action"
     );
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Work)
         .unwrap_or_else(|| panic!("cancelled ordinary work evidence"));
     assert_eq!((work.attempted(), work.consumed()), (0, 0));
@@ -959,7 +1402,7 @@ fn ordinary_work_permit_cannot_address_the_protected_failure_dimension() {
         .unwrap_or_else(|_| panic!("protected-dimension publication must open"));
 
     assert!(matches!(
-        assembly.try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
+        assembly.loan_mut().try_retain_success_outcome_evidence_controlled::<EvidenceRootTag>(
             TestDimension::FailureTerminalWork,
             empty_plan(),
             |_emplacer, control| {
@@ -977,6 +1420,7 @@ fn ordinary_work_permit_cannot_address_the_protected_failure_dimension() {
         )) if cause == BUILD_FAILED
     ));
     let protected = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected work evidence"));
     assert_eq!((protected.attempted(), protected.consumed()), (0, 0));
@@ -1161,6 +1605,7 @@ fn publication_key_membership_preflight_preserves_terminal_capability() {
         ))
         .unwrap_or_else(|_| panic!("corrected plan must retain terminal capability"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -1222,16 +1667,17 @@ fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
 
     assert!(
         operation
+            .loan_mut()
             .common
-            .coordinator
-            .retained_ledger_mut()
+            .test_ledger_mut()
             .charge_observed_batch(&[(TestDimension::Bytes, 1)])
             .is_err(),
         "ordinary work must retain its non-refundable failing attempt"
     );
     let ordinary = operation
+        .loan()
         .common
-        .coordinator
+        .as_read()
         .dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|_| panic!("ordinary dimension evidence"));
     assert_eq!(ordinary.attempted(), 9);
@@ -1243,6 +1689,7 @@ fn startup_qualified_failure_terminal_work_survives_exhausted_ordinary_work() {
         ))
         .unwrap_or_else(|_| panic!("reserved rich-failure assembly must open"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -1306,6 +1753,7 @@ fn recoverable_failure_terminal_preflight_preserves_capability_for_retry() {
         ))
         .unwrap_or_else(|_| panic!("corrected rich-failure plan must retain capability"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -1360,8 +1808,9 @@ fn post_preflight_open_failure_burns_failure_terminal_capability() {
     ));
     let operation = expect_fallback_only_operation(error, "post-preflight allocation failure");
     let terminal = operation
+        .loan()
         .common
-        .coordinator
+        .as_read()
         .dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|_| panic!("failure-terminal evidence after attempted open"));
     assert_eq!((terminal.attempted(), terminal.consumed()), (4, 4));
@@ -1401,12 +1850,14 @@ fn validated_success_can_downgrade_after_ordinary_work_is_exhausted() {
         .unwrap_or_else(|_| panic!("success-capable publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
     let ordinary = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary dimension evidence before exhaustion"));
     let remaining = ORDINARY_WORK_LIMIT
         .checked_sub(ordinary.consumed())
         .unwrap_or_else(|| panic!("success candidate exceeded ordinary work limit"));
     assembly
+        .loan_mut()
         .try_control_checkpoint()
         .unwrap_or_else(|_| panic!("success candidate control checkpoint"))
         .charge_observed(TestDimension::Bytes, remaining)
@@ -1426,6 +1877,8 @@ fn validated_success_can_downgrade_after_ordinary_work_is_exhausted() {
     let mut failure =
         validated.downgrade_to_rich_failure(PreparationFailureCode::domain(DOWNGRADE_CAUSE));
     let detail = failure
+        .borrow_ordinary()
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(9, EvidenceDetailTag))
         })
@@ -1538,19 +1991,24 @@ fn direct_rich_validation_of_a_success_plan_activates_protected_work() {
     };
     let ordinary_before = failure
         .assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary evidence before protected append"));
     let detail = failure
+        .borrow_ordinary()
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(9, EvidenceDetailTag))
         })
         .unwrap_or_else(|_| panic!("direct rich validation must activate protected append work"));
     let ordinary_after = failure
         .assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary evidence after protected append"));
     let protected = failure
         .assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after direct rich validation"));
     assert_eq!(ordinary_after.attempted(), ordinary_before.attempted());
@@ -1589,13 +2047,14 @@ fn failed_protected_evidence_action_seals_the_terminal_rail() {
         ))
         .unwrap_or_else(|_| panic!("protected failure assembly must open"));
     let evidence_root = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("protected evidence root must retain"));
 
     assert!(matches!(
-        assembly.try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |_emplacer| {
+        assembly.loan_mut().try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |_emplacer| {
             Err(BUILD_FAILED)
         }),
         Err(RetainedPublicationError::Writer(RetainedWriterError::Physical(
@@ -1603,16 +2062,20 @@ fn failed_protected_evidence_action_seals_the_terminal_rail() {
         ))) if cause == BUILD_FAILED
     ));
     let after_first_failure = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("failure-terminal evidence after protected failure"));
 
     assert!(matches!(
-        assembly.try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |emplacer| {
-            Ok(emplacer.place(9, EvidenceDetailTag))
-        }),
+        assembly
+            .loan_mut()
+            .try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |emplacer| {
+                Ok(emplacer.place(9, EvidenceDetailTag))
+            }),
         Err(RetainedPublicationError::FailureTerminalWorkSealed)
     ));
     let after_rejected_retry = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("failure-terminal evidence after sealed retry"));
     assert_eq!(after_rejected_retry, after_first_failure);
@@ -1660,6 +2123,7 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
         .unwrap_or_else(|_| panic!("success-capable publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
     let ordinary = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ordinary evidence before terminal rejection"));
     let failing_amount = ORDINARY_WORK_LIMIT
@@ -1668,6 +2132,7 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
         .unwrap_or_else(|| panic!("ordinary failing amount must fit"));
     assert!(matches!(
         assembly
+            .loan_mut()
             .try_control_checkpoint()
             .unwrap_or_else(|_| panic!("ordinary control checkpoint"))
             .charge_observed(TestDimension::Bytes, failing_amount),
@@ -1675,11 +2140,13 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
     ));
 
     let detail = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(9, EvidenceDetailTag))
         })
         .unwrap_or_else(|_| panic!("recorded rejection must activate protected evidence work"));
     let protected_after_activation = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after activation"));
     assert_eq!(
@@ -1691,18 +2158,21 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
     );
 
     assert!(matches!(
-        assembly.try_retain_canonical(empty_plan(), |emplacer| {
-            Ok(emplacer.place(12, CanonicalRootTag))
-        }),
+        assembly
+            .loan_mut()
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(12, CanonicalRootTag))
+            }),
         Err(RetainedPublicationError::SuccessOutcomeRejected)
     ));
     let protected_after_canonical_retry = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after canonical retry"));
     assert_eq!(protected_after_canonical_retry, protected_after_activation);
 
     assert!(matches!(
-        assembly.try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |_emplacer| {
+        assembly.loan_mut().try_retain_outcome_evidence::<EvidenceDetailTag>(empty_plan(), |_emplacer| {
             Err(BUILD_FAILED)
         }),
         Err(RetainedPublicationError::Writer(RetainedWriterError::Physical(
@@ -1710,13 +2180,17 @@ fn active_and_failed_terminal_states_seal_canonical_and_success_paths() {
         ))) if cause == BUILD_FAILED
     ));
     let protected_after_failure = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after sealed failure"));
     assert!(matches!(
-        assembly.try_commit_outcome_evidence(TestDimension::Bytes, 1),
+        assembly
+            .loan_mut()
+            .try_commit_outcome_evidence(TestDimension::Bytes, 1),
         Err(RetainedPublicationError::FailureTerminalWorkSealed)
     ));
     let protected_after_commit = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::FailureTerminalWork)
         .unwrap_or_else(|| panic!("protected evidence after sealed commitment"));
     assert_eq!(protected_after_commit, protected_after_failure);
@@ -1826,7 +2300,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
             )
         }
     };
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
 
     macro_rules! run_prepare {
         ($prepare:expr) => {{
@@ -1855,6 +2329,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
                 .try_publication_assembly(plan)
                 .unwrap_or_else(|_| panic!("rich-evidence fixture must open"));
             let evidence = assembly
+                .loan_mut()
                 .try_retain_outcome_evidence(empty_plan(), |emplacer| {
                     Ok(emplacer.place(7, EvidenceRootTag))
                 })
@@ -1905,11 +2380,13 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
                 .try_publication_assembly(plan)
                 .unwrap_or_else(|_| panic!("minimal-evidence fixture must open"));
             let evidence = assembly
+                .loan_mut()
                 .try_retain_outcome_evidence(empty_plan(), |emplacer| {
                     Ok(emplacer.place(7, EvidenceRootTag))
                 })
                 .unwrap_or_else(|_| panic!("minimal-evidence root must retain"));
             assembly
+                .loan_mut()
                 .try_commit_outcome_evidence(TestDimension::Bytes, 4)
                 .unwrap_or_else(|_| panic!("minimal-evidence commitment must fit"));
             let validated = match assembly.validate_rich_failure(evidence, |session, root| {
@@ -1928,6 +2405,7 @@ fn run_failure_guard_case(case: FailureGuardCase, fault: FailureFault) {
                 .unwrap_or_else(|_| panic!("minimal-both fixture must open"));
             let (canonical, evidence) = retain_scalar_success(&mut assembly);
             assembly
+                .loan_mut()
                 .try_commit_outcome_evidence(TestDimension::Bytes, 4)
                 .unwrap_or_else(|_| panic!("minimal-both commitment must fit"));
             let validated = match assembly.validate_success(
@@ -2073,45 +2551,52 @@ fn failure_rails_contain_both_sides_of_the_ledger_sealed_evidence_write_window()
 fn block_table_success_freezes_dual_batches_and_splits_owners() {
     let factory = account_factory(1);
     let mut invocation_root: TestInvocationRoot = InvocationRoot::new();
-    let operation = test_operation_with_writer_limits(
+    let mut operation = test_operation_with_writer_limits(
         &mut invocation_root,
         &factory,
         64,
         RetainedBatchLimits::new(3, 2),
     );
     operation
+        .loan_mut()
         .try_complete_phase(TestPhase::Build)
         .unwrap_or_else(|_| panic!("semantic phase completion must fit the frozen catalog"));
     let mut assembly: TestPublication<'_, TestCanonicalBlock, TestEvidenceBlock> = operation
         .try_publication_assembly(publication_plan(2, 2))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let leaf = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestCanonicalBlock::Leaf(11), CanonicalLeafTag))
         })
         .unwrap_or_else(|_| panic!("canonical leaf must retain"));
     let canonical_root = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestCanonicalBlock::Root { leaf }, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical root must retain"));
     let detail = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestEvidenceBlock::Detail(7), EvidenceDetailTag))
         })
         .unwrap_or_else(|_| panic!("evidence detail must retain"));
     let evidence_root = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestEvidenceBlock::Root { detail }, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("evidence root must retain"));
 
-    assert_eq!(assembly.canonical_len(), 2);
-    assert_eq!(assembly.outcome_evidence_len(), 2);
+    assert_eq!(assembly.loan().canonical_len(), 2);
+    assert_eq!(assembly.loan().outcome_evidence_len(), 2);
     assembly
+        .loan_mut()
         .try_commit_canonical(TestDimension::Bytes, 5)
         .unwrap_or_else(|_| panic!("canonical commitment must fit"));
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 6)
         .unwrap_or_else(|_| panic!("evidence commitment must fit"));
 
@@ -2226,57 +2711,84 @@ fn frozen_success_classification_defers_qualification_and_freeze_until_finish() 
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
-    let validated = validated_freeze_success_with_limits(&mut invocation_root, &account, 64, 64, 1);
-    let ledger = validated
-        .assembly
-        .operation
-        .as_ref()
-        .expect("validated success must retain its operation")
-        .common
-        .coordinator
-        .retained_ledger()
-        .test_probe();
-    let permit = match validated
-        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
-        .unwrap_or_else(|_| panic!("the exact destinations must issue a permit"))
-    {
-        RetainedSuccessFreezePermitIssue::Ready(permit) => permit,
-        _ => panic!("the healthy candidate must retain a ready permit"),
+    let (deferred, ledger) = {
+        let mut validated =
+            validated_freeze_success_with_limits(&mut invocation_root, &account, 64, 64, 1);
+        let ledger = validated
+            .assembly
+            .loan()
+            .operation
+            .as_ref()
+            .expect("validated success must retain its operation")
+            .common
+            .test_ledger()
+            .test_shared_probe();
+        match validated
+            .assembly
+            .loan_mut()
+            .try_issue_freeze_decision(
+                &validated.proof,
+                TestDimension::Bytes,
+                TestDimension::Bytes,
+                final_progress(),
+            )
+            .unwrap_or_else(|_| panic!("the exact destinations must issue a permit"))
+        {
+            RetainedSuccessFreezeDecision::Ready => {}
+            _ => panic!("the healthy candidate must retain a ready permit"),
+        }
+        let physical_before = account.snapshot();
+        let ValidatedRetainedSuccess { assembly, proof } = validated;
+        let classification = assembly
+            .into_loan()
+            .try_classify_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })
+            .unwrap_or_else(|_| panic!("the frozen contribution must classify before preparation"));
+
+        assert!(classification.is_success());
+        assert_eq!(classification.control_cause(), None);
+        assert!(!classification.state.test_evidence_is_frozen());
+        assert!(ledger.is_available());
+        assert!(!ledger.is_terminal_qualified());
+        let dimension = ledger
+            .dimension_evidence(TestDimension::Bytes)
+            .expect("the original ledger must remain observable");
+        assert_eq!(dimension.committed(), 0);
+        assert_eq!(dimension.committed_canonical_output(), 0);
+        assert_eq!(dimension.published_outcome_evidence(), 0);
+        assert_eq!(
+            account.snapshot().live_retained_bytes(),
+            physical_before.live_retained_bytes()
+        );
+        assert_eq!(
+            account.snapshot().live_retained_allocations(),
+            physical_before.live_retained_allocations()
+        );
+
+        let classification = classification
+            .check_payload_cleanup()
+            .unwrap_or_else(|_| panic!("a healthy preflight must retain the same classification"));
+        assert!(!classification.state.test_evidence_is_frozen());
+        assert!(!ledger.is_terminal_qualified());
+        let (deferred, control_cause) = classification
+            .require_success()
+            .unwrap_or_else(|_| panic!("the healthy classification must retain success"))
+            .finish_deferred()
+            .unwrap_or_else(|_| {
+                panic!("the healthy classification must prepare its actual fields")
+            });
+        assert_eq!(control_cause, None);
+        assert!(ledger.is_available());
+        (deferred, ledger)
     };
-    let physical_before = account.snapshot();
-    let classification = permit
-        .into_contribution()
-        .try_classify_pre_freeze()
-        .unwrap_or_else(|_| panic!("the frozen contribution must classify before preparation"));
-
-    assert!(classification.is_success());
-    assert_eq!(classification.control_cause(), None);
-    assert!(!classification.state.test_evidence_is_frozen());
-    assert!(ledger.is_available());
-    assert!(!ledger.is_terminal_qualified());
-    let dimension = ledger
-        .dimension_evidence(TestDimension::Bytes)
-        .expect("the original ledger must remain observable");
-    assert_eq!(dimension.committed(), 0);
-    assert_eq!(dimension.committed_canonical_output(), 0);
-    assert_eq!(dimension.published_outcome_evidence(), 0);
-    assert_eq!(
-        account.snapshot().live_retained_bytes(),
-        physical_before.live_retained_bytes()
-    );
-    assert_eq!(
-        account.snapshot().live_retained_allocations(),
-        physical_before.live_retained_allocations()
-    );
-
-    let classification = classification
-        .check_payload_cleanup()
-        .unwrap_or_else(|_| panic!("a healthy preflight must retain the same classification"));
-    assert!(!classification.state.test_evidence_is_frozen());
-    assert!(!ledger.is_terminal_qualified());
-    let intent = classification
-        .finish_success()
-        .unwrap_or_else(|_| panic!("the healthy classification must form an intent"));
+    let stamp = invocation_root.install_terminal_preparation(deferred);
+    let formation = invocation_root
+        .try_finish_publication_terminal(stamp)
+        .unwrap_or_else(|_| panic!("the original root must accept its own stamp"))
+        .unwrap_or_else(|_| panic!("the healthy actual fields must form an intent"));
+    let intent = match formation {
+        RetainedSuccessJointCommitFormation::Intent(intent) => intent,
+        _ => panic!("the frozen success cannot become a prepared failure"),
+    };
     assert!(!ledger.is_available());
     let published = intent
         .qualify_and_commit_frozen_exact()
@@ -2349,27 +2861,44 @@ fn assert_freeze_destination_rejected(
 
     let mut invocation_root_2: TestInvocationRoot<u64, u64> = InvocationRoot::new();
     {
-        let issue = validated_freeze_success_with_limits(
+        let mut validated = validated_freeze_success_with_limits(
             &mut invocation_root_2,
             account,
             committed_limit,
             evidence_limit,
             evidence_members,
-        )
-        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
-        .unwrap_or_else(|_| panic!("destination rejection must retain the ordinary failure owner"));
+        );
+        let decision = validated
+            .assembly
+            .loan_mut()
+            .try_issue_freeze_decision(
+                &validated.proof,
+                TestDimension::Bytes,
+                TestDimension::Bytes,
+                final_progress(),
+            )
+            .unwrap_or_else(|_| {
+                panic!("destination rejection must retain the ordinary failure owner")
+            });
         assert!(!account.snapshot().poisoned());
-        match issue {
-            RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
+        match decision {
+            RetainedSuccessFreezeDecision::DestinationRejected { cause } => {
                 assert_eq!(cause.class(), PreparationFailureClass::Ledger);
-                assert!(failure.canonical_ownership_is_absent());
-                assert_eq!(failure.outcome_evidence_commitment_len(), 0);
-                drop(failure);
+                assert_eq!(
+                    validated.assembly.loan().fields.mode,
+                    RetainedOutcomeMode::FailureOnly
+                );
+                assert!(validated.assembly.loan().canonical_ownership_is_absent());
+                assert_eq!(
+                    validated.assembly.loan().outcome_evidence_commitment_len(),
+                    0
+                );
+                drop(validated);
             }
-            RetainedSuccessFreezePermitIssue::Ready(_) => {
+            RetainedSuccessFreezeDecision::Ready => {
                 panic!("destination-ineligible exact pair must not issue a ready permit")
             }
-            RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
+            RetainedSuccessFreezeDecision::RichFailure { .. } => {
                 panic!("zero-commit destination rejection must not masquerade as frozen failure")
             }
         }
@@ -2411,34 +2940,44 @@ fn freeze_permit_issues_ready_for_the_exact_qualified_pair() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
-    let validated = validated_freeze_success_with_limits(&mut invocation_root, &account, 1, 2, 1);
+    let mut validated =
+        validated_freeze_success_with_limits(&mut invocation_root, &account, 1, 2, 1);
 
-    let permit = match validated
-        .try_issue_freeze_permit(TestDimension::Bytes, TestDimension::Bytes, final_progress())
+    match validated
+        .assembly
+        .loan_mut()
+        .try_issue_freeze_decision(
+            &validated.proof,
+            TestDimension::Bytes,
+            TestDimension::Bytes,
+            final_progress(),
+        )
         .unwrap_or_else(|_| panic!("qualified exact pair must retain the freeze owner"))
     {
-        RetainedSuccessFreezePermitIssue::Ready(permit) => permit,
-        RetainedSuccessFreezePermitIssue::RichFailure { .. } => {
+        RetainedSuccessFreezeDecision::Ready => {}
+        RetainedSuccessFreezeDecision::RichFailure { .. } => {
             panic!("qualified exact pair must issue a ready freeze permit")
         }
-        RetainedSuccessFreezePermitIssue::DestinationRejected { .. } => {
+        RetainedSuccessFreezeDecision::DestinationRejected { .. } => {
             panic!("qualified exact pair must not reject its destinations")
         }
-    };
-    let snapshot = permit
+    }
+    let snapshot = validated
+        .assembly
+        .loan()
         .terminal_observation(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("ready freeze permit must expose the ledger observation"));
     assert_eq!(snapshot.pending_publication(), 0);
     assert_eq!(snapshot.committed(), 0);
     assert_eq!(snapshot.committed_canonical_output(), 0);
     assert_eq!(snapshot.published_outcome_evidence(), 0);
-    assert_eq!(permit.validated.assembly.canonical_commitment_len(), 1);
+    assert_eq!(validated.assembly.loan().canonical_commitment_len(), 1);
     assert_eq!(
-        permit.validated.assembly.outcome_evidence_commitment_len(),
+        validated.assembly.loan().outcome_evidence_commitment_len(),
         1
     );
 
-    drop(permit);
+    drop(validated);
     drop(invocation_root);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 0);
@@ -2545,120 +3084,69 @@ fn control_failure_classification_defers_rich_and_minimal_freeze_until_cleanup()
                 },
             );
             let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
-            let operation = test_operation_on_account_with_control(
-                &mut invocation_root,
-                &account,
-                if minimal { 4 } else { 64 },
-                RetainedBatchLimits::new(2, 2),
-                control,
-            );
-            let ledger = operation.common.coordinator.retained_ledger().test_probe();
-            let mut assembly: TestPublication<'_, u64, u64> = operation
-                .try_publication_assembly(publication_plan(1, 1))
-                .unwrap_or_else(|_| panic!("control failure publication must open"));
-            let (canonical, evidence) = retain_scalar_success(&mut assembly);
-            if minimal {
-                assembly
-                    .try_commit_outcome_evidence(TestDimension::Bytes, 4)
-                    .unwrap_or_else(|_| panic!("the existing evidence-limit trigger must fit"));
-            }
-            let validated = match assembly.validate_success(
-                canonical,
-                evidence,
-                |session, canonical, evidence| {
-                    session.canonical(canonical) == Some(&11)
-                        && session.outcome_evidence(evidence) == Some(&7)
-                },
-            ) {
-                RetainedSuccessValidation::Valid(validated) => validated,
-                _ => panic!("the control failure fixture must validate its actual roots"),
-            };
-            let physical_before = account.snapshot();
-            let classification = validated
-                .try_classify_pre_freeze(final_progress())
-                .unwrap_or_else(|_| {
-                    panic!("control rejection must retain a pending failure owner")
-                });
-            let expected_control = classification
-                .control_cause()
-                .cloned()
-                .expect("the actual final control rejection must survive classification");
-            assert!(matches!(expected_control, ControlCause::Cancelled { .. }));
-            let expected_cause = PreparationFailureCode::from_control(&expected_control);
-            assert!(!classification.is_success());
-            assert_eq!(
-                matches!(
-                    &classification.state,
-                    TerminalPreFreezeTransition::Fallback { .. }
-                ),
-                minimal
-            );
-            assert!(!classification.state.test_evidence_is_frozen());
-            assert!(ledger.is_available());
-            assert!(!ledger.is_terminal_qualified());
-            let dimension = ledger
-                .dimension_evidence(TestDimension::Bytes)
-                .expect("the original failure ledger must still be present");
-            assert_eq!(dimension.committed_canonical_output(), 0);
-            assert_eq!(dimension.published_outcome_evidence(), 0);
-            assert_eq!(
-                account.snapshot().live_retained_bytes(),
-                physical_before.live_retained_bytes()
-            );
-            assert_eq!(
-                account.snapshot().live_retained_allocations(),
-                physical_before.live_retained_allocations()
-            );
-
-            if require_success {
-                let cause = match classification.finish_success() {
-                    Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => cause,
-                    Ok(_) => panic!("the success-only finish cannot publish a classified failure"),
-                };
-                assert_eq!(
-                    cause.reason(),
-                    AccountPoisonReason::OwnershipGraphUnverified
+            let (deferred, control_cause, ledger, expected_control, expected_cause) = {
+                let operation = test_operation_on_account_with_control(
+                    &mut invocation_root,
+                    &account,
+                    if minimal { 4 } else { 64 },
+                    RetainedBatchLimits::new(2, 2),
+                    control,
                 );
+                let ledger = operation.loan().common.test_ledger().test_shared_probe();
+                let mut assembly: TestPublication<'_, u64, u64> = operation
+                    .try_publication_assembly(publication_plan(1, 1))
+                    .unwrap_or_else(|_| panic!("control failure publication must open"));
+                let (canonical, evidence) = retain_scalar_success(&mut assembly);
+                if minimal {
+                    assembly
+                        .loan_mut()
+                        .try_commit_outcome_evidence(TestDimension::Bytes, 4)
+                        .unwrap_or_else(|_| panic!("the existing evidence-limit trigger must fit"));
+                }
+                let validated = match assembly.validate_success(
+                    canonical,
+                    evidence,
+                    |session, canonical, evidence| {
+                        session.canonical(canonical) == Some(&11)
+                            && session.outcome_evidence(evidence) == Some(&7)
+                    },
+                ) {
+                    RetainedSuccessValidation::Valid(validated) => validated,
+                    _ => panic!("the control failure fixture must validate its actual roots"),
+                };
+                let physical_before = account.snapshot();
+                let ValidatedRetainedSuccess { assembly, proof } = validated;
+                let classification = assembly
+                    .into_loan()
+                    .try_classify_terminal_preparation(RetainedTerminalRequest::Success {
+                        proof,
+                        final_progress: final_progress(),
+                    })
+                    .unwrap_or_else(|_| {
+                        panic!("control rejection must retain a pending failure owner")
+                    });
+                let expected_control = classification
+                    .control_cause()
+                    .cloned()
+                    .expect("the actual final control rejection must survive classification");
+                assert!(matches!(expected_control, ControlCause::Cancelled { .. }));
+                let expected_cause = PreparationFailureCode::from_control(&expected_control);
+                assert!(!classification.is_success());
+                assert_eq!(
+                    matches!(
+                        &classification.state,
+                        TerminalPreFreezeTransition::Fallback { .. }
+                    ),
+                    minimal
+                );
+                assert!(!classification.state.test_evidence_is_frozen());
                 assert!(ledger.is_available());
                 assert!(!ledger.is_terminal_qualified());
-                assert_eq!(
-                    account.snapshot().live_retained_bytes(),
-                    physical_before.live_retained_bytes()
-                );
-                assert_eq!(
-                    account.snapshot().live_retained_allocations(),
-                    physical_before.live_retained_allocations()
-                );
-                let dimension = ledger.dimension_evidence(TestDimension::Bytes).unwrap();
+                let dimension = ledger
+                    .dimension_evidence(TestDimension::Bytes)
+                    .expect("the original failure ledger must still be present");
                 assert_eq!(dimension.committed_canonical_output(), 0);
                 assert_eq!(dimension.published_outcome_evidence(), 0);
-                drop(account);
-                assert_eq!(factory.snapshot().live_accounts(), 1);
-                continue;
-            }
-
-            if cleanup_poison {
-                let first_poison = account
-                    .test_record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
-                let poison_events = account.snapshot().poison_event_count();
-                let cause = match classification.check_payload_cleanup() {
-                    Err(cause) => cause,
-                    Ok(_) => panic!("payload release poison must prevent failure preparation"),
-                };
-                assert_eq!(
-                    cause.reason(),
-                    AccountPoisonReason::RetainedStorageReleaseUnverified
-                );
-                assert_eq!(
-                    cause.account_poisoned().snapshot().first_poison_evidence(),
-                    first_poison.snapshot().first_poison_evidence()
-                );
-                // Each of the two one-member tables records its table and member edge;
-                // the fallback and ledger-evidence allocations add one edge each.
-                // The existing first fault is preserved without another root fault.
-                assert_eq!(account.snapshot().poison_event_count(), poison_events + 6);
-                assert!(ledger.is_available());
-                assert!(!ledger.is_terminal_qualified());
                 assert_eq!(
                     account.snapshot().live_retained_bytes(),
                     physical_before.live_retained_bytes()
@@ -2667,19 +3155,97 @@ fn control_failure_classification_defers_rich_and_minimal_freeze_until_cleanup()
                     account.snapshot().live_retained_allocations(),
                     physical_before.live_retained_allocations()
                 );
-                drop(account);
-                assert_eq!(factory.snapshot().live_accounts(), 1);
-                continue;
-            }
 
-            let classification = classification
-                .check_payload_cleanup()
-                .unwrap_or_else(|_| panic!("clean payload disposal must retain the failure owner"));
-            assert!(!classification.state.test_evidence_is_frozen());
-            assert!(!ledger.is_terminal_qualified());
-            let (formation, control_cause) = classification
-                .finish()
-                .unwrap_or_else(|_| panic!("the selected failure rail must finish after cleanup"));
+                if require_success {
+                    let cause = match classification.require_success() {
+                        Err(RetainedPublicationPrepareError::FinalizationContainment(cause)) => {
+                            cause
+                        }
+                        Ok(_) => {
+                            panic!("the success-only finish cannot publish a classified failure")
+                        }
+                    };
+                    assert_eq!(
+                        cause.reason(),
+                        AccountPoisonReason::OwnershipGraphUnverified
+                    );
+                    assert!(ledger.is_available());
+                    assert!(!ledger.is_terminal_qualified());
+                    assert_eq!(
+                        account.snapshot().live_retained_bytes(),
+                        physical_before.live_retained_bytes()
+                    );
+                    assert_eq!(
+                        account.snapshot().live_retained_allocations(),
+                        physical_before.live_retained_allocations()
+                    );
+                    let dimension = ledger.dimension_evidence(TestDimension::Bytes).unwrap();
+                    assert_eq!(dimension.committed_canonical_output(), 0);
+                    assert_eq!(dimension.published_outcome_evidence(), 0);
+                    drop(account);
+                    assert_eq!(factory.snapshot().live_accounts(), 1);
+                    continue;
+                }
+
+                if cleanup_poison {
+                    let first_poison = account
+                        .test_record_poison(AccountPoisonReason::RetainedStorageReleaseUnverified);
+                    let poison_events = account.snapshot().poison_event_count();
+                    let cause = match classification.check_payload_cleanup() {
+                        Err(cause) => cause,
+                        Ok(_) => panic!("payload release poison must prevent failure preparation"),
+                    };
+                    assert_eq!(
+                        cause.reason(),
+                        AccountPoisonReason::RetainedStorageReleaseUnverified
+                    );
+                    assert_eq!(
+                        cause.account_poisoned().snapshot().first_poison_evidence(),
+                        first_poison.snapshot().first_poison_evidence()
+                    );
+                    // Each of the two one-member tables records its table and member edge;
+                    // the fallback and ledger-evidence allocations add one edge each.
+                    // The existing first fault is preserved without another root fault.
+                    assert_eq!(account.snapshot().poison_event_count(), poison_events + 6);
+                    assert!(ledger.is_available());
+                    assert!(!ledger.is_terminal_qualified());
+                    assert_eq!(
+                        account.snapshot().live_retained_bytes(),
+                        physical_before.live_retained_bytes()
+                    );
+                    assert_eq!(
+                        account.snapshot().live_retained_allocations(),
+                        physical_before.live_retained_allocations()
+                    );
+                    drop(account);
+                    assert_eq!(factory.snapshot().live_accounts(), 1);
+                    continue;
+                }
+
+                let classification = classification.check_payload_cleanup().unwrap_or_else(|_| {
+                    panic!("clean payload disposal must retain the failure owner")
+                });
+                assert!(!classification.state.test_evidence_is_frozen());
+                assert!(!ledger.is_terminal_qualified());
+                let (deferred, control_cause) =
+                    classification.finish_deferred().unwrap_or_else(|_| {
+                        panic!("the selected failure rail must prepare after cleanup")
+                    });
+                (
+                    deferred,
+                    control_cause,
+                    ledger,
+                    expected_control,
+                    expected_cause,
+                )
+            };
+            let stamp = invocation_root.install_terminal_preparation(deferred);
+            let formation = invocation_root
+                .try_finish_publication_terminal(stamp)
+                .unwrap_or_else(|_| panic!("the original failure root must accept its stamp"))
+                .unwrap_or_else(|_| {
+                    panic!("the selected failure rail must consume its actual owners")
+                });
             assert_eq!(control_cause, Some(expected_control));
             let prepared = match formation {
                 RetainedSuccessJointCommitFormation::PreparedFailure(prepared) => prepared,
@@ -2722,23 +3288,33 @@ fn requested_minimal_classification_preserves_cause_without_freezing() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let mut invocation_root: TestInvocationRoot<u64, u64> = InvocationRoot::new();
-    let validated = validated_scalar_success_on_account(&mut invocation_root, &account);
     let requested_cause = PreparationFailureCode::domain(91);
-    let classification = validated
-        .assembly
-        .try_classify_terminal_preparation(RetainedTerminalRequest::MinimalFallback {
-            requested_cause,
-        })
-        .unwrap_or_else(|_| panic!("an explicit minimal request must retain its pending owner"));
+    let (deferred, control_cause) = {
+        let validated = validated_scalar_success_on_account(&mut invocation_root, &account);
+        let classification = validated
+            .assembly
+            .into_loan()
+            .try_classify_terminal_preparation(RetainedTerminalRequest::MinimalFallback {
+                requested_cause,
+            })
+            .unwrap_or_else(|_| {
+                panic!("an explicit minimal request must retain its pending owner")
+            });
 
-    assert!(!classification.is_success());
-    assert_eq!(classification.control_cause(), None);
-    assert!(!classification.state.test_evidence_is_frozen());
-    let (formation, control_cause) = classification
-        .check_payload_cleanup()
-        .unwrap_or_else(|_| panic!("the original fallback account must remain healthy"))
-        .finish()
-        .unwrap_or_else(|_| panic!("the explicit minimal request must finish"));
+        assert!(!classification.is_success());
+        assert_eq!(classification.control_cause(), None);
+        assert!(!classification.state.test_evidence_is_frozen());
+        classification
+            .check_payload_cleanup()
+            .unwrap_or_else(|_| panic!("the original fallback account must remain healthy"))
+            .finish_deferred()
+            .unwrap_or_else(|_| panic!("the explicit minimal request must prepare"))
+    };
+    let stamp = invocation_root.install_terminal_preparation(deferred);
+    let formation = invocation_root
+        .try_finish_publication_terminal(stamp)
+        .unwrap_or_else(|_| panic!("the original minimal root must accept its stamp"))
+        .unwrap_or_else(|_| panic!("the explicit minimal request must consume its actual owners"));
     assert_eq!(control_cause, None);
     let prepared = match formation {
         RetainedSuccessJointCommitFormation::PreparedFailure(prepared) => prepared,
@@ -2769,15 +3345,20 @@ fn containing_pre_freeze_classification_retains_unqualified_original_graph() {
         let validated = validated_scalar_success_on_account(&mut invocation_root, &account);
         let ledger = validated
             .assembly
+            .loan()
             .operation
             .as_ref()
             .expect("the actual candidate must retain its ledger")
             .common
-            .coordinator
-            .retained_ledger()
-            .test_probe();
-        let classification = validated
-            .try_classify_pre_freeze(final_progress())
+            .test_ledger()
+            .test_shared_probe();
+        let ValidatedRetainedSuccess { assembly, proof } = validated;
+        let classification = assembly
+            .into_loan()
+            .try_classify_terminal_preparation(RetainedTerminalRequest::Success {
+                proof,
+                final_progress: final_progress(),
+            })
             .unwrap_or_else(|_| panic!("the healthy candidate must classify before containment"));
         assert!(classification.is_success());
         assert!(!classification.state.test_evidence_is_frozen());
@@ -2892,7 +3473,7 @@ fn terminal_evidence_qualification_error_contains_the_complete_success_graph() {
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("freeze-error publication must open"));
@@ -2960,7 +3541,7 @@ fn success_guard_direct_drop_contains_physical_before_retaining_ledger_proof() {
             RetainedBatchLimits::new(2, 2),
             OperationControl::default(),
         );
-        let ledger = operation.common.coordinator.retained_ledger().test_probe();
+        let ledger = operation.loan().common.test_ledger().test_shared_probe();
         let mut assembly: TestPublication<'_, u64, u64> = operation
             .try_publication_assembly(publication_plan(1, 1))
             .unwrap_or_else(|_| panic!("direct-drop publication must open"));
@@ -3065,7 +3646,7 @@ fn success_acknowledgement_panic_does_not_retry_or_release_unacknowledged_ledger
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("acknowledgement-panic publication must open"));
@@ -3123,7 +3704,7 @@ fn success_ledger_detach_panic_before_evidence_freeze_uses_scopeguard_containmen
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("ledger-detached publication must open"));
@@ -3175,7 +3756,7 @@ fn terminal_evidence_qualification_panic_contains_the_complete_fallback_graph() 
         RetainedBatchLimits::new(2, 2),
         OperationControl::default(),
     );
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let physical_before = account.snapshot();
     let ledger_before = (ledger.active_reservations(), ledger.current_live_bytes());
 
@@ -3245,51 +3826,64 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("inherited publication must open"));
     assembly
+        .loan_mut()
         .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes)
         .unwrap_or_else(|_| panic!("canonical source map must bind"));
     assert_eq!(
-        assembly.test_take_canonical_source_mapping_probe_count(),
+        assembly
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
         0,
         "binding initializes the dense map without lookup probes"
     );
     let physical_before_shares = account.snapshot();
 
     let canonical_root = assembly
+        .loan_mut()
         .try_share_canonical(source_canonical.aggregate(), source_canonical_slot)
         .unwrap_or_else(|_| panic!("first canonical share must succeed"));
     assert_eq!(
-        assembly.test_take_canonical_source_mapping_probe_count(),
+        assembly
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
         1,
         "a first source lookup performs one dense-map probe"
     );
     let canonical_second = assembly
+        .loan_mut()
         .try_share_canonical(source_canonical.aggregate(), source_canonical_slot)
         .unwrap_or_else(|_| panic!("second canonical share must succeed"));
     assert_eq!(
-        assembly.test_take_canonical_source_mapping_probe_count(),
+        assembly
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
         1,
         "a duplicate source lookup remains one dense-map probe"
     );
     let evidence_root = assembly
+        .loan_mut()
         .try_share_outcome_evidence(source_evidence.aggregate(), source_evidence_slot)
         .unwrap_or_else(|_| panic!("first evidence share must succeed"));
     let evidence_second = assembly
+        .loan_mut()
         .try_share_outcome_evidence(source_evidence.aggregate(), source_evidence_slot)
         .unwrap_or_else(|_| panic!("second evidence share must succeed"));
     let evidence_third = assembly
+        .loan_mut()
         .try_share_outcome_evidence(source_evidence.aggregate(), source_evidence_slot)
         .unwrap_or_else(|_| panic!("third evidence share must succeed"));
 
     assert_eq!(account.snapshot(), physical_before_shares);
     assert_eq!(canonical_second, canonical_root);
-    assert_eq!(assembly.canonical_len(), 1);
-    assert_eq!(assembly.outcome_evidence_len(), 3);
+    assert_eq!(assembly.loan().canonical_len(), 1);
+    assert_eq!(assembly.loan().outcome_evidence_len(), 3);
     assert!(
-        assembly.test_storage_graph_is_exact(),
+        assembly.loan().test_storage_graph_is_exact(),
         "inherited-only incremental proofs must match the full structural audit"
     );
     assert_eq!(
         assembly
+            .loan()
             .fields
             .canonical_batch
             .as_ref()
@@ -3299,6 +3893,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
     );
     assert_eq!(
         assembly
+            .loan()
             .fields
             .evidence_batch
             .as_ref()
@@ -3326,13 +3921,15 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
     assert!(source_evidence.aggregate().get(evidence_root).is_none());
 
     let canonical_new = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(13, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("one new canonical block must fit"));
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.loan().canonical_len(), 2);
     assert_eq!(
         assembly
+            .loan()
             .fields
             .canonical_batch
             .as_ref()
@@ -3344,7 +3941,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
         account.snapshot().live_retained_bytes() > physical_before_shares.live_retained_bytes()
     );
     assert!(
-        assembly.test_storage_graph_is_exact(),
+        assembly.loan().test_storage_graph_is_exact(),
         "mixed inherited/new incremental proofs must match the full structural audit"
     );
 
@@ -3423,6 +4020,7 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
     for value in 0..SOURCE_BLOCKS {
         let value = u64::try_from(value).expect("test source ordinal fits u64");
         let slot = source
+            .loan_mut()
             .try_retain_canonical(empty_plan(), |emplacer| {
                 Ok(emplacer.place(value, CanonicalLeafTag))
             })
@@ -3430,6 +4028,7 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
         source_slots.push(slot);
     }
     let evidence = source
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -3478,16 +4077,20 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
         .try_publication_assembly(undersized_plan)
         .unwrap_or_else(|_| panic!("undersized dense-map target must open"));
     assert!(matches!(
-        undersized.try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes,),
+        undersized
+            .loan_mut()
+            .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes,),
         Err(CanonicalSourceBindError::Publication(
             RetainedPublicationError::InvalidSourceSlot
         ))
     ));
     assert_eq!(
-        undersized.test_take_canonical_source_mapping_probe_count(),
+        undersized
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
         0
     );
-    assert_eq!(undersized.canonical_len(), 0);
+    assert_eq!(undersized.loan().canonical_len(), 0);
     drop(undersized);
     drop(invocation_root_2);
 
@@ -3519,29 +4122,44 @@ fn dense_canonical_source_lookup_is_constant_and_physically_accounted() {
         "the canonical map is one physically accounted nested table allocation"
     );
     target
+        .loan_mut()
         .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes)
         .unwrap_or_else(|_| panic!("dense source map must bind"));
-    assert_eq!(target.test_take_canonical_source_mapping_probe_count(), 0);
+    assert_eq!(
+        target
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
+        0
+    );
 
     let source_slot = source_slots[SOURCE_BLOCKS - 2];
     let destination = target
+        .loan_mut()
         .try_share_canonical(source_canonical.aggregate(), source_slot)
         .unwrap_or_else(|_| panic!("far source slot must share"));
-    assert_eq!(target.test_take_canonical_source_mapping_probe_count(), 1);
+    assert_eq!(
+        target
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
+        1
+    );
     for _ in 0..REPEATED_LOOKUPS {
         assert_eq!(
             target
+                .loan_mut()
                 .try_share_canonical(source_canonical.aggregate(), source_slot)
                 .unwrap_or_else(|_| panic!("duplicate dense-map lookup must share")),
             destination
         );
     }
     assert_eq!(
-        target.test_take_canonical_source_mapping_probe_count(),
+        target
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
         REPEATED_LOOKUPS,
         "each lookup probes exactly one dense-map entry regardless of source size"
     );
-    assert_eq!(target.canonical_len(), 1);
+    assert_eq!(target.loan().canonical_len(), 1);
 
     drop(target);
     drop(invocation_root_3);
@@ -3576,13 +4194,18 @@ fn canonical_source_binding_checks_account_health_before_mapping_work() {
     let first_poison = account.test_record_poison(AccountPoisonReason::OwnershipGraphUnverified);
 
     assert!(matches!(
-        assembly.try_bind_canonical_source(wrong_canonical.aggregate(), TestDimension::Bytes),
+        assembly.loan_mut().try_bind_canonical_source(wrong_canonical.aggregate(), TestDimension::Bytes),
         Err(CanonicalSourceBindError::Publication(
             RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(cause))
         )) if cause == first_poison
     ));
-    assert_eq!(assembly.test_take_canonical_source_mapping_probe_count(), 0);
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(
+        assembly
+            .loan()
+            .test_take_canonical_source_mapping_probe_count(),
+        0
+    );
+    assert_eq!(assembly.loan().canonical_len(), 0);
 
     drop(assembly);
     drop(invocation_root);
@@ -3712,14 +4335,16 @@ fn non_authoritative_same_account_aggregate_is_rejected_before_member_access_or_
     let mut assembly: TestPublication<'_, u64, u64> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("exact-source target must open"));
-    let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);
+    let result = assembly
+        .loan_mut()
+        .try_share_canonical(source_canonical.aggregate(), source_slot);
 
     assert!(matches!(
         result,
         Err(RetainedPublicationError::InvalidSourceSlot)
     ));
     assert_eq!(take_test_member_lookups(), 0);
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.loan().canonical_len(), 0);
     assert_eq!(
         source_canonical
             .aggregate()
@@ -3784,15 +4409,19 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         .try_publication_assembly(publication_plan_with_canonical_source_mapping(1, 1, 1))
         .unwrap_or_else(|_| panic!("exact share-work tables must open"));
     assembly
+        .loan_mut()
         .try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes)
         .unwrap_or_else(|_| panic!("canonical source map must bind before share work"));
     let physical_before_share = account.snapshot();
     let work_before_share = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("share work dimension must remain observable"));
     assert_eq!(work_before_share.consumed(), 15);
 
-    let result = assembly.try_share_canonical(source_canonical.aggregate(), source_slot);
+    let result = assembly
+        .loan_mut()
+        .try_share_canonical(source_canonical.aggregate(), source_slot);
 
     assert!(matches!(
         result,
@@ -3806,6 +4435,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         ))
     ));
     let work_after_share = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap_or_else(|| panic!("rejected share work evidence must remain observable"));
     assert_eq!(
@@ -3817,7 +4447,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         work_before_share.consumed(),
         "batch admission rejection must not report the first share unit as completed"
     );
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.loan().canonical_len(), 0);
     assert_eq!(account.snapshot(), physical_before_share);
     assert!(
         physical_before_share.live_retained_bytes()
@@ -3896,12 +4526,13 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
             1,
         );
         let dimension_before = operation
+            .loan()
             .common
-            .coordinator
+            .as_read()
             .dimension_evidence(TestDimension::Bytes)
             .unwrap_or_else(|_| panic!("{case}: dimension evidence before open"));
-        let physical_before = operation.account().snapshot();
-        let account_shares_before = operation.account().share_call_count();
+        let physical_before = operation.loan().account().snapshot();
+        let account_shares_before = operation.loan().account().share_call_count();
         let set_ids_before = test_retained_set_id_requests();
         let batch_allocations_before = crate::ledger::test_attribution_batch_allocation_entries();
 
@@ -3927,15 +4558,20 @@ fn invalid_publication_capacity_is_rejected_before_every_open_side_effect() {
             "{case}"
         );
         assert_eq!(
-            operation.account().share_call_count(),
+            operation.loan().account().share_call_count(),
             account_shares_before,
             "{case}"
         );
-        assert_eq!(operation.account().snapshot(), physical_before, "{case}");
+        assert_eq!(
+            operation.loan().account().snapshot(),
+            physical_before,
+            "{case}"
+        );
         assert_eq!(
             operation
+                .loan()
                 .common
-                .coordinator
+                .as_read()
                 .dimension_evidence(TestDimension::Bytes)
                 .unwrap_or_else(|_| panic!("{case}: dimension evidence after rejection")),
             dimension_before,
@@ -4111,11 +4747,15 @@ fn semantic_rejection_can_append_evidence_and_prepare_a_rich_failure() {
         _ => panic!("semantic rejection must preserve evidence-building ownership"),
     };
     let detail = failure
+        .borrow_ordinary()
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(9, EvidenceDetailTag))
         })
         .unwrap_or_else(|_| panic!("bounded failure detail must retain"));
     failure
+        .borrow_ordinary()
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 3)
         .unwrap_or_else(|_| panic!("failure evidence commitment must fit"));
     let validated = match failure.validate_rich_failure(evidence_root, |session, root| {
@@ -4325,16 +4965,19 @@ fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
         .try_publication_assembly(publication_plan(2, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let orphan = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestCanonicalBlock::Leaf(1), CanonicalLeafTag))
         })
         .unwrap_or_else(|_| panic!("orphan candidate must retain"));
     let root = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestCanonicalBlock::Root { leaf: orphan }, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("root must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestEvidenceBlock::Detail(9), EvidenceDetailTag))
         })
@@ -4372,16 +5015,19 @@ fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
         .try_publication_assembly(publication_plan(2, 1))
         .unwrap_or_else(|_| panic!("publication assembly must reopen"));
     let orphan = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestCanonicalBlock::Leaf(1), CanonicalLeafTag))
         })
         .unwrap_or_else(|_| panic!("orphan candidate must retain"));
     let root = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestCanonicalBlock::Root { leaf: orphan }, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("root must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestEvidenceBlock::Detail(9), EvidenceDetailTag))
         })
@@ -4432,20 +5078,24 @@ fn block_limits_reject_before_running_the_builder_and_minimal_fallback_stays_ava
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let _ = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestCanonicalBlock::Leaf(1), CanonicalLeafTag))
         })
         .unwrap_or_else(|_| panic!("first block must fit"));
     BUILDER_RAN.store(false, Ordering::SeqCst);
     assert!(matches!(
-        assembly.try_retain_canonical(empty_plan(), |emplacer| {
-            BUILDER_RAN.store(true, Ordering::SeqCst);
-            Ok(emplacer.place(TestCanonicalBlock::Leaf(2), CanonicalLeafTag))
-        }),
+        assembly
+            .loan_mut()
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                BUILDER_RAN.store(true, Ordering::SeqCst);
+                Ok(emplacer.place(TestCanonicalBlock::Leaf(2), CanonicalLeafTag))
+            }),
         Err(RetainedPublicationError::CanonicalSlotLimit)
     ));
     assert!(!BUILDER_RAN.load(Ordering::SeqCst));
     let _ = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(TestEvidenceBlock::Detail(3), EvidenceDetailTag))
         })
@@ -4482,15 +5132,16 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let ledger = assembly
+        .loan_mut()
         .operation
-        .as_ref()
+        .as_mut()
         .expect("assembly retains operation")
         .common
-        .coordinator
-        .retained_ledger();
+        .test_ledger_mut();
     let observation = LiveDropObservation {
         ledger: ledger.test_probe(),
         account: assembly
+            .loan()
             .fields
             .account
             .as_ref()
@@ -4503,11 +5154,13 @@ fn partial_canonical_downgrades_to_rich_failure_after_storage_drops_first() {
         observed_physical_allocations: &OBSERVED_PHYSICAL_ALLOCATIONS,
     };
     let _partial = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(observation, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("partial canonical block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(5, EvidenceRootTag))
         })
@@ -4563,16 +5216,21 @@ fn failure_only_plan_rejects_canonical_construction_and_publishes_evidence() {
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("failure-only assembly must open"));
     assert!(matches!(
-        assembly.try_retain_canonical(empty_plan(), |emplacer| {
-            Ok(emplacer.place(11, CanonicalRootTag))
-        }),
+        assembly
+            .loan_mut()
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(11, CanonicalRootTag))
+            }),
         Err(RetainedPublicationError::WrongOutcomeMode)
     ));
     assert!(matches!(
-        assembly.try_commit_canonical(TestDimension::Bytes, 1),
+        assembly
+            .loan_mut()
+            .try_commit_canonical(TestDimension::Bytes, 1),
         Err(RetainedPublicationError::WrongOutcomeMode)
     ));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -4682,6 +5340,7 @@ fn primary_binding_failure_preserves_the_earlier_control_cause() {
         .unwrap_or_else(|_| panic!("control rejection publication must open"));
     let (canonical, evidence) = retain_scalar_success(&mut assembly);
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 4)
         .unwrap_or_else(|_| panic!("evidence commitment must fit the preallocated batch"));
     let validated =
@@ -4730,11 +5389,13 @@ fn evidence_primary_rejection_uses_minimal_fallback_without_retry() {
         .try_publication_assembly(plan)
         .unwrap_or_else(|_| panic!("failure-only assembly must open"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("failure evidence must retain"));
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 4)
         .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
     let validated = match assembly.validate_rich_failure(evidence, |session, root| {
@@ -4797,16 +5458,19 @@ fn success_canonical_primary_rejection_downgrades_to_retained_rich_failure() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("canonical rejection assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&CANONICAL_DROPS), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical drop counter must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("evidence drop counter must retain"));
     assembly
+        .loan_mut()
         .try_commit_canonical(TestDimension::Bytes, 1)
         .unwrap_or_else(|_| panic!("canonical commitment must fit the preallocated batch"));
 
@@ -4869,21 +5533,24 @@ fn evidence_only_retry_panic_retains_storage_and_attribution_fail_closed() {
         || Ok(7_u32),
     )
     .unwrap_or_else(|_| panic!("retry-panic operation must start"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let mut assembly: TestPublication<'_, DropCounter, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("retry-panic publication must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&CANONICAL_DROPS), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("retry-panic canonical block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("retry-panic evidence block must retain"));
     assembly
+        .loan_mut()
         .try_commit_canonical(TestDimension::Bytes, 1)
         .unwrap_or_else(|_| panic!("retry-panic canonical commitment must fit"));
     let validated =
@@ -4948,16 +5615,19 @@ fn success_double_primary_rejection_drops_both_tables_before_minimal_fallback() 
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("double rejection assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&CANONICAL_DROPS), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical drop counter must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("evidence drop counter must retain"));
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 4)
         .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
 
@@ -5055,7 +5725,7 @@ fn terminal_prepare_never_calls_dimension_ordering() {
         || Ok(7_u32),
     )
     .unwrap_or_else(|_| panic!("terminal-order operation must start"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let deferred_ledger = StdArc::new(StdMutex::new(Some(ledger)));
     let table_writer = RetainedWriterPlan::new(
         TestPhase::Build,
@@ -5071,6 +5741,7 @@ fn terminal_prepare_never_calls_dimension_ordering() {
         .try_publication_assembly(publication_plan)
         .unwrap_or_else(|_| panic!("terminal-order publication must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(
                 PrimaryBindDropObservation {
@@ -5084,6 +5755,7 @@ fn terminal_prepare_never_calls_dimension_ordering() {
         })
         .unwrap_or_else(|_| panic!("terminal-order canonical block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(9_u64, EvidenceRootTag))
         })
@@ -5273,24 +5945,27 @@ fn evidence_only_binding_panic_stops_before_later_storage_cleanup() {
         .try_publication_assembly(publication_plan)
         .unwrap_or_else(|_| panic!("combined-fault publication must open"));
     let ledger = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("combined-fault operation")
         .common
-        .coordinator
-        .retained_ledger()
-        .test_probe();
+        .test_ledger()
+        .test_shared_probe();
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(11_u64, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("combined-fault canonical block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(9_u64, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("combined-fault evidence block must retain"));
     assembly
+        .loan_mut()
         .try_commit_canonical(dimension, 1)
         .unwrap_or_else(|_| panic!("canonical rejection commitment must fit the batch"));
     let validated =
@@ -5357,26 +6032,29 @@ fn second_table_drop_panic_keeps_success_rejection_accounting_fail_closed() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("success rejection assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&CANONICAL_DROPS), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical drop counter must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingDropProbe(&EVIDENCE_DROPS), EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("panicking evidence must retain"));
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 4)
         .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
     let probe = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("assembly retains operation")
         .common
-        .coordinator
-        .retained_ledger()
-        .test_probe();
+        .test_ledger()
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
 
@@ -5424,26 +6102,29 @@ fn first_table_drop_panic_stops_before_evidence_cleanup_or_attribution_ack() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("success rejection assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingDropProbe(&CANONICAL_DROPS), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("panicking canonical must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("evidence drop counter must retain"));
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 4)
         .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
     let probe = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("assembly retains operation")
         .common
-        .coordinator
-        .retained_ledger()
-        .test_probe();
+        .test_ledger()
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
     let before_physical = account.snapshot();
@@ -5508,21 +6189,24 @@ fn table_payload_drop_panic_fails_closed_before_attribution_release() {
         1,
     );
     let account = operation
+        .loan()
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("rich-both account share must be admitted"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let mut assembly: TestPublication<'_, PanickingDropProbe, DropCounter> = operation
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     DROP_COUNT.store(0, Ordering::SeqCst);
     EVIDENCE_DROPS.store(0, Ordering::SeqCst);
     let _canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingDropProbe(&DROP_COUNT), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("panicking block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(DropCounter(&EVIDENCE_DROPS), EvidenceRootTag))
         })
@@ -5611,10 +6295,10 @@ fn baseline_drop_payload_before_releasing_live_ownership() {
         || Ok(fallback),
     )
     .unwrap_or_else(|_| panic!("baseline observation operation must start"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     EXPECTED_ACTIVE.store(ledger.active_reservations(), Ordering::SeqCst);
     EXPECTED_OPERATION_LIVE.store(ledger.current_live_bytes(), Ordering::SeqCst);
-    let physical = operation.account().snapshot();
+    let physical = operation.loan().account().snapshot();
     EXPECTED_PHYSICAL_BYTES.store(physical.live_retained_bytes(), Ordering::SeqCst);
     EXPECTED_PHYSICAL_ALLOCATIONS.store(physical.live_retained_allocations(), Ordering::SeqCst);
     *lock_recovering_poison(&deferred_ledger) = Some(ledger);
@@ -5655,11 +6339,13 @@ fn prepared_published_and_baseline_owners_contain_payload_drop_panics() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("prepared drop assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingDropProbe(&PREPARED_DROPS), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("prepared drop block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -5686,11 +6372,13 @@ fn prepared_published_and_baseline_owners_contain_payload_drop_panics() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("published drop assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingDropProbe(&PUBLISHED_DROPS), CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("published drop block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -5755,7 +6443,11 @@ fn healthy_prepared_and_published_owners_release_during_unrelated_host_unwind() 
             PhysicalDropObservation,
         > = InvocationRoot::new();
         let operation = test_operation(&mut invocation_root, &factory, 64);
-        let account = operation.account().share_after_test_admission().unwrap();
+        let account = operation
+            .loan()
+            .account()
+            .share_after_test_admission()
+            .unwrap();
         let canonical_charge = account
             .checked_retained_charge::<PhysicalDropObservation>(empty_plan())
             .unwrap();
@@ -5767,6 +6459,7 @@ fn healthy_prepared_and_published_owners_release_during_unrelated_host_unwind() 
                 .try_publication_assembly(publication_plan(1, 1))
                 .unwrap_or_else(|_| panic!("host-unwind publication must open"));
         let canonical = assembly
+            .loan_mut()
             .try_retain_canonical(empty_plan(), |emplacer| {
                 Ok(emplacer.place(
                     PhysicalDropObservation {
@@ -5780,6 +6473,7 @@ fn healthy_prepared_and_published_owners_release_during_unrelated_host_unwind() 
             })
             .unwrap_or_else(|_| panic!("host-unwind canonical root must retain"));
         let evidence = assembly
+            .loan_mut()
             .try_retain_outcome_evidence(empty_plan(), |emplacer| {
                 Ok(emplacer.place(
                     PhysicalDropObservation {
@@ -5873,6 +6567,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
         InvocationRoot::new();
     let operation = test_operation(&mut invocation_root, &factory, 64);
     let observed_account = operation
+        .loan()
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("test account share must be admitted"));
@@ -5880,6 +6575,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("prepared observation assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(
                 PhysicalDropObservation {
@@ -5893,6 +6589,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
         })
         .unwrap_or_else(|_| panic!("prepared observation block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -5921,6 +6618,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
         InvocationRoot::new();
     let operation = test_operation(&mut invocation_root_2, &factory, 64);
     let observed_account = operation
+        .loan()
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("test account share must be admitted"));
@@ -5928,6 +6626,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("handoff observation assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(
                 PhysicalDropObservation {
@@ -5941,6 +6640,7 @@ fn prepared_and_published_drop_keep_physical_charge_and_handoff_is_a_pure_move()
         })
         .unwrap_or_else(|_| panic!("handoff observation block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -6053,20 +6753,23 @@ fn rich_failure_fallback_drop_panic_preserves_every_unacknowledged_attribution()
             )
         };
         let account = operation
+            .loan()
             .account()
             .share_after_test_admission()
             .unwrap_or_else(|_| panic!("rich fallback account share must be admitted"));
-        let ledger = operation.common.coordinator.retained_ledger().test_probe();
+        let ledger = operation.loan().common.test_ledger().test_shared_probe();
         let validated = if includes_canonical_discard {
             let mut assembly = operation
                 .try_publication_assembly(publication_plan(1, 1))
                 .unwrap_or_else(|_| panic!("rich-both fallback fixture must open"));
             let canonical = assembly
+                .loan_mut()
                 .try_retain_canonical(empty_plan(), |emplacer| {
                     Ok(emplacer.place(11_u64, CanonicalRootTag))
                 })
                 .unwrap_or_else(|_| panic!("rich-both canonical root must retain"));
             let evidence = assembly
+                .loan_mut()
                 .try_retain_outcome_evidence(empty_plan(), |emplacer| {
                     Ok(emplacer.place(7_u64, EvidenceRootTag))
                 })
@@ -6095,6 +6798,7 @@ fn rich_failure_fallback_drop_panic_preserves_every_unacknowledged_attribution()
                 .try_publication_assembly(plan)
                 .unwrap_or_else(|_| panic!("rich-evidence fallback fixture must open"));
             let evidence = assembly
+                .loan_mut()
                 .try_retain_outcome_evidence(empty_plan(), |emplacer| {
                     Ok(emplacer.place(7_u64, EvidenceRootTag))
                 })
@@ -6211,23 +6915,25 @@ fn success_preparation_contains_fallback_drop_panic() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("panic fallback assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(41, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical block must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("evidence block must retain"));
     let probe = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("assembly retains operation")
         .common
-        .coordinator
-        .retained_ledger()
-        .test_probe();
+        .test_ledger()
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
     let validated =
@@ -6279,10 +6985,11 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
         1,
     );
     let account = operation
+        .loan()
         .account()
         .share_after_test_admission()
         .unwrap_or_else(|_| panic!("minimal-evidence account share must be admitted"));
-    let ledger = operation.common.coordinator.retained_ledger().test_probe();
+    let ledger = operation.loan().common.test_ledger().test_shared_probe();
     let plan =
         RetainedPublicationPlan::rich_failure(RetainedBlockTablePlan::new(writer_plan(2, 2), 1, 1));
     let mut assembly: TestPublication<'_, u64, PanickingEvidence> = operation
@@ -6290,11 +6997,13 @@ fn rejected_primary_payload_drop_panic_fails_closed_before_token_release() {
         .unwrap_or_else(|_| panic!("rejected primary assembly must open"));
     DROP_COUNT.store(0, Ordering::SeqCst);
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(PanickingEvidence, EvidenceRootTag))
         })
         .unwrap_or_else(|_| panic!("panicking evidence must retain"));
     assembly
+        .loan_mut()
         .try_commit_outcome_evidence(TestDimension::Bytes, 4)
         .unwrap_or_else(|_| panic!("commitment must fit the preallocated batch"));
     let validated = match assembly.validate_rich_failure(evidence, |session, root| {
@@ -6376,16 +7085,17 @@ fn recoverable_block_allocation_failure_preserves_assembly_for_retry() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("retry assembly must open"));
     let probe = assembly
+        .loan()
         .operation
         .as_ref()
         .expect("assembly retains operation")
         .common
-        .coordinator
-        .retained_ledger()
-        .test_probe();
+        .test_ledger()
+        .test_shared_probe();
     let before_active = probe.active_reservations();
     let before_live = probe.current_live_bytes();
     let before_physical = assembly
+        .loan()
         .fields
         .account
         .as_ref()
@@ -6394,14 +7104,17 @@ fn recoverable_block_allocation_failure_preserves_assembly_for_retry() {
 
     fail_next_final_owner_allocation();
     assert!(matches!(
-        assembly.try_retain_canonical(empty_plan(), |emplacer| {
-            Ok(emplacer.place(11, CanonicalRootTag))
-        }),
+        assembly
+            .loan_mut()
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(11, CanonicalRootTag))
+            }),
         Err(RetainedPublicationError::Writer(
             RetainedWriterError::Physical(RetainedAllocationError::AllocationFailed)
         ))
     ));
     let after_physical = assembly
+        .loan()
         .fields
         .account
         .as_ref()
@@ -6419,11 +7132,13 @@ fn recoverable_block_allocation_failure_preserves_assembly_for_retry() {
     );
 
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(11, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical retry must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })
@@ -6454,11 +7169,13 @@ fn closure_validation_panic_publishes_minimal_fallback() {
         .try_publication_assembly(publication_plan(1, 1))
         .unwrap_or_else(|_| panic!("publication assembly must open"));
     let canonical = assembly
+        .loan_mut()
         .try_retain_canonical(empty_plan(), |emplacer| {
             Ok(emplacer.place(11, CanonicalRootTag))
         })
         .unwrap_or_else(|_| panic!("canonical root must retain"));
     let evidence = assembly
+        .loan_mut()
         .try_retain_outcome_evidence(empty_plan(), |emplacer| {
             Ok(emplacer.place(7, EvidenceRootTag))
         })

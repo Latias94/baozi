@@ -1,7 +1,7 @@
 ---
 title: "Converge maintained import workflows with Assimp before release"
 type: perf
-status: in_progress
+status: paused
 date: 2026-11-03
 baseline: e0a7b387371b71c28bc40f6e2cfd4c1ff5f91726
 ---
@@ -12,6 +12,14 @@ The user requires comparable performance before the first usable release. The co
 pre-release evolution does not satisfy this new release condition. Necessary interface,
 ownership, execution and representation changes may break compatibility. Publication remains
 closed while this plan is incomplete.
+
+Execution is paused for the user's device handoff on 2026-11-10. The
+[handoff](../reviews/2026-11-10-device-handoff.md) records the current development
+branch, qualified source, partial terminal Windows/GNU attempts and evidence
+that a Git clone can carry. Release acceptance remains HOLD. The user's latest
+request authorizes committing and pushing this development checkpoint to the
+Baozi GitHub remote; it does not accept native performance or merge the runtime
+into main.
 
 ## Evidence and Acceptance
 
@@ -61,6 +69,16 @@ repeated work binding, semantic-host validation and permit construction/completi
 formats. Parser completion is also substantial in grid OBJ. The existing stable buckets and
 dense remaps already removed the previously demonstrated sorting waste; do not claim that gain
 again or assume text allocation is now the leading cost.
+
+Current artifact availability, 2026-11-08: four explicitly checked historical closed-text
+paths under `target` are absent, including Windows C0/N0 output, the inline attribution
+report and candidate build identity. Earlier tracked reports remain historical records;
+their absent raw files are not current acceptance evidence. Full23 also reached a finished
+test compilation but could not enumerate the missing STL ascii executable. The next
+structural run rebuilds in this repository's existing `target`; no agent cleanup or new
+build location is involved. New ordinary and heap campaigns are still required. Preserve
+their small raw JSON, identities and logs outside the cleanable build tree after all
+measurement clocks end, without changing the comparison boundary or sample protocol.
 
 ## Work Sequence
 
@@ -776,3 +794,337 @@ negative case only for a genuinely new boundary, not for incidental private layo
   neither release nor general performance acceptance. Existing parser admission/completion
   remains the next primary owner investigation. Release HOLD and all original convergence
   targets remain active.
+- The [closed-text row checkpoint](../reviews/2026-11-06-closed-text-planning.md)
+  qualifies actual row borrowing and four ordinary inline hints at runtime `247ff99`.
+  Historical integrated checks pass, and whole-worker grid/repeated OBJ instructions
+  decrease by 7.943%/2.016%. Both platforms complete original C0/N0/N1 campaigns;
+  both C1s cannot start within their prospective load gates. All candidate complete
+  pipelines above 3x (Windows 9/28, GNU 14/28), repeated >=10x endpoints, adverse
+  preparation/PLY observations, load overlap and equal separate heap totals remain
+  visible in the receipt and all-lane tables. No measured keep/main merge or release
+  acceptance follows. User disk cleanup later removes local raw trees; surviving GNU
+  originals are recovered only against recorded hashes, and absent Windows/diagnostic
+  raw evidence is explicitly unavailable. Next implement the independently reviewed
+  [reserved typed-storage row](2026-11-06-0800-typed-storage-reserved-row-plan.md), then
+  separately qualify document-local OBJ/MTL token reuse. All builds remain in the
+  current repository target; all original convergence targets remain active.
+- The [reserved typed-storage checkpoint](../reviews/2026-11-06-typed-storage-reserved-row.md)
+  qualifies source `9744b35`: the exclusive actual-row loan hoists fresh reserved-state
+  checks and retains immediate transfers, the actual remainder gate, 256-unit typed
+  polling and outer-host cleanup. Seven fresh integrated gates pass with 972 stable
+  Rust/Cargo inputs. Twelve independently reviewed instruction profiles show all six
+  original tasks lower, including STL -13.009%, with identical nonclock observations
+  and work. Retain +86,488 diagnostic binary bytes, both grid profiler warnings and
+  the pre-Cargo PATH startup failure. This supports native qualification only; no
+  native time, heap, main merge or release acceptance follows. Separately qualify
+  document-local OBJ/MTL token reuse before a cumulative ordinary campaign. Release
+  HOLD and every original Windows/GNU convergence target remain active.
+- The [document token checkpoint](../reviews/2026-11-06-obj-document-token-scratch.md)
+  qualifies source `7c1a7d9` with all seven integrated gates and 972 stable inputs.
+  One token owner per immutable OBJ/MTL document replaces per-line ownership; actual
+  retained capacity stays charged. Independently reviewed Ir falls 4.870%/6.126% in
+  the two OBJ tasks, with four smaller increases and identical observations/work.
+  Independently audited heap collection observes 16,388/66,052 fewer allocation calls
+  and unchanged displayed rounded peaks. Preserve temporary-count discrepancies,
+  exit-live labels, unfavorable heap ratios, profiler warnings, binary growth and
+  missing historical calibration source/build attestation. Native qualification
+  remains open. The reviewed [glTF owner-run plan](2026-11-06-1030-gltf-owner-source-runs-plan.md)
+  replaces global full-row relation ordering and repeated authoring identity searches;
+  its isolated source work grants no performance acceptance. All builds use the
+  current repository target; release HOLD and original convergence gates remain.
+- That cumulative token candidate's first new ordinary attempt completes all four
+  110-lane functional preflights but no candidate ordinary sampling. Windows C0/N0/N1/C1
+  and GNU C0/N0/N1 reach their prospective startup limits. GNU C1 alone records the
+  old capacity control; independent review finds its required 20-second quiet guard
+  unqualified because the timer starts at the last busy sample. All C1 descriptive
+  statistics, adverse load and original missing cells remain in the [checkpoint](../reviews/2026-11-06-obj-document-token-scratch.md)
+  and [tables](../reviews/2026-11-06-obj-document-token-scratch-lanes.md). Its 14/28
+  pipelines above 3x and 28 endpoints at least 10x are old-control observations, not
+  candidate acceptance. A first-clear timer correction is independently reviewed for
+  future attempts only. The glTF owner-run source remains a separately qualified next
+  implementation; no main runtime merge or release gate is cleared.
+- The [glTF owner-run checkpoint](../reviews/2026-11-06-gltf-owner-source-runs.md)
+  source-qualifies `6e7c1c0`: local completed runs and validated inventory ordinals
+  replace full-row global relation ordering and later identity searches. All seven
+  final gates pass with 972 stable inputs, independently reviewed. Original compiler,
+  fixture-lifecycle and test-lint failures remain. Six instruction tasks retain
+  shared-32 -11.590%, shared-1 +0.676%, all other signs and physical work changes.
+  Eighteen separate heap tasks retain five/ten more glTF allocations and lower rounded
+  displayed peaks, with 477,080 additional diagnostic binary bytes. Independent
+  instruction and heap reviews close with every adverse sign, summary discrepancy
+  and calibration limit retained. New ordinary candidate workers match final QA.
+  The corrected first-clear guard qualifies Windows N0 and GNU N1; both complete
+  all 110 original lanes with three warmups/twenty retained pairs and no comparison
+  failures. Six other campaigns cannot start within their prospective load gates.
+  All missing cells and measured signs remain in the checkpoint and full tables:
+  Windows 56/110 endpoints and 9/28 pipelines exceed 3x; GNU 69/110 and 14/28.
+  Endpoint medians at least 10x number 31/29 respectively, descriptively without
+  same-platform repeat confirmation. Both completed candidates have no whole-child
+  memory median above 3x. Independent Windows and GNU/raw-export reviews close with
+  60/106 N0 and 47/51 N1 load samples busy, all raw observations/statistics and all
+  3,080 export cells verified. No ordinary source-change keep, runtime main
+  integration or release follows. Current preparation attribution motivates the
+  [producer-result plan](2026-11-06-1225-prepare-consuming-result-plan.md) as a first
+  bounded deletion while the larger finite invocation/backing/terminal interface
+  receives concrete design review. No numeric algorithm or benchmark boundary is
+  changed, and every original convergence target remains active.
+- The [owned finite invocation plan](2026-11-06-1240-owned-finite-invocation-plan.md)
+  replaces the old external-backing-lifetime sketch with two concrete owned roots
+  and shared short numeric/storage views. Independent source design and bounded
+  amendment review close the three actual terminal/error P1 omissions and the
+  disjoint-loan P2 at the plan-contract level. The dynamic-first cut includes all
+  three whole-Ledger transfers, the sibling pre-freeze classifier and real fail-closed
+  state retention; the finite cut includes every Start/Body error carrier and actual
+  Core/postprocess ownership. The dynamic cut has completed its qualified structural
+  checkpoint. Finite owned startup/body errors, actual physical/domain terminal
+  ownership, shared activation/central validation and body-error transport are also
+  implemented; final21/source129 passes all seven integrated gates. The subsequent
+  final-only failure authoring shares one validation algorithm across concrete owners,
+  retains original error/proof/payload custody, and preserves final control through
+  prepared finite output. Source135 passes 1,372 Operation tests and 143 Operation
+  doctests, with bounded independent source/test reviews. Final25/source140 passes all
+  seven integrated gates: 3,930 workspace tests, 203 doctests, 138 consumer tests,
+  both strict and both formats, with 1,049 stable inputs and 163 frozen files. The
+  Import Dynamic annotations are migrated and original fallback/admission assertions
+  are qualified without changing production behavior to satisfy tests.
+  The finite success freeze/joint boundary is now implemented on the actual concrete
+  owners, with one shared decision kernel, the existing invariant joint seal, independent
+  detailed freeze metadata and retired forwarding hierarchies. Source148 passes 1,388
+  Operation tests and its bounded source/required-test reviews. The new dynamic fault
+  witness exposes and then verifies the shared fix for repeated containment after
+  original physical fields have already retired. Full26/source148 passes 3,944 workspace
+  tests and 209 doctests, then fails strict Clippy on three complex private annotations;
+  four later gates do not start. Source149 only names those equivalent private return
+  types and passes scoped strict53. Full27/source149 passes all seven gates: 3,944
+  workspace tests (two slow, six existing manual skips), 209 doctests, 138 consumer
+  tests (one existing manual scale skip), both strict and both formats. Its 1,056
+  stable inputs, 170 frozen files and five current user-note identities match; the
+  exact association is `owned-finite-source149-integrated-association-1.json`.
+  Actual Core/Postprocess consumer migration follows this structural cut. Both real
+  finite candidate variants are already promoted by startup attribution; no Inline
+  freeze or allocation improvement is inferred. The producer-result workers remain
+  separate immutable evidence; no finite allocation, layout, performance, main
+  integration or release claim follows
+  from these structural checkpoints.
+- The [preparation producer result](../reviews/2026-11-06-preparation-producer-result.md)
+  qualifies `e8c4802`: only real effects materialize output, unchanged prefixes/suffixes
+  retain complete ordered evidence, and caller rediscovery is removed. Independent
+  production, oracle and final-QA association reviews close. All seven fresh gates
+  pass with 972 stable inputs: 3,643 workspace tests, 190 doctests and 138 consumer
+  tests, retaining existing manual skips and intentional passing unwind stderr.
+  Actual output/backfill admission denial and both exact control boundaries run on
+  the original owner. GNU diagnostic build uses the current repository/target with
+  archive inputs equal to QA. Independent instruction review retains four whole-worker
+  reductions, both small OBJ increases and actual unchanged preparation-entry Ir
+  reductions of 12.241491%/12.188790%. Planning/binding remains about 48% of those
+  entry instructions, not native time. Independent eighteen-worker heap review retains
+  five one-call reductions, unchanged repeated OBJ and all rounded peak displays,
+  temporary-count/exit-live facts and the existing sanity provenance limit. Both new
+  ordinary debug0 candidates are built and bound to QA against exact retained `6e7c1c0`
+  controls. Both new ordinary attempts terminate partial: N1 alone completes every
+  original lane on each host; all six C0/N0/C1 opportunities remain not started.
+  The [complete tables](../reviews/2026-11-06-preparation-producer-result-lanes.md)
+  retain Windows 56/110 endpoints and 9/28 pipelines above 3x, GNU 69/110 and 14/28,
+  and 35/29 endpoint medians at least 10x, descriptively without same-platform repeat
+  or control bracket. All ordinary memory medians stay below 3x; source-relative
+  memory acceptance remains open. Independent Windows and GNU/combined reviews close
+  with every raw observation, GNU RSS text, 9,570 statistics per platform and all
+  3,080 export cells verified. N1 load remains 80/107 busy on Windows and 2/52 on GNU,
+  with 313/379 busy enclosing Windows monitor samples. The local Windows versus
+  joint GNU quiet-start scopes stay distinct. Fixed startup and
+  nonempty selection scratch remain. Native qualification is incomplete; no finite-root
+  implementation, main runtime merge or release follows.
+- The [finite consumer Windows checkpoint](../reviews/2026-11-08-finite-consumer-windows.md)
+  measures the qualified Core/Postprocess integration `b76fbc0` against fresh
+  `00b54f4` controls and rebuilt pinned Assimp 6.0.5. Final29/source172 passes
+  all seven integrated gates: 3,956 workspace tests, 218 doctests and 138
+  consumer tests, both strict gates and both formats, with 1,058 stable inputs
+  and unchanged current user notes. Both Windows functional matrices pass
+  110 lanes. N0, N1 and C1 complete every original lane with three warmups and
+  twenty retained pairs and no worker failure; C0 remains not started after
+  its prospective quiet-start deadline. Both candidates retain nine of 28
+  pipeline medians above 3x Assimp, 59/110 endpoint medians above 3x and 33
+  endpoint medians at least 10x in both repeats. Neither whole-child Windows
+  memory metric has a lane median above 3x. Independent raw evidence review
+  verifies all 15,180 worker objects, every summary/ratio and the complete
+  110-lane export, including regressions and missing cells. All 321 ordinary
+  named-tool samples are clear; 14/14 functional snapshots are busy, and neither
+  scope establishes isolation. One trailing control does not qualify source
+  speed or replace missing original B0 raw evidence. Pinned-source inspection
+  confirms glTF/STL whole-input buffering and that all generated OBJ cases fit
+  Assimp's initial cache block; no streaming performance cause is inferred.
+  GNU builds and measurements remain pending in the current repository/target,
+  followed by separate calibrated heap attribution. Native convergence,
+  local-main runtime integration and release remain HOLD.
+- Later checkpoints supersede that pending GNU/heap status without repairing
+  its missing campaigns: the [finite consumer GNU attempt](../reviews/2026-11-08-finite-consumer-gnu.md)
+  completes C0 only; N0/N1/C1 terminate not started. The separate
+  [instruction and calibrated eighteen-worker heap report](../reviews/2026-11-08-finite-consumer-attribution.md)
+  retains six small instruction increases, 25 fewer allocation calls in five
+  tasks and 31 fewer in repeated OBJ, rounded peaks, interception limits and
+  independent actual evidence review. No candidate GNU ordinary interval or
+  native convergence follows.
+- The [actual-row text-emission experiment](../reviews/2026-11-08-closed-text-emission.md)
+  qualifies `3da8893` with the original seven gates and 1,058 stable inputs.
+  Fresh matched instruction profiles reduce grid OBJ by 7.14259617% and repeated
+  OBJ by 1.59745099%, retaining all four smaller increases and profiler warnings.
+  Its [native attempt](../reviews/2026-11-08-closed-text-emission-native.md)
+  terminates partial on both platforms: Windows has no ordinary samples and
+  GNU completes only C0. Independent actual reviews retain every missing cell;
+  the instruction improvement establishes no candidate native-speed acceptance.
+- The [glTF field-layout experiment](../reviews/2026-11-08-gltf-field-layout.md)
+  implements `7b8c5f3`, reusing stable mapping within each query while retaining
+  every real comparison, admission, completion and control checkpoint. Source3
+  passes all seven gates with 3,958 workspace tests, 218 doctests, 138 consumer
+  tests and 1,059 stable committed inputs. Two failed fixture attempts and their
+  corrections remain. Independent source, actual QA and raw instruction reviews
+  close with GO. Fresh glTF1 instructions decrease 2.32029303% and glTF32 decrease
+  0.77512688%; the unchanged six-task integer predicate passes with every adverse
+  sign retained. Ordinary native qualification remains separate and pending;
+  main/runtime integration and release remain HOLD.
+- The [glTF native checkpoint](../reviews/2026-11-08-gltf-field-layout-native.md)
+  is terminal partial: Windows C0/N0/C1 complete all original lanes with
+  zero worker failures; N1 remains not started. The sole candidate retains
+  nine pipeline medians above 3x and 31 endpoint medians at least 10x, with
+  both whole-child memory metrics below 3x. GNU has functional success but
+  zero ordinary samples. Its monitor replacement failure, 316.337363-second
+  observation gap and attached recovery remain explicit; no worker restarts.
+  Independent actual evidence reviews verify both complete 440-row exports,
+  including every missing cell and sampled-load fact. No native acceptance
+  follows. A separate [tiny-STL locating profile](../reviews/2026-11-08-small-stl-fixed-cost-attribution.md)
+  verifies three import-policy constructor calls, totaling 149,718 of
+  2,140,762 whole-worker Ir. Independent source tracing identifies duplicate
+  temporary owners; the next owner-reuse design is under review, with no
+  implementation or measured gain claimed.
+- The [import policy-owner experiment](../reviews/2026-11-08-import-policy-owner.md)
+  implements `bdc92b3`: entry retains the original validated import policies,
+  requirements borrows them, and bootstrap consumes them. Two duplicate
+  constructions and the retired private error path are deleted; the genuine
+  Store-keyed owner and checked completeness/partition boundaries remain.
+  Source1 passes the original seven gates with 3,959 workspace tests, 218
+  doctests, 138 consumer tests and 1,059 stable committed inputs. Independent
+  source/actual QA reviews close. All six fresh instruction pairs decrease;
+  glTF1 -1.72953523% and F64 PLY -3.97271493% accompany full literal output
+  equality and exact integer selection PASS. Actual evidence review preserves
+  both grid warnings, unknown labels and the extra tiny-STL three-to-one
+  constructor attribution. New ordinary and calibrated heap results remain
+  pending. Source retention, main/runtime integration and release remain HOLD.
+- The later [policy-owner native/heap checkpoint](../reviews/2026-11-08-import-policy-owner-native-heap.md)
+  records a complete Windows C0/N0/N1/C1 bracket and terminal partial GNU C0/N0.
+  Both Windows candidates have nine pipeline medians above 3x Assimp and thirty
+  common endpoints at least 10x; GNU's sole candidate has fourteen pipeline
+  medians above 3x. GNU N1/C1 terminate not started, and late Windows control
+  contention remains. Available whole-child memory median ratios stay below
+  3x. Separate eighteen-worker heap collection observes 56 fewer candidate calls
+  per original task and equal rounded peak displays. Both native actual evidence
+  reviews close with GO; actual heap stack/interception review closes with bounded
+  GO, locating the reduction in policy construction while preserving calibration,
+  unresolved frames and temporary-count differences. No native source-speed acceptance, runtime
+  main integration or release follows.
+- The [parser-read success-capacity experiment](../reviews/2026-11-08-parser-read-success-budget.md)
+  implements and qualifies `292a563` with independent production/F1-test/actual
+  seven-gate reviews: 3,963 workspace tests, 218 doctests, 138 consumer tests,
+  both strict and both formats, 1,059 stable committed inputs. Its fixed
+  instruction predicate fails: repeated OBJ +0.11526267%, grid OBJ +0.52802284%,
+  with no original OBJ >=1% reduction. Every literal pair matches and no case
+  exceeds the 1% regression ceiling, but that does not satisfy required gain.
+  Independent actual raw evidence review closes with fidelity GO/selection FAIL,
+  preserving all signs, both grid warnings, unknown symbols and the pre-Cargo
+  stale-QA launcher failure. The production allowance is removed back to the
+  qualified bdc kernel; four behavior tests and the strengthened pending test
+  remain. Retirement source3 independently passes all seven gates with the same
+  3,963/218/138 counts and existing skips; source-only retirement `17f74d5` matches
+  all 1,059 frozen inputs. Independent retirement QA/source association closes
+  with GO; the performance-candidate rejection remains unchanged.
+  No ordinary/heap run, native acceptance, main/runtime integration or release
+  follows for this rejected candidate. The original convergence targets remain.
+- The [single-piece parser experiment](../reviews/2026-11-09-single-piece-parser.md)
+  qualifies `2bdc37a` with 3,976 workspace tests, 220 doctests, 138 consumer
+  tests, both strict Clippy gates and both formats. Independent source,
+  actual QA, committed archive and concrete generated-code reviews close GO.
+  Its unchanged seven-task instruction screen nevertheless fails: repeated
+  OBJ decreases 0.14196591% and grid OBJ 0.34216840%, neither reaching the
+  required 1%. All seven literal non-clock pairs match and all seven increase
+  ceilings pass; three increases and four decreases remain. Independent actual
+  evidence review verifies all fourteen profiles, 42 commands, 84 streams,
+  112 export cells and 99 retained raw archive members, including both grid
+  warnings and unresolved labels. The added route and candidate-only fixtures
+  are retired at `84f68b8`; independent retirement review proves all 1,059
+  runtime/test inputs exactly equal qualified `0452a73`, reusing its existing
+  seven-gate results without claiming a new test invocation. No ordinary/heap
+  worker, native source retention, main/runtime integration or release follows.
+  Text emission span coalescing is a separate prospective source investigation;
+  it must preserve actual numerical prefixes, unit-based control debt and
+  existing copy/poll/failure boundaries before any implementation is selected.
+- The [bounded ASCII emission candidate](../reviews/2026-11-09-ascii-emission-spans.md)
+  is committed as `d81bbc5`, with 3,972 workspace passes, 218 doctest passes,
+  138 consumer passes, both strict Clippy gates and both formats. The six
+  workspace manual skips and one consumer scale skip remain. Independent
+  source, exact QA/commit/archive, instruction and actual GNU generated-code
+  reviews close GO. The fixed seven-task instruction screen passes: grid OBJ
+  decreases 5.66419386%, repeated OBJ 0.28626704%, all seven complete literal
+  non-clock pairs match and no task increases above 1%. All adverse signs,
+  grid warnings, unresolved labels and prior failed fixture/startup attempts
+  remain recorded.
+  Its [ordinary checkpoint](../reviews/2026-11-09-ascii-emission-spans-native-heap.md)
+  completes both original Windows/GNU brackets: four campaigns per host,
+  110 lanes and 5,062 commands with zero failures per campaign, following both
+  functional matrices. Independent actual raw-evidence reviews close fidelity
+  GO but engineering FAIL. Both Windows candidates retain 9/28 pipeline medians
+  above 3x and 30 common endpoints at least 10x; GNU retains 14/28 and 31 common
+  endpoints. Comparable whole-child memory median ratios remain below 3x.
+  Windows C0/C1 and GNU N1 joint Windows busy samples remain, limiting causal
+  source-speed conclusions. All 880 rows and 36,080 CSV cells remain exported.
+  Fresh bounded calibration3, Assimp debug1 symbols2 and their separate actual
+  reviews complete. Eighteen fresh whole-worker heap traces and eighteen
+  unmerged analyses complete with 36 commands and 72 streams; all six complete
+  literal non-clock Baozi pairs match. Independent actual worker-stack and
+  interception review closes bounded GO, including all 144 exported cells.
+  Every candidate allocation total and rounded peak display equals its control;
+  no allocation-count reduction or exact-peak equality follows. Adverse Assimp
+  comparisons, incomplete library symbols, distinct collector/analyzer temporary
+  statistics and single whole-worker scope remain explicit. The immutable
+  ordinary launch records and final helper bytes are not rewritten for that
+  later phase. Main integration, measured source retention and release remain
+  HOLD; continue the original convergence goal.
+- The [plain parser-completion hint](../reviews/2026-11-09-parser-completion-inline.md)
+  qualifies `20ea126` with 3,972 workspace tests, 218 doctests, 138 independent
+  consumer tests, both strict Clippy gates and both formats. Independent exact
+  source/QA/commit review authenticates the single ordinary annotation and
+  1,060 inputs. The original seven-task instruction predicate fails: repeated
+  OBJ increases 1.24991264% and grid OBJ 3.53262580%, both above the increase
+  ceiling with no required OBJ gain. All seven complete literal non-clock
+  pairs match; all fourteen profiles, 42 commands, 84 streams and signed
+  changes remain retained. The annotation is removed at `97d475e`, returning
+  all 1,060 runtime/test inputs to qualified d81 bytes. Actual instruction,
+  generated-code and retirement-identity reviews have their own closures;
+  source correctness cannot rescue failed performance selection. No ordinary
+  or heap worker is run for this rejected candidate, and no main/runtime or
+  release acceptance follows. Continue attributing actual owner costs under
+  the original convergence requirements.
+- The [glTF source-owner directory](../reviews/2026-11-09-gltf-owner-directory.md)
+  qualifies `b918256` with 3,984 workspace tests, 218 doctests, 138 independent
+  consumer tests, both strict Clippy gates and both formats. Its seven-task
+  instruction predicate and positive compiled-owner review pass; GLB32 whole
+  worker Ir falls 2.38503569%. Two later ordinary attempts remain incomplete,
+  with no candidate ordinary clock and only GNU closing controls available.
+  Their [native/heap report](../reviews/2026-11-09-gltf-owner-directory-native-heap.md)
+  retains those missing cells and actual load. Separate eighteen-worker heap
+  capture and actual stack/interception review close bounded GO, including
+  the added real directory allocation. No native speed or main/release keep
+  follows from instruction reduction or incomplete ordinary brackets.
+- The [resolved preparation selection](../reviews/2026-11-09-prepare-selection-owner.md)
+  qualifies `6203ce2` with 3,992 workspace tests, 218 doctests, 138 independent
+  consumer tests, both strict Clippy gates and both formats. Independent
+  source, actual QA/commit/archive, instruction and compiled-owner reviews
+  close GO. One actual Empty/One/Many reader owner replaces sorted-ID scratch,
+  repeated resolution, full-Scene traversal and binary membership search.
+  Caller-order first lookup failure is an explicit breaking contract; successful
+  source order and existing error/control/cleanup ownership remain. All seven
+  complete literal non-clock pairs, including import work, match. The frozen
+  same-case owner/whole-worker predicate passes: GLB1/GLB32/STL1 prepare-entry
+  Ir falls 30.82170468%/21.91881901%/31.26408374%, with whole-worker reductions
+  0.21928198%/0.37857734%/0.66895345%. All seven signs remain; OBJ improvements
+  are small. Both new ordinary candidate builds complete serially in the
+  current repository/target. Actual Windows/GNU ordinary and separate heap
+  qualification remain pending; native retention, main and release remain HOLD.

@@ -1,7 +1,7 @@
 use super::{
-    ByteBlock, BytesPlan, BytesWriter, CanonicalStoreRef, RetainedStorePublicationAssembly,
-    ScalarSequence, SequencePlan, SequenceWriter, StoreBuildError, StoreDimensionKey,
-    StorePlanError, StoreRuntimeError, StoredBlock, StoredScalar, Utf8Block, Utf8Plan, Utf8Writer,
+    ByteBlock, BytesPlan, BytesWriter, CanonicalStoreRef, ScalarSequence, SequencePlan,
+    SequenceWriter, StoreBuildError, StoreDimensionKey, StorePlanError, StorePublicationLoan,
+    StoreRuntimeError, StoredBlock, StoredScalar, Utf8Block, Utf8Plan, Utf8Writer,
     finish_scoped_writer,
 };
 use crate::retained::{
@@ -481,7 +481,7 @@ pub type CanonicalBytesRange<Tag> = CanonicalStoreRange<ByteBlock, Tag>;
 /// Canonical range of UTF-8 blocks.
 pub type CanonicalUtf8Range<Tag> = CanonicalStoreRange<Utf8Block, Tag>;
 
-impl<'inv, O, PP, U, L> RetainedStorePublicationAssembly<'inv, O, PP, U, L>
+impl<'op, O, PP, U, L> StorePublicationLoan<'op, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -523,7 +523,7 @@ where
     {
         self.ensure_writable()
             .map_err(StoreBatchRuntimeError::Preflight)?;
-        let result = self.raw.try_retain_canonical_batch(&plan, tag);
+        let result = self.raw.loan_mut().try_retain_canonical_batch(&plan, tag);
         self.map_batch_result(result)
     }
 
@@ -538,7 +538,7 @@ where
     {
         self.ensure_writable()
             .map_err(StoreBatchRuntimeError::Preflight)?;
-        let result = self.raw.try_retain_canonical_batch(&plan, tag);
+        let result = self.raw.loan_mut().try_retain_canonical_batch(&plan, tag);
         self.map_batch_result(result)
     }
 
@@ -553,7 +553,7 @@ where
     {
         self.ensure_writable()
             .map_err(StoreBatchRuntimeError::Preflight)?;
-        let result = self.raw.try_retain_canonical_batch(&plan, tag);
+        let result = self.raw.loan_mut().try_retain_canonical_batch(&plan, tag);
         self.map_batch_result(result)
     }
 }

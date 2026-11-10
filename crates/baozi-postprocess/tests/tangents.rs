@@ -632,6 +632,13 @@ fn precancelled_generation_returns_the_input_and_releases_resources() {
 
 #[test]
 fn tight_selected_work_budget_rejects_indexed_generation_before_output_allocation() {
+    // Keep the original protected failure work, then admit only a short tangent-read
+    // prefix after inline singleton selection, before a corner-sized output exists.
+    let protected = baozi_core::__scene_integration::integration::SceneEditBootstrap::
+        failure_terminal_work_requirement()
+        .unwrap();
+    let work_limit = protected.attempted_work_limit().checked_add(12).unwrap();
+    assert!(work_limit <= 150);
     let (scene, import_evidence) = import_fixture(Fixture::WorkLimit).into_parts();
     let input = primitive(&scene);
     let target = input.id();
@@ -658,14 +665,14 @@ fn tight_selected_work_budget_rejects_indexed_generation_before_output_allocatio
         baozi_postprocess::TrianglePreparationOptions {
             tangents: baozi_postprocess::TangentPolicy::Generate(vertex_options()),
             budgets: baozi_postprocess::PostProcessBudgets {
-                max_work_actions: 150,
+                max_work_actions: work_limit,
                 ..Default::default()
             },
             ..Default::default()
         },
         PostProcessControl::default(),
     )
-    .expect_err("the explicit 150-unit allowance cannot complete indexed generation");
+    .expect_err("the bounded allowance cannot complete indexed generation");
     assert_eq!(failure.input().generation(), generation);
     assert!(import_evidence.matches_scene(failure.input()));
     assert_eq!(non_tangent_fields(primitive(failure.input())), fields);
@@ -695,11 +702,11 @@ fn tight_selected_work_budget_rejects_indexed_generation_before_output_allocatio
         panic!("expected the actual tangent work admission failure, found {preparation:?}")
     };
     assert_eq!(*value, limit + 1);
-    assert!(*limit <= 150);
+    assert!(*limit <= work_limit);
     let resources = preparation.resources().unwrap();
     assert_eq!(resources.attempted_work_actions(), *value);
     assert!(resources.consumed_work_actions() <= *limit);
-    assert!(resources.consumed_work_actions() <= 150);
+    assert!(resources.consumed_work_actions() <= work_limit);
     assert!(resources.attempted_work_actions() >= resources.consumed_work_actions());
     assert!(resources.peak_staging_bytes() < 909_093 * std::mem::size_of::<[f32; 4]>() as u64);
     assert_eq!(resources.current_live_bytes(), 0);

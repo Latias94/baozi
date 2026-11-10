@@ -1,10 +1,8 @@
 use std::fmt;
 
 use baozi_core::{SceneLookupError, TopologyKind};
-use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
-use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
 use baozi_operation::{
-    ControlCause, PublishedStoreFallbackOutput, StorePrepareError, StoreRuntimeError,
+    ControlCause, PhysicalStorageAccount, PublishedStoreFallbackOutput, StoreRuntimeError,
 };
 use thiserror::Error;
 
@@ -38,11 +36,6 @@ pub enum TriangulationCause {
     },
     #[error("operation control stopped final publication")]
     FinalControl,
-    #[error("the same-account edit operation could not start: {source}")]
-    Start {
-        #[source]
-        source: RetainedStoreStartError,
-    },
     #[error("triangulation storage or work admission failed: {source}")]
     Runtime {
         #[source]
@@ -54,16 +47,6 @@ pub enum TriangulationCause {
     CentralValidation,
     #[error("the geometry edit could not acquire or bind its final generation")]
     Publication,
-    #[error("the geometry edit requires fail-closed containment: {source}")]
-    Containment {
-        #[source]
-        source: StoreActivationContainment,
-    },
-    #[error("final geometry-edit preparation requires containment: {source}")]
-    Preparation {
-        #[source]
-        source: StorePrepareError,
-    },
 }
 
 impl From<StoreRuntimeError> for TriangulationCause {
@@ -87,12 +70,14 @@ pub(crate) enum FailureOwner {
     None,
     Fallback {
         _owner: PublishedStoreFallbackOutput,
+        _terminal_account: PhysicalStorageAccount,
     },
 }
 
 /// A typed direct-operation error and the actual published terminal evidence, when available.
 ///
 /// Startup and fatal containment have no fabricated ordinary terminal resource snapshot.
+/// Invocation failures are returned by the outer run boundary with their original owner.
 pub struct TriangulationFailure {
     cause: TriangulationCause,
     resources: Option<PostProcessResourceEvidence>,
@@ -153,8 +138,8 @@ impl std::error::Error for TriangulationFailure {
     }
 }
 
-impl From<crate::scene_edit::EditFailure> for TriangulationFailure {
-    fn from(failure: crate::scene_edit::EditFailure) -> Self {
+impl From<crate::scene_edit::EditSemanticFailure> for TriangulationFailure {
+    fn from(failure: crate::scene_edit::EditSemanticFailure) -> Self {
         use crate::scene_edit::EditCause;
         let cause = match failure.cause {
             EditCause::Runtime { source } => TriangulationCause::Runtime { source },
@@ -166,8 +151,6 @@ impl From<crate::scene_edit::EditFailure> for TriangulationFailure {
             EditCause::SpaceIssue { .. } => TriangulationCause::CoreRejected,
             EditCause::CentralValidation => TriangulationCause::CentralValidation,
             EditCause::Publication => TriangulationCause::Publication,
-            EditCause::Containment { source } => TriangulationCause::Containment { source },
-            EditCause::Preparation { source } => TriangulationCause::Preparation { source },
         };
         Self {
             cause,

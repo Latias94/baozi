@@ -1,21 +1,14 @@
-use super::canonical_validation::{CanonicalValidationAttempt, CanonicalValidationFirstFault};
+use super::super::{RawStoreAssembly, StoreFallbackState, bind_resolved_success_failure};
+use super::central_driver::{
+    CentralFailureFacts, CentralPendingDecision, CentralValidationFacts, CentralValidationRequest,
+    drop_pending_central_decision, run_central_validation,
+};
 use super::final_state::CanonicalFinal;
+use super::payload_owner::PayloadValue as CentralValue;
 use super::*;
+use crate::retained::{RetainedClosureValidation, RetainedSuccessValidation};
 
-fn drop_validation_attempt<Proof, E>(
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-) -> Result<(), ()> {
-    match attempt {
-        Some(CanonicalValidationAttempt::Decision(decision)) => {
-            drop_validation_decision(Some(decision))
-        }
-        Some(CanonicalValidationAttempt::Runtime {
-            cause,
-            stable_code: _,
-        }) => drop_scoped_value(cause),
-        None => Ok(()),
-    }
-}
+pub(super) mod finite;
 
 type CentralValidationResult<
     'inv,
@@ -46,715 +39,328 @@ type CentralValidationResult<
     StoreActivationContainment,
 >;
 
-#[inline(never)]
-fn contain_central_validation_callback_drop<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-    L,
->(
-    validation: StoreControlledSuccessValidation<
-        'inv,
-        O,
-        PP,
-        U,
-        CanonicalKind,
-        CanonicalTag,
-        EvidenceKind,
-        EvidenceTag,
-        L,
-    >,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-) -> StoreActivationContainment
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let _ = drop_validation_attempt(attempt);
-    let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-    let cause = match validation {
-        StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause: _ } => {
-            assembly.contain_activation_fault()
-        }
-        StoreControlledSuccessValidation::FallbackOnly(fallback) => {
-            fallback.contain_activation_fault()
-        }
-        StoreControlledSuccessValidation::Valid(validated) => validated.contain_activation_fault(),
-        StoreControlledSuccessValidation::Rejected(failure)
-        | StoreControlledSuccessValidation::Interrupted { failure, cause: _ } => {
-            failure.contain_activation_fault()
-        }
-    };
-    StoreActivationContainment { cause }
-}
-
 // Keep mutually exclusive allocation-free terminal owners out of the active validator frame.
 // Windows test threads use a 2 MiB stack, so these phase boundaries are part of the API's
 // operational footprint rather than an optimization hint.
-#[inline(never)]
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn resolve_central_validation<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-    L,
->(
-    validation: StoreControlledSuccessValidation<
-        'inv,
-        O,
-        PP,
-        U,
-        CanonicalKind,
-        CanonicalTag,
-        EvidenceKind,
-        EvidenceTag,
-        L,
-    >,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    validation_first_fault: Option<CanonicalValidationFirstFault>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-    proof_slot: CanonicalProofSlot<'inv, Proof>,
-    validation_slots: CanonicalValidationSlots<'inv, E>,
-    fallback_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
-    failure_work: FailureEvidenceWorkBudget,
-    canonical_destination_dimension: StoreDimensionKey,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
+struct CentralValidationTransition<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let validation_contract_failed_first = matches!(
-        validation_first_fault.as_ref(),
-        Some(CanonicalValidationFirstFault::Contract)
-    );
-    match validation {
-        StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause: _ } => {
-            resolve_invalid_central_validation(assembly, attempt, output)
+    raw: Option<RawStoreAssembly<'host, O, PP, U>>,
+    state: StorePublicationState,
+    domain: Option<StoreDomainLoan<'host>>,
+    lineage: Option<L>,
+    output: Option<PayloadLoan<'host, T>>,
+    pending: Option<CentralPendingDecision<'host, T, Proof, E, CK, CT, EK, ET>>,
+}
+
+impl<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET, L>
+    CentralValidationTransition<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn new(
+        output: PayloadLoan<'host, T>,
+        assembly: RetainedStorePublicationAssembly<'host, O, PP, U, L>,
+    ) -> Self {
+        let RetainedStorePublicationAssembly {
+            raw,
+            state,
+            domain,
+            lineage,
+        } = assembly;
+        Self {
+            raw: Some(raw),
+            state,
+            domain: Some(domain),
+            lineage: Some(lineage),
+            output: Some(output),
+            pending: None,
         }
-        StoreControlledSuccessValidation::FallbackOnly(fallback) => {
-            resolve_fallback_central_validation(
-                fallback,
-                attempt,
-                validation_first_fault,
-                output,
-                fallback_slot,
-            )
+    }
+
+    fn contain(&mut self) -> Option<StoreActivationContainment> {
+        let recorded = match self.pending.take() {
+            Some(CentralPendingDecision::Contain { recorded }) => recorded,
+            pending => {
+                let _ = drop_pending_central_decision(pending);
+                None
+            }
+        };
+        let _ = drop_scoped_value(self.output.take());
+        let _ = drop_scoped_value(self.lineage.take());
+        self.raw.take().map(|raw| match recorded {
+            Some(recorded) => {
+                drop(raw);
+                recorded
+            }
+            None => StoreActivationContainment {
+                cause: raw.contain_activation_fault(),
+            },
+        })
+    }
+
+    fn into_containment(mut self) -> StoreActivationContainment {
+        self.contain()
+            .expect("the central transition retains its original storage")
+    }
+
+    #[inline(never)]
+    fn bind(
+        mut self,
+        failure_work: FailureEvidenceWorkBudget,
+        evidence_destination: StoreDimensionKey,
+    ) -> CentralValidationResult<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET> {
+        if drop_scoped_value(self.lineage.take()).is_err() {
+            return Err(self.into_containment());
         }
-        StoreControlledSuccessValidation::Valid(validated) => resolve_valid_central_validation(
-            validated,
-            attempt,
+        match self.pending.as_ref() {
+            Some(CentralPendingDecision::Candidate { .. }) => self.bind_candidate(failure_work),
+            Some(CentralPendingDecision::Rejected { .. }) => {
+                self.bind_rejected(failure_work, evidence_destination)
+            }
+            Some(CentralPendingDecision::Interrupted { .. }) => {
+                self.bind_interrupted(failure_work, evidence_destination)
+            }
+            Some(CentralPendingDecision::Fallback { .. }) => self.bind_fallback(),
+            Some(CentralPendingDecision::Contain { .. }) | None => Err(self.into_containment()),
+        }
+    }
+
+    #[inline(never)]
+    fn bind_candidate(
+        mut self,
+        failure_work: FailureEvidenceWorkBudget,
+    ) -> CentralValidationResult<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET> {
+        let Some(CentralPendingDecision::Candidate {
             output,
-            proof_slot,
-            failure_work,
-            canonical_destination_dimension,
-            outcome_evidence_destination_dimension,
-        ),
-        StoreControlledSuccessValidation::Rejected(failure) => match attempt {
-            Some(CanonicalValidationAttempt::Decision(CanonicalValidationDecision::Reject {
-                cause,
-                stable_code,
-            })) if !validation_contract_failed_first => resolve_trusted_central_rejection(
-                failure,
-                validation_slots.rejection,
-                StoreCanonicalRejection::Requested(cause),
-                stable_code,
-                output,
-                failure_work,
-                outcome_evidence_destination_dimension,
-            ),
-            Some(CanonicalValidationAttempt::Runtime { cause, stable_code })
-                if !validation_contract_failed_first =>
-            {
-                resolve_trusted_central_rejection(
-                    failure,
-                    validation_slots.rejection,
-                    StoreCanonicalRejection::Runtime(cause),
-                    stable_code,
-                    output,
-                    failure_work,
-                    outcome_evidence_destination_dimension,
-                )
-            }
-            attempt => resolve_contract_central_rejection(
-                failure,
-                validation_slots.rejection,
-                attempt,
-                output,
-                failure_work,
-                outcome_evidence_destination_dimension,
-            ),
-        },
-        StoreControlledSuccessValidation::Interrupted { failure, cause } => {
-            if validation_contract_failed_first {
-                resolve_contract_central_interruption(
-                    failure,
-                    validation_slots.rejection,
-                    cause,
-                    attempt,
-                    output,
-                    failure_work,
-                    outcome_evidence_destination_dimension,
-                )
-            } else {
-                resolve_trusted_central_interruption(
-                    failure,
-                    validation_slots.interruption,
-                    cause,
-                    attempt,
-                    output,
-                    failure_work,
-                    outcome_evidence_destination_dimension,
-                )
-            }
-        }
-    }
-}
-
-#[inline(never)]
-fn resolve_invalid_central_validation<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
-    L,
->(
-    assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let _ = drop_validation_attempt(attempt);
-    let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-    Err(StoreActivationContainment {
-        cause: assembly.contain_activation_fault(),
-    })
-}
-
-#[inline(never)]
-fn resolve_fallback_central_validation<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->(
-    fallback: StoreFallbackOnly<'inv, O, PP, U>,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    validation_first_fault: Option<CanonicalValidationFirstFault>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-    cause_slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let containment_required = fallback.activation_containment_required();
-    let decision_drop_failed = drop_validation_attempt(attempt).is_err();
-    let output_drop_failed = drop_scoped_value(ManuallyDrop::into_inner(output)).is_err();
-    if containment_required || decision_drop_failed || output_drop_failed {
-        return Err(StoreActivationContainment {
-            cause: fallback.contain_activation_fault(),
-        });
-    }
-    let cause = match validation_first_fault {
-        Some(CanonicalValidationFirstFault::Contract) => {
-            StoreRuntimeError::CanonicalValidationContractRejected
-        }
-        Some(CanonicalValidationFirstFault::Runtime(cause)) => cause.into_runtime(),
-        None => activation_product_graph_cause(),
-    };
-    PendingMinimalFallback::new(fallback, cause_slot, cause)
-        .map(CanonicalCentralValidationOutcome::Fallback)
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn resolve_valid_central_validation<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->(
-    validated: ValidatedStoreSuccess<
-        'inv,
-        O,
-        PP,
-        U,
-        CanonicalKind,
-        CanonicalTag,
-        EvidenceKind,
-        EvidenceTag,
-    >,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-    proof_slot: CanonicalProofSlot<'inv, Proof>,
-    failure_work: FailureEvidenceWorkBudget,
-    canonical_destination_dimension: StoreDimensionKey,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let Some(CanonicalValidationAttempt::Decision(CanonicalValidationDecision::Accept(proof))) =
-        attempt
-    else {
-        let _ = drop_validation_attempt(attempt);
-        let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-        return Err(StoreActivationContainment {
-            cause: validated.contain_activation_fault(),
-        });
-    };
-    let destinations = match ZeroCommitDestinationFacts::try_new(
-        canonical_destination_dimension,
-        validated.canonical_member_count(),
-        outcome_evidence_destination_dimension,
-        validated.outcome_evidence_member_count(),
-    ) {
-        Ok(destinations) => destinations,
-        Err(_) => {
-            let _ = drop_scoped_value(proof);
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-            return Err(StoreActivationContainment {
-                cause: validated.contain_activation_fault(),
-            });
-        }
-    };
-    let proof = match proof_slot.place(proof) {
-        Ok(proof) => proof,
-        Err(proof) => {
-            let _ = drop_scoped_value(proof);
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-            return Err(StoreActivationContainment {
-                cause: validated.contain_activation_fault(),
-            });
-        }
-    };
-    Ok(CanonicalCentralValidationOutcome::Candidate(
-        CanonicalCandidateStoreSession {
+            proof,
+            closure,
+            canonical_root,
+            evidence_root,
             destinations,
-            owner: PayloadOwner::new(
-                proof,
-                PayloadOwner::new(ManuallyDrop::into_inner(output), validated),
+        }) = self.pending.take()
+        else {
+            return Err(self.into_containment());
+        };
+        let mut output = CentralValue::new(output);
+        let mut proof = CentralValue::new(proof);
+        let raw = self
+            .raw
+            .take()
+            .expect("the central candidate retains its assembly");
+        let raw = match raw.bind_resolved_success(RetainedClosureValidation::Valid(closure)) {
+            RetainedSuccessValidation::Valid(raw) => raw,
+            RetainedSuccessValidation::Rejected(raw) => {
+                let _ = proof.dispose();
+                let _ = output.dispose();
+                return Err(StoreActivationContainment {
+                    cause: raw.contain_activation_fault(),
+                });
+            }
+            RetainedSuccessValidation::FallbackOnly(raw) => {
+                let _ = proof.dispose();
+                let _ = output.dispose();
+                return Err(StoreActivationContainment {
+                    cause: raw.contain_activation_fault(),
+                });
+            }
+        };
+        let storage = ValidatedStoreSuccess {
+            raw,
+            canonical_root,
+            evidence_root,
+            domain: self
+                .domain
+                .take()
+                .expect("the candidate retains its original domain"),
+        };
+        let output = PayloadOwner::new(
+            output
+                .value
+                .take()
+                .expect("the candidate retains its output permission"),
+            storage,
+        );
+        Ok(CanonicalCentralValidationOutcome::Candidate(
+            CanonicalCandidateStoreSession {
+                destinations,
+                owner: PayloadOwner::new(
+                    proof
+                        .value
+                        .take()
+                        .expect("the candidate retains its proof permission"),
+                    output,
+                ),
+                _failure_work: failure_work,
+            },
+        ))
+    }
+
+    #[inline(never)]
+    fn bind_failure<EvidenceKind, EvidenceTag>(
+        &mut self,
+        failure: CentralFailureFacts<EvidenceKind, EvidenceTag>,
+    ) -> StoreFailureAssembly<'host, O, PP, U, EvidenceKind, EvidenceTag> {
+        StoreFailureAssembly {
+            raw: bind_resolved_success_failure(
+                self.raw
+                    .take()
+                    .expect("the central failure retains its original assembly"),
+                failure.failure_cause,
             ),
-            _failure_work: failure_work,
-        },
-    ))
-}
+            state: std::mem::take(&mut self.state),
+            forced_cause: failure.forced_cause,
+            evidence_root: failure.evidence_root,
+            domain: self
+                .domain
+                .take()
+                .expect("the failure retains its original domain"),
+        }
+    }
 
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn resolve_trusted_central_rejection<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->(
-    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
-    cause: StoreCanonicalRejection<E>,
-    stable_code: u32,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-    failure_work: FailureEvidenceWorkBudget,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let failure = failure.with_forced_cause(PreparationFailureCode::domain(stable_code));
-    match failure.try_discard_canonical_for_activation() {
-        Ok(failure) => {
-            if drop_scoped_value(ManuallyDrop::into_inner(output)).is_err() {
-                let _ = drop_scoped_value(cause);
-                return Err(StoreActivationContainment {
-                    cause: failure.contain_activation_fault(),
-                });
-            }
-            let cause = match cause_slot.place(cause) {
-                Ok(cause) => cause,
-                Err(cause) => {
-                    let _ = drop_scoped_value(cause);
-                    return Err(StoreActivationContainment {
-                        cause: failure.contain_activation_fault(),
-                    });
-                }
-            };
-            Ok(CanonicalCentralValidationOutcome::Rejected(
-                CentrallyRejectedCanonicalStoreSession {
-                    root: RootedFailureEvidence {
-                        owner: PayloadOwner::new(cause, failure),
-                        failure_work,
-                        outcome_evidence_destination_dimension,
-                        _lifecycle: PhantomData::<OrdinaryFailureState>,
-                    },
+    #[inline(never)]
+    fn bind_rejected(
+        mut self,
+        failure_work: FailureEvidenceWorkBudget,
+        evidence_destination: StoreDimensionKey,
+    ) -> CentralValidationResult<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET> {
+        let Some(CentralPendingDecision::Rejected { cause, failure }) = self.pending.take() else {
+            return Err(self.into_containment());
+        };
+        let mut cause = CentralValue::new(cause);
+        let failure = self.bind_failure(failure);
+        Ok(CanonicalCentralValidationOutcome::Rejected(
+            CentrallyRejectedCanonicalStoreSession {
+                root: RootedFailureEvidence {
+                    owner: PayloadOwner::new(
+                        cause
+                            .value
+                            .take()
+                            .expect("the rejected candidate retains its cause"),
+                        failure,
+                    ),
+                    failure_work,
+                    outcome_evidence_destination_dimension: evidence_destination,
+                    _lifecycle: PhantomData::<OrdinaryFailureState>,
                 },
-            ))
-        }
-        Err(containment) => {
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-            let _ = drop_scoped_value(cause);
-            Err(StoreActivationContainment { cause: containment })
-        }
-    }
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn resolve_contract_central_rejection<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->(
-    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-    failure_work: FailureEvidenceWorkBudget,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let decision_drop_failed = drop_validation_attempt(attempt).is_err();
-    let failure = failure.with_forced_cause(PreparationFailureCode::product_graph(
-        CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE,
-    ));
-    let failure = match failure.try_discard_canonical_for_activation() {
-        Ok(failure) => failure,
-        Err(containment) => {
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-            return Err(StoreActivationContainment { cause: containment });
-        }
-    };
-    let output_drop_failed = drop_scoped_value(ManuallyDrop::into_inner(output)).is_err();
-    if decision_drop_failed || output_drop_failed {
-        return Err(StoreActivationContainment {
-            cause: failure.contain_activation_fault(),
-        });
-    }
-    let cause = match cause_slot.place(StoreCanonicalRejection::Runtime(
-        StoreRuntimeError::CanonicalValidationContractRejected,
-    )) {
-        Ok(cause) => cause,
-        Err(cause) => {
-            let _ = drop_scoped_value(cause);
-            return Err(StoreActivationContainment {
-                cause: failure.contain_activation_fault(),
-            });
-        }
-    };
-    Ok(CanonicalCentralValidationOutcome::Rejected(
-        CentrallyRejectedCanonicalStoreSession {
-            root: RootedFailureEvidence {
-                owner: PayloadOwner::new(cause, failure),
-                failure_work,
-                outcome_evidence_destination_dimension,
-                _lifecycle: PhantomData::<OrdinaryFailureState>,
             },
-        },
-    ))
-}
+        ))
+    }
 
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn resolve_contract_central_interruption<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->(
-    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-    cause_slot: CanonicalCauseSlot<'inv, StoreCanonicalRejection<E>>,
-    cause: StoreWorkError,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-    failure_work: FailureEvidenceWorkBudget,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let decision_drop_failed = drop_validation_attempt(attempt).is_err();
-    let cause_drop_failed = drop_scoped_value(cause).is_err();
-    if decision_drop_failed || cause_drop_failed {
-        let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-        return Err(StoreActivationContainment {
-            cause: failure.contain_activation_fault(),
-        });
-    }
-    let failure = failure.with_forced_cause(PreparationFailureCode::product_graph(
-        CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE,
-    ));
-    let failure = match failure.try_discard_canonical_for_activation() {
-        Ok(failure) => failure,
-        Err(containment) => {
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-            return Err(StoreActivationContainment { cause: containment });
-        }
-    };
-    if drop_scoped_value(ManuallyDrop::into_inner(output)).is_err() {
-        return Err(StoreActivationContainment {
-            cause: failure.contain_activation_fault(),
-        });
-    }
-    let cause = match cause_slot.place(StoreCanonicalRejection::Runtime(
-        StoreRuntimeError::CanonicalValidationContractRejected,
-    )) {
-        Ok(cause) => cause,
-        Err(cause) => {
-            let _ = drop_scoped_value(cause);
-            return Err(StoreActivationContainment {
-                cause: failure.contain_activation_fault(),
-            });
-        }
-    };
-    Ok(CanonicalCentralValidationOutcome::Rejected(
-        CentrallyRejectedCanonicalStoreSession {
-            root: RootedFailureEvidence {
-                owner: PayloadOwner::new(cause, failure),
-                failure_work,
-                outcome_evidence_destination_dimension,
-                _lifecycle: PhantomData::<OrdinaryFailureState>,
-            },
-        },
-    ))
-}
-
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn resolve_trusted_central_interruption<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->(
-    failure: StoreFailureAssembly<'inv, O, PP, U, EvidenceKind, EvidenceTag>,
-    cause_slot: CanonicalCauseSlot<'inv, StoreWorkError>,
-    cause: StoreWorkError,
-    attempt: Option<CanonicalValidationAttempt<Proof, E>>,
-    output: ManuallyDrop<PayloadLoan<'inv, T>>,
-    failure_work: FailureEvidenceWorkBudget,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-) -> CentralValidationResult<
-    'inv,
-    O,
-    PP,
-    U,
-    T,
-    Proof,
-    E,
-    CanonicalKind,
-    CanonicalTag,
-    EvidenceKind,
-    EvidenceTag,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    if drop_validation_attempt(attempt).is_err() {
-        let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-        return Err(StoreActivationContainment {
-            cause: failure.contain_activation_fault(),
-        });
-    }
-    match failure.try_discard_canonical_for_activation() {
-        Ok(failure) => {
-            if drop_scoped_value(ManuallyDrop::into_inner(output)).is_err() {
-                return Err(StoreActivationContainment {
-                    cause: failure.contain_activation_fault(),
-                });
-            }
-            let cause = match cause_slot.place(cause) {
-                Ok(cause) => cause,
-                Err(cause) => {
-                    let _ = drop_scoped_value(cause);
-                    return Err(StoreActivationContainment {
-                        cause: failure.contain_activation_fault(),
-                    });
-                }
-            };
-            Ok(CanonicalCentralValidationOutcome::Interrupted(
-                InterruptedCanonicalStoreSession {
-                    root: RootedFailureEvidence {
-                        owner: PayloadOwner::new(cause, failure),
-                        failure_work,
-                        outcome_evidence_destination_dimension,
-                        _lifecycle: PhantomData::<OrdinaryFailureState>,
-                    },
+    #[inline(never)]
+    fn bind_interrupted(
+        mut self,
+        failure_work: FailureEvidenceWorkBudget,
+        evidence_destination: StoreDimensionKey,
+    ) -> CentralValidationResult<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET> {
+        let Some(CentralPendingDecision::Interrupted { cause, failure }) = self.pending.take()
+        else {
+            return Err(self.into_containment());
+        };
+        let mut cause = CentralValue::new(cause);
+        let failure = self.bind_failure(failure);
+        Ok(CanonicalCentralValidationOutcome::Interrupted(
+            InterruptedCanonicalStoreSession {
+                root: RootedFailureEvidence {
+                    owner: PayloadOwner::new(
+                        cause
+                            .value
+                            .take()
+                            .expect("the interrupted candidate retains its cause"),
+                        failure,
+                    ),
+                    failure_work,
+                    outcome_evidence_destination_dimension: evidence_destination,
+                    _lifecycle: PhantomData::<OrdinaryFailureState>,
                 },
-            ))
-        }
-        Err(containment) => {
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-            Err(StoreActivationContainment { cause: containment })
-        }
+            },
+        ))
+    }
+
+    #[inline(never)]
+    fn bind_fallback(
+        mut self,
+    ) -> CentralValidationResult<'host, O, PP, U, T, Proof, E, CK, CT, EK, ET> {
+        let Some(CentralPendingDecision::Fallback {
+            cause,
+            code,
+            provenance,
+        }) = self.pending.take()
+        else {
+            return Err(self.into_containment());
+        };
+        let mut cause = CentralValue::new(cause);
+        let raw = self
+            .raw
+            .take()
+            .expect("the central fallback retains its original assembly");
+        let state = match provenance {
+            super::super::ordinary::StoreSuccessFallbackProvenance::EarlyAssemblyLatch => {
+                StoreFallbackState::Assembly { raw, cause: code }
+            }
+            super::super::ordinary::StoreSuccessFallbackProvenance::RawValidated {
+                activation_containment_required,
+            } => {
+                match raw.bind_resolved_success(RetainedClosureValidation::FallbackOnly {
+                    cause: code,
+                    activation_containment_required,
+                }) {
+                    RetainedSuccessValidation::FallbackOnly(raw) => {
+                        StoreFallbackState::Validated(raw)
+                    }
+                    RetainedSuccessValidation::Valid(raw) => {
+                        let _ = cause.dispose();
+                        return Err(StoreActivationContainment {
+                            cause: raw.contain_activation_fault(),
+                        });
+                    }
+                    RetainedSuccessValidation::Rejected(raw) => {
+                        let _ = cause.dispose();
+                        return Err(StoreActivationContainment {
+                            cause: raw.contain_activation_fault(),
+                        });
+                    }
+                }
+            }
+            super::super::ordinary::StoreSuccessFallbackProvenance::FailureUnverified => {
+                StoreFallbackState::FailureAssembly(bind_resolved_success_failure(raw, code))
+            }
+        };
+        let fallback = StoreFallbackOnly {
+            state,
+            domain: self
+                .domain
+                .take()
+                .expect("the fallback retains its original domain"),
+        };
+        Ok(CanonicalCentralValidationOutcome::Fallback(
+            PendingMinimalFallback {
+                owner: PayloadOwner::new(
+                    cause
+                        .value
+                        .take()
+                        .expect("the central fallback retains its cause permission"),
+                    fallback,
+                ),
+            },
+        ))
+    }
+}
+
+impl<O, PP, U, T, Proof, E, CK, CT, EK, ET, L> Drop
+    for CentralValidationTransition<'_, O, PP, U, T, Proof, E, CK, CT, EK, ET, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        let _ = self.contain();
     }
 }
 
@@ -770,7 +376,7 @@ where
     }
 
     pub fn canonical_len(&self) -> usize {
-        self.owner.storage().canonical_len()
+        self.owner.storage().raw.loan().canonical_len()
     }
 
     /// Consumes the candidate through the operation-owned evidence and validation seam.
@@ -782,17 +388,20 @@ where
     /// unprepared so callers can end borrowed input lifetimes and release charged scratch first.
     /// Any invalid root, ignored control fault, panic, or uncertain cleanup is quarantined instead
     /// of becoming a fallback result.
+    #[inline(never)]
     #[allow(clippy::type_complexity, clippy::result_large_err)]
     pub fn validate_centrally<EvidenceKind, EvidenceTag, Proof, E>(
         self,
-        mut proof_slot: CanonicalProofSlot<'inv, Proof>,
+        proof_slot: CanonicalProofSlot<'inv, Proof>,
         validation_slots: CanonicalValidationSlots<'inv, E>,
         progress: CanonicalValidationProgress<PP, U>,
-        build_evidence: impl for<'lane> FnMut(
-            &mut CanonicalOutcomeEvidenceLane<'inv, 'lane, O, PP, U, L>,
+        build_evidence: impl for<'borrow, 'lane> FnMut(
+            &mut CanonicalOutcomeEvidenceLane<'borrow, 'lane, O, PP, U, L>,
             &T,
-        )
-            -> OutcomeEvidenceDecision<EvidenceKind, EvidenceTag>,
+        ) -> OutcomeEvidenceDecision<
+            EvidenceKind,
+            EvidenceTag,
+        >,
         validate: impl for<'session, 'storage, 'scope, 'operation> FnMut(
             CanonicalValidationPlanning<
                 'session,
@@ -832,8 +441,6 @@ where
         CanonicalTag: Copy + Send + Sync + 'static,
         EvidenceTag: Copy + Send + Sync + 'static,
     {
-        let mut build_evidence = ManuallyDrop::new(Some(build_evidence));
-        let mut validate = ManuallyDrop::new(Some(validate));
         let Self {
             owner,
             canonical_root,
@@ -846,146 +453,50 @@ where
             validation_work,
         } = self;
         let (output, assembly) = owner.into_parts();
-        let fallback_slot = if proof_slot.is_vacant_for(output.identity())
-            && validation_slots.is_vacant_for(output.identity())
-        {
-            proof_slot.take_fallback_slot()
-        } else {
-            None
-        };
-        let Some(fallback_slot) = fallback_slot else {
-            let _ = drop_optional_callback(build_evidence);
-            let _ = drop_optional_callback(validate);
-            let _ = drop_scoped_value(output);
-            return Err(StoreActivationContainment {
-                cause: assembly.contain_activation_fault(),
-            });
-        };
-        let output = ManuallyDrop::new(output);
-        let mut assembly = assembly;
+        let mut transition = CentralValidationTransition::new(output, assembly);
         let mut failure_work = failure_work;
-        let work_dimension = validation_work_dimension;
-        let mut evidence_fault = None;
-        let evidence = catch_unwind(AssertUnwindSafe(|| {
-            let mut lane = CanonicalOutcomeEvidenceLane {
-                assembly: &mut assembly,
-                first_fault: &mut evidence_fault,
-                failure_work: &mut failure_work,
-                work_dimension,
-            };
-            let build_evidence = build_evidence
+        let publication: StorePublicationLoan<'_, O, PP, U, L> = StorePublicationLoan {
+            raw: transition
+                .raw
                 .as_mut()
-                .expect("the outcome-evidence callback is executed at most once");
-            build_evidence(&mut lane, &*output)
-        }));
-        let build_drop_failed = drop_optional_callback(build_evidence).is_err();
-        let evidence = match evidence {
-            Ok(evidence) if !build_drop_failed => evidence,
-            Ok(evidence) => {
-                let _ = drop_scoped_value(evidence);
-                let _ = drop_optional_callback(validate);
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-                return Err(StoreActivationContainment {
-                    cause: assembly.contain_activation_fault(),
-                });
-            }
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                let _ = drop_optional_callback(validate);
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-                return Err(StoreActivationContainment {
-                    cause: assembly.contain_activation_fault(),
-                });
-            }
+                .expect("the central transition retains its assembly")
+                .loan_mut()
+                .borrow_ordinary(),
+            domain: transition
+                .domain
+                .as_ref()
+                .expect("the central transition retains its original domain"),
+            state: &mut transition.state,
+            lineage: PhantomData,
         };
-        let evidence_root = match (evidence_fault, evidence) {
-            (Some(fault), OutcomeEvidenceDecision::Abort) if !fault.contract_seen => {
-                let validate_drop_failed = drop_optional_callback(validate).is_err();
-                let output_drop_failed =
-                    drop_scoped_value(ManuallyDrop::into_inner(output)).is_err();
-                if validate_drop_failed || output_drop_failed {
-                    return Err(StoreActivationContainment {
-                        cause: assembly.contain_activation_fault(),
-                    });
-                }
-                let Some(failure_code) = fault.recoverable_code() else {
-                    return Err(StoreActivationContainment {
-                        cause: assembly.contain_activation_fault(),
-                    });
-                };
-                return defer_assembly_minimal(assembly, fallback_slot, fault.cause, failure_code)
-                    .map(CanonicalCentralValidationOutcome::Fallback);
-            }
-            (Some(_), _) | (None, OutcomeEvidenceDecision::Abort) => {
-                let _ = drop_optional_callback(validate);
-                let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-                return Err(StoreActivationContainment {
-                    cause: assembly.contain_activation_fault(),
-                });
-            }
-            (None, OutcomeEvidenceDecision::Complete(root)) => root,
-        };
-        if assembly.is_fallback_only() {
-            let _ = drop_optional_callback(validate);
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(output));
-            return Err(StoreActivationContainment {
-                cause: assembly.contain_activation_fault(),
-            });
-        }
-
-        assembly.report_progress(
-            progress.phase(),
-            progress.unit(),
-            0,
-            Some(validation_work.get()),
-        );
-
-        let mut attempt = None;
-        let mut exact = None;
-        let mut validation_first_fault = None;
-        let validation = assembly.validate_success_controlled(
-            work_dimension,
-            validation_scratch_dimension,
-            canonical_root,
-            evidence_root,
-            |session, canonical, evidence, control| {
-                let validate = validate
-                    .as_mut()
-                    .expect("the central validation callback is executed at most once");
-                let planning = CanonicalValidationPlanning::new(
-                    StoreValidationSession {
-                        raw: &mut *session.raw,
+        let completed = run_central_validation(
+            publication,
+            &mut transition.output,
+            CentralValidationRequest {
+                proof_slot,
+                validation_slots,
+                facts: CentralValidationFacts {
+                    canonical_root,
+                    validation: ScopedActivationValidation {
+                        phase: validation_phase,
+                        work_dimension: validation_work_dimension,
+                        scratch_dimension: validation_scratch_dimension,
+                        canonical_destination: canonical_destination_dimension,
+                        work: validation_work,
                     },
-                    control,
-                    validation_phase,
-                    validation_work,
-                    CanonicalValidationMember::from_store(canonical),
-                    OutcomeEvidenceValidationMember::from_store(evidence),
-                    &mut validation_first_fault,
-                    &mut attempt,
-                    &mut exact,
-                );
-                validate(planning, &*output)?;
-                Ok(exact.unwrap_or(false))
+                    evidence_destination: outcome_evidence_destination_dimension,
+                },
+                progress,
             },
+            &mut failure_work,
+            &mut transition.pending,
+            build_evidence,
+            validate,
         );
-        if drop_optional_callback(validate).is_err() {
-            return Err(contain_central_validation_callback_drop(
-                validation, attempt, output,
-            ));
+        if !completed {
+            return Err(transition.into_containment());
         }
-        resolve_central_validation(
-            validation,
-            attempt,
-            validation_first_fault,
-            output,
-            proof_slot,
-            validation_slots,
-            fallback_slot,
-            failure_work,
-            canonical_destination_dimension,
-            outcome_evidence_destination_dimension,
-        )
+        transition.bind(failure_work, outcome_evidence_destination_dimension)
     }
 }
 
@@ -1138,118 +649,12 @@ where
         >,
         StoreActivationContainment,
     > {
-        let CanonicalCandidateStoreSession {
-            destinations,
-            owner,
-            _failure_work: failure_work,
-        } = self.state;
-        let (proof, output_owner) = owner.into_parts();
-        let (output, validated) = output_owner.into_parts();
-        if !interruption_slot.is_vacant_for(output.identity()) {
-            let _ = drop_scoped_value(proof);
-            let _ = drop_scoped_value(output);
-            return Err(StoreActivationContainment {
-                cause: validated.contain_activation_fault(),
-            });
-        }
-        let ZeroCommitDestinationFacts {
-            _canonical_dimension: canonical_dimension,
-            canonical_members,
-            _outcome_evidence_dimension: outcome_evidence_dimension,
-            outcome_evidence_members,
-        } = destinations;
-        let issued = match validated.try_issue_freeze_permit(
-            canonical_dimension,
-            outcome_evidence_dimension,
-            final_progress,
-        ) {
-            Ok(issued) => issued,
-            Err(cause) => {
-                let _ = drop_scoped_value(proof);
-                let _ = drop_scoped_value(output);
-                return Err(StoreActivationContainment { cause });
-            }
-        };
-        match issued {
-            StoreSuccessFreezePermitIssue::Ready(store) => {
-                output.freeze_order();
-                Ok(CanonicalFreezePermitIssue::Ready(CanonicalFreezePermit {
-                    owner: PayloadOwner::new(output, PayloadOwner::new(proof, store)),
-                    failure_work,
-                    destinations: ZeroCommitDestinationFacts {
-                        _canonical_dimension: canonical_dimension,
-                        canonical_members,
-                        _outcome_evidence_dimension: outcome_evidence_dimension,
-                        outcome_evidence_members,
-                    },
-                }))
-            }
-            StoreSuccessFreezePermitIssue::RichFailure {
-                failure,
-                cause,
-                control_cause,
-            } => {
-                let proof_drop_failed = drop_scoped_value(proof).is_err();
-                let output_drop_failed = drop_scoped_value(output).is_err();
-                if proof_drop_failed || output_drop_failed {
-                    return Err(StoreActivationContainment {
-                        cause: failure.contain_activation_fault(),
-                    });
-                }
-                let cause = match interruption_slot.place(
-                    CanonicalFreezeInterruption::from_failure_code(cause, control_cause),
-                ) {
-                    Ok(cause) => cause,
-                    Err(cause) => {
-                        let _ = drop_scoped_value(cause);
-                        return Err(StoreActivationContainment {
-                            cause: failure.contain_activation_fault(),
-                        });
-                    }
-                };
-                Ok(CanonicalFreezePermitIssue::Interrupted(
-                    RootedFailureEvidence {
-                        owner: PayloadOwner::new(cause, failure),
-                        failure_work,
-                        outcome_evidence_destination_dimension: outcome_evidence_dimension,
-                        _lifecycle: PhantomData::<FrozenFailureState>,
-                    },
-                ))
-            }
-            StoreSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
-                let proof_drop_failed = drop_scoped_value(proof).is_err();
-                let output_drop_failed = drop_scoped_value(output).is_err();
-                if proof_drop_failed || output_drop_failed {
-                    return Err(StoreActivationContainment {
-                        cause: failure.contain_activation_fault(),
-                    });
-                }
-                let cause = match interruption_slot
-                    .place(CanonicalFreezeInterruption::from_failure_code(cause, None))
-                {
-                    Ok(cause) => cause,
-                    Err(cause) => {
-                        let _ = drop_scoped_value(cause);
-                        return Err(StoreActivationContainment {
-                            cause: failure.contain_activation_fault(),
-                        });
-                    }
-                };
-                Ok(CanonicalFreezePermitIssue::DestinationRejected(
-                    RootedFailureEvidence {
-                        owner: PayloadOwner::new(cause, failure),
-                        failure_work,
-                        outcome_evidence_destination_dimension: outcome_evidence_dimension,
-                        _lifecycle: PhantomData::<OrdinaryFailureState>,
-                    },
-                ))
-            }
-        }
+        super::dynamic_freeze::issue_dynamic(self.state, interruption_slot, final_progress)
     }
 }
 
 impl CanonicalFreezeInterruption {
-    fn from_failure_code(
+    pub(super) fn from_failure_code(
         cause: PreparationFailureCode,
         control_cause: Option<ControlCause>,
     ) -> Self {
@@ -1323,8 +728,11 @@ where
         } = self;
         let (output, proof_owner) = owner.into_parts();
         let (proof, store) = proof_owner.into_parts();
-        let _ = drop_scoped_value(output);
-        let _ = drop_scoped_value(proof);
+        let _ = super::freeze_driver::dispose_pair(
+            &mut Some(output),
+            &mut Some(proof),
+            payload_owner::PayloadOrder::OutputBeforeProof,
+        );
         StoreActivationContainment {
             cause: store.contain_activation_fault(),
         }
@@ -1342,10 +750,7 @@ where
         if rejection_slot.is_vacant_for(self.owner.value().identity()) {
             Ok((self, inputs))
         } else {
-            let (generation, reject, prepare) = inputs;
-            let _ = drop_scoped_value(generation);
-            let _ = drop_scoped_value(reject);
-            let _ = drop_scoped_value(prepare);
+            super::freeze_driver::dispose_generation_inputs(inputs);
             Err(self.contain_generation_fault())
         }
     }
@@ -1381,12 +786,7 @@ where
             .storage()
             .terminal_observation(self.destinations._outcome_evidence_dimension)
             .expect("the sealed outcome-evidence destination remains registered");
-        [canonical, evidence].into_iter().all(|snapshot| {
-            snapshot.pending_publication() == 0
-                && snapshot.committed() == 0
-                && snapshot.committed_canonical_output() == 0
-                && snapshot.published_outcome_evidence() == 0
-        })
+        super::freeze_driver::destinations_are_zero(canonical, evidence)
     }
 
     #[allow(
@@ -1422,22 +822,29 @@ where
         let (proof, store) = proof_owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         if !rejection_slot.is_vacant_for(output.identity()) {
-            let _ = drop_scoped_value(proof);
-            let _ = drop_scoped_value(output);
+            let _ = super::freeze_driver::dispose_pair(
+                &mut Some(output),
+                &mut Some(proof),
+                payload_owner::PayloadOrder::ProofBeforeOutput,
+            );
             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
             return Err(StoreActivationContainment {
                 cause: store.contain_activation_fault(),
             });
         }
-        let proof_drop_failed = drop_scoped_value(proof).is_err();
-        let output_drop_failed = drop_scoped_value(output).is_err();
-        if proof_drop_failed || output_drop_failed {
+        if super::freeze_driver::dispose_pair(
+            &mut Some(output),
+            &mut Some(proof),
+            payload_owner::PayloadOrder::ProofBeforeOutput,
+        )
+        .is_err()
+        {
             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
             return Err(StoreActivationContainment {
                 cause: store.contain_activation_fault(),
             });
         }
-        let failure = match store.reject_generation(stable_code) {
+        let failure = match store.reject_frozen_generation(stable_code) {
             Ok(failure) => failure,
             Err(containment) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1505,10 +912,7 @@ where
                 _failure_work: failure_work,
                 _destinations: destinations,
                 joint: PhantomData,
-                owner: PayloadOwner::new(
-                    output,
-                    PayloadOwner::new(proof, store.into_contribution()),
-                ),
+                owner: PayloadOwner::new(output, PayloadOwner::new(proof, store)),
             },
             CanonicalJointSeal { joint: PhantomData },
         )
@@ -1556,7 +960,7 @@ where
         let (output, proof_owner) = owner.into_parts();
         let (proof, store) = proof_owner.into_parts();
         let payloads = PayloadPair::new(output, proof);
-        let store = match store.try_prepare() {
+        let store = match store.try_prepare_frozen() {
             Ok(store) => store,
             Err(cause) => {
                 let _ = drop_scoped_value(payloads);
@@ -1676,7 +1080,7 @@ where
             FailureEvidenceMember<'session, EvidenceKind, EvidenceTag>,
         ) -> bool,
     ) -> Result<
-        RootedFailureValidation<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
+        DynamicRootedFailureValidation<'inv, O, PP, U, StoreWorkError, EvidenceKind, EvidenceTag>,
         StoreActivationContainment,
     >
     where
@@ -1718,7 +1122,7 @@ fn recover_canonical_evidence_build<T>(
     }
 }
 
-impl<'inv, 'lane, O, PP, U, L> CanonicalOutcomeEvidenceLane<'inv, 'lane, O, PP, U, L>
+impl<'op, 'lane, O, PP, U, L> CanonicalOutcomeEvidenceLane<'op, 'lane, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1731,7 +1135,7 @@ where
         match (*self.failure_work).with_existing_member_validation(amount) {
             Ok(qualified) => Ok(qualified),
             Err(cause) => {
-                self.assembly
+                self.publication
                     .reject_failure_terminal_work_envelope(FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE);
                 Err(cause)
             }
@@ -1781,7 +1185,7 @@ where
         } = member;
         let mut controlled_failure = None;
         let result = self
-            .assembly
+            .publication
             .try_retain_success_outcome_evidence_controlled(
                 self.work_dimension,
                 allocation,

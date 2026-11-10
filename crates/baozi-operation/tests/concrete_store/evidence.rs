@@ -48,7 +48,7 @@ fn minimal_fallback_keeps_two_by_two_terminal_evidence_after_producer_unload() {
         failure_terminal_work,
     );
     let mut invocation_root = TestInvocationRoot::new();
-    let operation = TestOperation::try_start(
+    let mut operation = TestOperation::try_start(
         &mut invocation_root,
         OperationControl::default(),
         ledger_plan,

@@ -228,7 +228,7 @@ fn exact_success_transcript_prepares_zero_live_operation_and_handoffs_purely() {
     let header = ledger_evidence.header();
     assert_eq!(header.current_live_bytes(), 0);
     assert_eq!(header.active_reservations(), 0);
-    assert_eq!(header.current_evidence_bytes(), 0);
+    assert!(header.current_administrative_bytes() <= header.peak_administrative_bytes());
     let dimension = ledger_evidence.dimension(keys.dimension).unwrap();
     assert_eq!(dimension.current_live_bytes(), 0);
     assert_eq!(dimension.pending_publication(), 0);

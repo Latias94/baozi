@@ -73,8 +73,708 @@ fn limits() -> LedgerLimits<Dimension> {
 
 const COMPLETE_PHASES: &[Phase] = &[Phase::Build, Phase::Finalize, Phase::Unknown];
 
+struct NumericTerminalTestRoot<P, D>
+where
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    invocation: crate::retained::InvocationRoot<Owner, P, Progress, Unit, D, (), (), ()>,
+    baseline: Option<FallbackBatchBaseline<Owner, P, D>>,
+    canonical_source: Option<AttributionReservationBatch<Owner, P, D, CanonicalOutput>>,
+    evidence_source: Option<AttributionReservationBatch<Owner, P, D, OutcomeEvidenceDestination>>,
+}
+
+impl<P, D> NumericTerminalTestRoot<P, D>
+where
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    fn new() -> Self {
+        Self {
+            invocation: crate::retained::InvocationRoot::new(),
+            baseline: None,
+            canonical_source: None,
+            evidence_source: None,
+        }
+    }
+
+    fn install_ledger_for_test(&mut self, ledger: Ledger<Owner, P, D>) {
+        self.invocation.install_ledger_for_test(ledger);
+    }
+
+    fn fallback_proof(
+        &mut self,
+        mut baseline: FallbackBatchBaseline<Owner, P, D>,
+        canonical_source: Option<AttributionReservationBatch<Owner, P, D, CanonicalOutput>>,
+        evidence_source: Option<
+            AttributionReservationBatch<Owner, P, D, OutcomeEvidenceDestination>,
+        >,
+    ) -> TypedFreezeProof<'_, Owner, P, Progress, Unit, D> {
+        assert!(self.baseline.is_none());
+        assert!(baseline.try_prepare_fallback_sources().is_ok());
+        self.baseline = Some(baseline);
+        self.canonical_source = canonical_source;
+        self.evidence_source = evidence_source;
+        self.baseline
+            .as_mut()
+            .expect("the fixture owns the prepared fallback baseline")
+            .view()
+            .finish_prepared_fallback_proof(
+                self.invocation.terminal_loan_for_test(),
+                self.canonical_source.as_mut(),
+                self.evidence_source.as_mut(),
+            )
+    }
+
+    fn primary_proof(
+        &mut self,
+        baseline: FallbackBatchBaseline<Owner, P, D>,
+        canonical_source: Option<AttributionReservationBatch<Owner, P, D, CanonicalOutput>>,
+        evidence_source: Option<
+            AttributionReservationBatch<Owner, P, D, OutcomeEvidenceDestination>,
+        >,
+        publish_canonical: bool,
+    ) -> TypedFreezeProof<'_, Owner, P, Progress, Unit, D> {
+        assert!(self.baseline.is_none());
+        self.baseline = Some(baseline);
+        self.canonical_source = canonical_source;
+        self.evidence_source = evidence_source;
+        self.borrow_primary_proof(publish_canonical)
+    }
+
+    fn borrow_primary_proof(
+        &mut self,
+        publish_canonical: bool,
+    ) -> TypedFreezeProof<'_, Owner, P, Progress, Unit, D> {
+        self.invocation
+            .terminal_loan_for_test()
+            .finish_bound_primary(
+                self.baseline
+                    .as_mut()
+                    .expect("the fixture owns the bound primary baseline")
+                    .view(),
+                self.canonical_source.as_mut(),
+                self.evidence_source.as_mut(),
+                publish_canonical,
+            )
+    }
+
+    fn fallback_batches(&mut self) -> TypedTerminalBatches<'_, Owner, P, D> {
+        let baseline = self
+            .baseline
+            .as_mut()
+            .expect("the fixture owns the prepared fallback baseline");
+        TypedTerminalBatches {
+            canonical: &mut baseline.canonical_assembly,
+            evidence: &mut baseline.evidence_assembly,
+            deferred_canonical_storage: None,
+            deferred_evidence_storage_first: Some(&mut baseline.evidence),
+            deferred_evidence_storage_second: Some(&mut baseline.fallback),
+            discard_canonical: self.canonical_source.as_mut(),
+            discard_evidence: self.evidence_source.as_mut(),
+        }
+    }
+
+    fn primary_batches(
+        &mut self,
+        publish_canonical: bool,
+    ) -> TypedTerminalBatches<'_, Owner, P, D> {
+        let baseline = self
+            .baseline
+            .as_mut()
+            .expect("the fixture owns the bound primary baseline");
+        TypedTerminalBatches {
+            canonical: &mut baseline.canonical_assembly,
+            evidence: &mut baseline.evidence_assembly,
+            deferred_canonical_storage: if publish_canonical {
+                self.canonical_source.as_mut()
+            } else {
+                None
+            },
+            deferred_evidence_storage_first: Some(&mut baseline.evidence),
+            deferred_evidence_storage_second: self.evidence_source.as_mut(),
+            discard_canonical: None,
+            discard_evidence: None,
+        }
+    }
+}
+
+impl<P, D> Drop for NumericTerminalTestRoot<P, D>
+where
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.invocation.cleanup_owned_state();
+        if self.invocation.must_retain_domain() {
+            std::mem::forget(self.baseline.take());
+            std::mem::forget(self.canonical_source.take());
+            std::mem::forget(self.evidence_source.take());
+        }
+    }
+}
+
+type TerminalTestRoot = NumericTerminalTestRoot<Phase, Dimension>;
+
+fn root_for_ledger<P, D>(ledger: Ledger<Owner, P, D>) -> NumericTerminalTestRoot<P, D>
+where
+    P: Copy + Ord,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+{
+    let mut root = NumericTerminalTestRoot::new();
+    root.install_ledger_for_test(ledger);
+    root
+}
+
 fn test_ledger(limits: LedgerLimits<Dimension>) -> Ledger<Owner, Phase, Dimension> {
     Ledger::try_new(limits, COMPLETE_PHASES).expect("complete test phase catalog")
+}
+
+fn storage_backings<P, D>(storage: &DynamicStorage<P, D>) -> [(usize, usize, usize); 5] {
+    let state = storage.read();
+    [
+        (
+            state.dimensions.as_ptr() as usize,
+            state.dimensions.len(),
+            state.dimensions.capacity(),
+        ),
+        (
+            state.phases.as_ptr() as usize,
+            state.phases.len(),
+            state.phases.capacity(),
+        ),
+        (
+            state.phase_states.as_ptr() as usize,
+            state.phase_states.len(),
+            state.phase_states.capacity(),
+        ),
+        (
+            state.dimension_snapshot_staging.as_ptr() as usize,
+            state.dimension_snapshot_staging.len(),
+            state.dimension_snapshot_staging.capacity(),
+        ),
+        (
+            state.phase_snapshot_staging.as_ptr() as usize,
+            state.phase_snapshot_staging.len(),
+            state.phase_snapshot_staging.capacity(),
+        ),
+    ]
+}
+
+#[test]
+fn ledger_owner_identities_stop_at_exhaustion_without_reuse() {
+    let sequence = std::sync::atomic::AtomicU64::new(u64::MAX - 1);
+    let last = LedgerIdentity::try_next(&sequence).expect("the final fresh identity is available");
+    assert_eq!(sequence.load(Ordering::Relaxed), u64::MAX);
+    assert_eq!(LedgerIdentity::try_next(&sequence), None);
+    assert_eq!(LedgerIdentity::try_next(&sequence), None);
+    assert_eq!(sequence.load(Ordering::Relaxed), u64::MAX);
+
+    let ordinary = std::sync::atomic::AtomicU64::new(1);
+    let first = LedgerIdentity::try_next(&ordinary).unwrap();
+    let second = LedgerIdentity::try_next(&ordinary).unwrap();
+    assert_ne!(first, second);
+    assert_ne!(second, last);
+}
+
+#[test]
+fn tokenless_attribution_shell_keeps_its_inline_owner_under_an_exact_budget() {
+    let mut ledger = test_ledger(typed_limits());
+    let before = ledger.state.read().current_administrative_bytes;
+    ledger.state.write().evidence_byte_limit = before;
+    let backings = storage_backings(&ledger.state);
+    let identity = ledger.identity;
+    let mut batch = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap_or_else(|_| panic!("a tokenless shell requires no shared payload"));
+    let ledger = std::hint::black_box(ledger);
+
+    assert_eq!(ledger.identity, identity);
+    assert!(matches!(ledger.state, DynamicStorage::Inline(Some(_))));
+    assert!(batch.validate_selected_owner(&ledger));
+    assert_eq!(storage_backings(&ledger.state), backings);
+    assert_eq!(ledger.state.read().current_administrative_bytes, before);
+    assert_eq!(ledger.state.read().active_reservations, 0);
+    assert!(matches!(
+        ledger.try_push_commitment(&mut batch, OutputCommitment::new(Dimension::Bytes, 1)),
+        Err(CommitmentPushError::BatchFull(_))
+    ));
+
+    let foreign = test_ledger(typed_limits());
+    assert_ne!(ledger.identity, foreign.identity);
+    assert!(!batch.validate_selected_owner(&foreign));
+    assert!(matches!(
+        foreign.try_push_commitment(&mut batch, OutputCommitment::new(Dimension::Bytes, 1)),
+        Err(CommitmentPushError::Ledger {
+            cause: LedgerCause::OwnerMismatch,
+            ..
+        })
+    ));
+    assert!(matches!(foreign.state, DynamicStorage::Inline(Some(_))));
+}
+
+#[test]
+fn tokenless_empty_baseline_rejects_a_foreign_inline_ledger() {
+    let mut owner = test_ledger(typed_limits());
+    let foreign = test_ledger(typed_limits());
+    let canonical = owner
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap_or_else(|_| panic!("canonical shell"));
+    let assembly = owner
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap_or_else(|_| panic!("evidence assembly shell"));
+    let fallback = owner
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap_or_else(|_| panic!("fallback shell"));
+    let evidence = owner
+        .try_attribution_batch::<OutcomeEvidenceDestination>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap_or_else(|_| panic!("evidence shell"));
+    let mut baseline = FallbackBatchBaseline::new_unbound(canonical, assembly, fallback, evidence);
+    assert_eq!(
+        foreign.try_attach_fallback_baseline(&mut baseline),
+        Err(LedgerCause::OwnerMismatch)
+    );
+    owner.try_attach_fallback_baseline(&mut baseline).unwrap();
+    assert!(matches!(owner.state, DynamicStorage::Inline(Some(_))));
+    assert!(matches!(foreign.state, DynamicStorage::Inline(Some(_))));
+}
+
+#[test]
+fn zero_byte_tokens_admit_one_shared_payload_and_keep_the_empty_shell_identity() {
+    let mut ledger = test_ledger(typed_limits());
+    let shell = ledger
+        .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 0)
+        .unwrap_or_else(|_| panic!("tokenless shell"));
+    let before = ledger.state.read().current_administrative_bytes;
+    let backings = storage_backings(&ledger.state);
+    let shared_bytes = size_of::<Mutex<Option<LedgerState<Phase, Dimension>>>>() as u64;
+    ledger.state.write().evidence_byte_limit = before + shared_bytes - 1;
+    assert_eq!(
+        ledger
+            .reserve(Phase::Build, Dimension::Bytes, 0)
+            .unwrap_err(),
+        LedgerCause::Evidence {
+            cause: LedgerEvidenceError::LimitExceeded {
+                purpose: LedgerEvidencePurpose::SharedStorage,
+                value: before + shared_bytes,
+                limit: before + shared_bytes - 1,
+            },
+        }
+    );
+    assert!(matches!(ledger.state, DynamicStorage::Inline(Some(_))));
+    assert_eq!(storage_backings(&ledger.state), backings);
+    assert_eq!(ledger.state.read().current_administrative_bytes, before);
+    assert_eq!(ledger.state.read().active_reservations, 0);
+
+    ledger.state.write().evidence_byte_limit = before + shared_bytes;
+    let first = ledger.reserve(Phase::Build, Dimension::Bytes, 0).unwrap();
+    assert_eq!(ledger.state.read().active_reservations, 1);
+    let second = ledger.reserve(Phase::Build, Dimension::Bytes, 0).unwrap();
+    assert!(Arc::ptr_eq(
+        first.core.owner.as_ref().unwrap(),
+        second.core.owner.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        ledger.state.shared().unwrap(),
+        first.core.owner.as_ref().unwrap()
+    ));
+    assert!(shell.validate_selected_owner(&ledger));
+    assert_eq!(storage_backings(&ledger.state), backings);
+    assert_eq!(ledger.state.read().current_live_bytes, 0);
+    assert_eq!(ledger.state.read().active_reservations, 2);
+    assert_eq!(
+        ledger.state.read().current_administrative_bytes,
+        before + shared_bytes
+    );
+    drop((first, second));
+    assert_eq!(ledger.state.read().active_reservations, 0);
+    assert_eq!(
+        ledger.state.read().current_administrative_bytes,
+        before + shared_bytes
+    );
+}
+
+#[test]
+fn empty_transition_preserves_literal_causes_and_never_promotes_inline_storage() {
+    let cases = [
+        (Phase::Build, Dimension::Bytes, 0, Ok(())),
+        (
+            Phase::Unknown,
+            Dimension::Bytes,
+            0,
+            Err(LedgerCause::UnknownPhase),
+        ),
+        (
+            Phase::Build,
+            Dimension::Unknown,
+            0,
+            Err(LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            }),
+        ),
+        (
+            Phase::Unknown,
+            Dimension::Records,
+            0,
+            Err(LedgerCause::DimensionNotReservable {
+                dimension: Dimension::Records,
+            }),
+        ),
+        (
+            Phase::Unknown,
+            Dimension::Unknown,
+            1,
+            Err(LedgerCause::SplitExceedsReservation {
+                requested: 1,
+                available: 0,
+            }),
+        ),
+    ];
+    for promoted in [false, true] {
+        for publication in [
+            PublicationState::Open,
+            PublicationState::Closing,
+            PublicationState::Pending,
+            PublicationState::TerminalQualified,
+            PublicationState::Published,
+        ] {
+            for (phase, dimension, bytes, ordinary) in &cases {
+                let mut ledger =
+                    Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build]).unwrap();
+                if promoted {
+                    drop(ledger.reserve(Phase::Build, Dimension::Bytes, 0).unwrap());
+                }
+                ledger.state.write().publication = publication;
+                let before = {
+                    let state = ledger.state.read();
+                    (
+                        state.current_live_bytes,
+                        state.peak_live_bytes,
+                        state.active_reservations,
+                        state.current_administrative_bytes,
+                        state.peak_administrative_bytes,
+                    )
+                };
+                let backings = storage_backings(&ledger.state);
+                let expected = match (*bytes, publication) {
+                    (0, PublicationState::Closing | PublicationState::Pending) => {
+                        Err(LedgerCause::PublicationAlreadyPending)
+                    }
+                    (0, PublicationState::TerminalQualified | PublicationState::Published) => {
+                        Err(LedgerCause::PublicationAlreadyCompleted)
+                    }
+                    _ => ordinary.clone(),
+                };
+                assert_eq!(
+                    ledger.transition_reservations(&mut [], *phase, *dimension, *bytes),
+                    expected
+                );
+                assert_eq!(ledger.state.shared().is_some(), promoted);
+                assert_eq!(storage_backings(&ledger.state), backings);
+                let state = ledger.state.read();
+                assert_eq!(
+                    (
+                        state.current_live_bytes,
+                        state.peak_live_bytes,
+                        state.active_reservations,
+                        state.current_administrative_bytes,
+                        state.peak_administrative_bytes,
+                    ),
+                    before
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rejected_publication_keeps_inline_backing_and_current_administration() {
+    let cases = [
+        (
+            vec![Commitment::new(Dimension::Unknown, 1)],
+            LedgerCause::UnknownDimension {
+                dimension: Dimension::Unknown,
+            },
+        ),
+        (
+            vec![
+                Commitment::new(Dimension::Bytes, u64::MAX),
+                Commitment::new(Dimension::Bytes, 1),
+            ],
+            LedgerCause::ArithmeticOverflow {
+                class: CounterClass::PendingPublication,
+                dimension: Dimension::Bytes,
+            },
+        ),
+        (
+            vec![Commitment::new(Dimension::Bytes, 17)],
+            LedgerCause::LimitExceeded {
+                class: CounterClass::Committed,
+                dimension: Dimension::Bytes,
+                value: 17,
+                limit: 16,
+            },
+        ),
+    ];
+    for (commitments, expected) in cases {
+        let mut ledger = test_ledger(limits());
+        ledger
+            .charge_observed_batch(&[(Dimension::Bytes, 2)])
+            .unwrap();
+        let backings = storage_backings(&ledger.state);
+        let bytes_before = ledger.dimension_evidence(Dimension::Bytes).unwrap();
+        let administrative_before = ledger.state.read().current_administrative_bytes;
+        let mut reservations = PublicationReservationBatch::default();
+
+        let error = ledger
+            .prepare_publication(&mut reservations, &commitments)
+            .unwrap_err();
+
+        assert_eq!(error, expected);
+        assert!(reservations.is_empty());
+        assert!(matches!(ledger.state, DynamicStorage::Inline(Some(_))));
+        assert_eq!(storage_backings(&ledger.state), backings);
+        assert_eq!(
+            ledger.dimension_evidence(Dimension::Bytes).unwrap(),
+            bytes_before
+        );
+        assert_eq!(
+            ledger.state.read().current_administrative_bytes,
+            administrative_before
+        );
+        assert_eq!(
+            ledger.known_administrative_bytes(0),
+            Some(administrative_before)
+        );
+        assert_eq!(ledger.state.read().publication, PublicationState::Open);
+        assert_eq!(ledger.work.header.mode, WorkMode::Ordinary);
+    }
+}
+
+#[test]
+fn publication_uses_the_current_tightened_commitment_limit_before_promotion() {
+    let mut ledger = test_ledger(limits());
+    let commitment = Commitment::new(Dimension::Bytes, 1);
+    ledger
+        .tighten_dimension_policy(
+            Dimension::Bytes,
+            DimensionPolicy::reservable_bytes(16, 16, 0, 16),
+        )
+        .unwrap();
+    let before = ledger.state.read().current_administrative_bytes;
+    let backings = storage_backings(&ledger.state);
+    let mut reservations = PublicationReservationBatch::default();
+    assert_eq!(
+        ledger
+            .prepare_publication(&mut reservations, &[commitment])
+            .unwrap_err(),
+        LedgerCause::LimitExceeded {
+            class: CounterClass::Committed,
+            dimension: Dimension::Bytes,
+            value: 1,
+            limit: 0,
+        }
+    );
+    assert!(matches!(ledger.state, DynamicStorage::Inline(Some(_))));
+    assert_eq!(storage_backings(&ledger.state), backings);
+    assert_eq!(ledger.state.read().current_administrative_bytes, before);
+    assert_eq!(
+        ledger
+            .dimension_evidence(Dimension::Bytes)
+            .unwrap()
+            .pending_publication(),
+        0
+    );
+}
+
+#[test]
+fn publication_checks_current_committed_overflow_before_promotion() {
+    let mut ledger = test_ledger(typed_limits());
+    ledger.state.write().dimensions[0].state.committed = u64::MAX;
+    let before = ledger.state.read().current_administrative_bytes;
+    let backings = storage_backings(&ledger.state);
+    let mut reservations = PublicationReservationBatch::default();
+    assert_eq!(
+        ledger
+            .prepare_publication(&mut reservations, &[Commitment::new(Dimension::Bytes, 1)])
+            .unwrap_err(),
+        LedgerCause::ArithmeticOverflow {
+            class: CounterClass::PendingPublication,
+            dimension: Dimension::Bytes,
+        }
+    );
+    assert!(matches!(ledger.state, DynamicStorage::Inline(Some(_))));
+    assert_eq!(storage_backings(&ledger.state), backings);
+    assert_eq!(ledger.state.read().current_administrative_bytes, before);
+    assert_eq!(ledger.state.read().dimensions[0].state.committed, u64::MAX);
+    assert_eq!(
+        ledger.state.read().dimensions[0].state.pending_publication,
+        0
+    );
+}
+
+#[test]
+fn publication_allocation_and_envelope_errors_precede_key_binding_without_promotion() {
+    let _guard = test_evidence_allocation_guard();
+    for over_envelope in [false, true] {
+        let mut ledger = test_ledger(limits());
+        let before = ledger.state.read().current_administrative_bytes;
+        let peak_before = ledger.state.read().peak_administrative_bytes;
+        let candidate_bytes = size_of::<AggregatedCommitment<Dimension>>() as u64;
+        let backings = storage_backings(&ledger.state);
+        if over_envelope {
+            test_fail_next_evidence_over_envelope();
+        } else {
+            test_fail_next_evidence_allocation();
+        }
+        let mut reservations = PublicationReservationBatch::default();
+        let error = ledger
+            .prepare_publication(&mut reservations, &[Commitment::new(Dimension::Unknown, 1)])
+            .unwrap_err();
+        if over_envelope {
+            assert_eq!(
+                error,
+                LedgerCause::Evidence {
+                    cause: LedgerEvidenceError::Capacity {
+                        purpose: LedgerEvidencePurpose::Publication,
+                        cause: CapacityPlanError::CapacityEnvelopeViolated {
+                            policy_revision: crate::CAPACITY_POLICY_REVISION,
+                            desired_capacity: 1,
+                            envelope_capacity: 1,
+                            actual_capacity: 2,
+                        },
+                    },
+                }
+            );
+        } else {
+            assert_eq!(
+                error,
+                LedgerCause::Evidence {
+                    cause: LedgerEvidenceError::AllocationFailed {
+                        purpose: LedgerEvidencePurpose::Publication,
+                        requested_bytes: candidate_bytes,
+                    },
+                }
+            );
+        }
+        assert!(matches!(ledger.state, DynamicStorage::Inline(Some(_))));
+        assert_eq!(storage_backings(&ledger.state), backings);
+        assert_eq!(ledger.state.read().current_administrative_bytes, before);
+        assert_eq!(
+            ledger.state.read().peak_administrative_bytes,
+            peak_before.max(before + candidate_bytes)
+        );
+        assert_eq!(ledger.known_administrative_bytes(0), Some(before));
+        assert_eq!(ledger.state.read().publication, PublicationState::Open);
+    }
+}
+
+#[test]
+fn publication_promotion_denial_refunds_only_the_destroyed_aggregate() {
+    let mut ledger = test_ledger(limits());
+    let before = ledger.state.read().current_administrative_bytes;
+    let peak_before = ledger.state.read().peak_administrative_bytes;
+    let backings = storage_backings(&ledger.state);
+    let candidate_bytes = size_of::<AggregatedCommitment<Dimension>>() as u64;
+    let shared_bytes = size_of::<Mutex<Option<LedgerState<Phase, Dimension>>>>() as u64;
+    let limit = before + candidate_bytes;
+    ledger.state.write().evidence_byte_limit = limit;
+    let mut reservations = PublicationReservationBatch::default();
+    assert_eq!(
+        ledger
+            .prepare_publication(&mut reservations, &[Commitment::new(Dimension::Bytes, 1)])
+            .unwrap_err(),
+        LedgerCause::Evidence {
+            cause: LedgerEvidenceError::LimitExceeded {
+                purpose: LedgerEvidencePurpose::SharedStorage,
+                value: before + candidate_bytes + shared_bytes,
+                limit,
+            },
+        }
+    );
+    assert!(matches!(ledger.state, DynamicStorage::Inline(Some(_))));
+    assert_eq!(storage_backings(&ledger.state), backings);
+    assert_eq!(ledger.state.read().current_administrative_bytes, before);
+    assert_eq!(
+        ledger.state.read().peak_administrative_bytes,
+        peak_before.max(limit)
+    );
+    assert_eq!(ledger.known_administrative_bytes(0), Some(before));
+    assert_eq!(ledger.state.read().publication, PublicationState::Open);
+    assert_eq!(ledger.work.header.mode, WorkMode::Ordinary);
+}
+
+#[test]
+fn successful_empty_publication_issues_shared_ownership_without_candidate_allocation() {
+    let _guard = test_evidence_allocation_guard();
+    let mut ledger = test_ledger(limits());
+    let before = ledger.state.read().current_administrative_bytes;
+    let backings = storage_backings(&ledger.state);
+    let shared_bytes = size_of::<Mutex<Option<LedgerState<Phase, Dimension>>>>() as u64;
+    ledger.state.write().evidence_byte_limit = before + shared_bytes;
+    let mut reservations = PublicationReservationBatch::default();
+    test_fail_next_evidence_allocation();
+    let pending = ledger.prepare_publication(&mut reservations, &[]).unwrap();
+    assert!(test_evidence_allocation_failure_is_armed());
+    test_set_evidence_allocation_failure(false);
+    assert!(Arc::ptr_eq(ledger.state.shared().unwrap(), &pending.owner));
+    assert_eq!(
+        ledger.state.read().current_administrative_bytes,
+        before + shared_bytes
+    );
+    assert_eq!(storage_backings(&ledger.state), backings);
+    pending.rollback();
+    assert_eq!(
+        ledger.state.read().current_administrative_bytes,
+        before + shared_bytes
+    );
+}
+
+#[test]
+fn tight_shared_phase_reservation_captures_the_actual_capacity_without_snapshot_allocation() {
+    let _guard = test_evidence_allocation_guard();
+    for denied in [false, true] {
+        let mut ledger = test_ledger(limits());
+        let before = ledger.known_administrative_bytes(0).unwrap();
+        let peak = ledger.state.read().peak_administrative_bytes;
+        let backings = storage_backings(&ledger.state);
+        let shared_bytes = size_of::<Mutex<Option<LedgerState<Phase, Dimension>>>>() as u64;
+        let expected = before + shared_bytes;
+        let limit = expected - u64::from(denied);
+        ledger.state.write().evidence_byte_limit = limit;
+        test_fail_next_evidence_allocation();
+        let reservation = ledger.reserve(Phase::Build, Dimension::Bytes, 1);
+        if denied {
+            assert!(matches!(
+                reservation,
+                Err(LedgerCause::Evidence {
+                    cause: LedgerEvidenceError::LimitExceeded {
+                        purpose: LedgerEvidencePurpose::SharedStorage,
+                        value,
+                        limit: rejected_limit,
+                    }
+                }) if value == expected && rejected_limit == limit
+            ));
+            assert!(ledger.state.shared().is_none());
+            assert_eq!(ledger.state.read().current_administrative_bytes, before);
+            assert_eq!(ledger.state.read().peak_administrative_bytes, peak);
+        } else {
+            drop(reservation.unwrap());
+            assert!(ledger.state.shared().is_some());
+            assert_eq!(ledger.known_administrative_bytes(0), Some(expected));
+            assert_eq!(ledger.state.read().current_administrative_bytes, expected);
+        }
+        assert_eq!(storage_backings(&ledger.state), backings);
+        let expected_capture = if denied { before } else { expected };
+        let snapshot = ledger.finish().unwrap();
+        assert_eq!(snapshot.current_administrative_bytes(), expected_capture);
+        assert!(snapshot.has_exact_administrative_coverage());
+        assert_eq!(snapshot.current_live_bytes(), 0);
+        assert_eq!(snapshot.active_reservations(), 0);
+        assert_eq!(snapshot.peak_live_bytes(), u64::from(!denied));
+        assert!(test_evidence_allocation_failure_is_armed());
+        test_set_evidence_allocation_failure(false);
+    }
 }
 
 #[test]
@@ -113,7 +813,7 @@ fn frozen_phase_catalog_prebuilds_complete_final_evidence_shape() {
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("frozen phase catalog");
 
-    let state = lock(&ledger.state);
+    let state = ledger.state.read();
     assert_eq!(state.phases.len(), 2);
     assert_eq!(state.phase_states.len(), 2);
     assert_eq!(state.phase_snapshot_staging.len(), 2);
@@ -135,7 +835,7 @@ fn frozen_phase_catalog_prebuilds_complete_final_evidence_shape() {
 
 #[test]
 fn frozen_phase_catalog_rejects_unknown_phase_without_allocation_or_counter_mutation() {
-    let ledger =
+    let mut ledger =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("frozen phase catalog");
     let frozen_catalogue_before = (
@@ -145,7 +845,7 @@ fn frozen_phase_catalog_rejects_unknown_phase_without_allocation_or_counter_muta
     );
     let before = {
         let work = &ledger.work;
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         (
             state.phases.len(),
             state.phases.capacity(),
@@ -153,8 +853,8 @@ fn frozen_phase_catalog_rejects_unknown_phase_without_allocation_or_counter_muta
             state.phase_states.capacity(),
             state.phase_snapshot_staging.len(),
             state.phase_snapshot_staging.capacity(),
-            state.current_evidence_bytes,
-            state.peak_evidence_bytes,
+            state.current_administrative_bytes,
+            state.peak_administrative_bytes,
             state.current_live_bytes,
             state.peak_live_bytes,
             state.active_reservations,
@@ -170,7 +870,7 @@ fn frozen_phase_catalog_rejects_unknown_phase_without_allocation_or_counter_muta
     assert!(matches!(rejected, Err(LedgerCause::UnknownPhase)));
     let after = {
         let work = &ledger.work;
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         (
             state.phases.len(),
             state.phases.capacity(),
@@ -178,8 +878,8 @@ fn frozen_phase_catalog_rejects_unknown_phase_without_allocation_or_counter_muta
             state.phase_states.capacity(),
             state.phase_snapshot_staging.len(),
             state.phase_snapshot_staging.capacity(),
-            state.current_evidence_bytes,
-            state.peak_evidence_bytes,
+            state.current_administrative_bytes,
+            state.peak_administrative_bytes,
             state.current_live_bytes,
             state.peak_live_bytes,
             state.active_reservations,
@@ -210,13 +910,13 @@ fn aggregate_reservation_preflight_enforces_operation_headroom_without_mutation(
         )],
     )
     .expect("aggregate preflight policy");
-    let ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[Phase::Build])
+    let mut ledger = Ledger::<Owner, Phase, Dimension>::try_new(limits, &[Phase::Build])
         .expect("aggregate preflight ledger");
     let existing = ledger
         .reserve(Phase::Build, Dimension::Bytes, 2)
         .expect("existing live reservation");
     let before = {
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         (
             state.current_live_bytes,
             state.peak_live_bytes,
@@ -228,7 +928,7 @@ fn aggregate_reservation_preflight_enforces_operation_headroom_without_mutation(
     };
 
     assert!(matches!(
-        ledger.preflight_reservation_batch(
+        ledger.as_read().preflight_reservation_batch(
             Phase::Build,
             Dimension::Bytes,
             5,
@@ -242,7 +942,7 @@ fn aggregate_reservation_preflight_enforces_operation_headroom_without_mutation(
         })
     ));
     let after_rejection = {
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         (
             state.current_live_bytes,
             state.peak_live_bytes,
@@ -255,6 +955,7 @@ fn aggregate_reservation_preflight_enforces_operation_headroom_without_mutation(
     assert_eq!(after_rejection, before);
 
     ledger
+        .as_read()
         .preflight_reservation_batch(
             Phase::Build,
             Dimension::Bytes,
@@ -263,7 +964,7 @@ fn aggregate_reservation_preflight_enforces_operation_headroom_without_mutation(
         )
         .expect("smaller aggregate remains retryable");
     let after_retry = {
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         (
             state.current_live_bytes,
             state.peak_live_bytes,
@@ -288,7 +989,7 @@ fn aggregate_reservation_preflight_enforces_operation_headroom_without_mutation(
 
 #[test]
 fn frozen_phase_completion_is_monotonic_by_catalog_position_and_preserves_rejections() {
-    let ledger =
+    let mut ledger =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Finalize, Phase::Build])
             .expect("frozen phase catalog");
 
@@ -301,9 +1002,11 @@ fn frozen_phase_completion_is_monotonic_by_catalog_position_and_preserves_reject
     );
 
     ledger
+        .view()
         .try_complete_phase(Phase::Finalize)
         .expect("first catalog phase completes");
     ledger
+        .view()
         .try_complete_phase(Phase::Finalize)
         .expect("repeating the completed phase is idempotent");
     assert_eq!(
@@ -315,17 +1018,18 @@ fn frozen_phase_completion_is_monotonic_by_catalog_position_and_preserves_reject
     );
 
     ledger
+        .view()
         .try_complete_phase(Phase::Build)
         .expect("later catalog position completes even when its key sorts earlier");
     assert_eq!(
-        ledger.try_complete_phase(Phase::Finalize),
+        ledger.view().try_complete_phase(Phase::Finalize),
         Err(PhaseCompletionError::Regression {
             last_completed_phase: Phase::Build,
             phase: Phase::Finalize,
         })
     );
     assert_eq!(
-        ledger.try_complete_phase(Phase::Unknown),
+        ledger.view().try_complete_phase(Phase::Unknown),
         Err(PhaseCompletionError::UnknownPhase {
             phase: Phase::Unknown,
         })
@@ -354,7 +1058,7 @@ fn phase_completion_obeys_irreversible_rollback_and_published_boundaries() {
         .expect("empty publication covers zero live bytes");
 
     assert_eq!(
-        ledger.try_complete_phase(Phase::Build),
+        ledger.view().try_complete_phase(Phase::Build),
         Err(PhaseCompletionError::PublicationPending)
     );
     assert_eq!(
@@ -366,7 +1070,7 @@ fn phase_completion_obeys_irreversible_rollback_and_published_boundaries() {
     );
 
     pending.rollback();
-    assert_eq!(lock(&ledger.state).publication, PublicationState::Closing);
+    assert_eq!(ledger.state.read().publication, PublicationState::Closing);
     assert_eq!(
         ledger.charge_attempted(Dimension::Bytes, 0),
         Err(LedgerCause::PublicationAlreadyPending)
@@ -379,7 +1083,7 @@ fn phase_completion_obeys_irreversible_rollback_and_published_boundaries() {
         );
     }
     assert_eq!(
-        ledger.try_complete_phase(Phase::Build),
+        ledger.view().try_complete_phase(Phase::Build),
         Err(PhaseCompletionError::PublicationPending)
     );
     let mut replacement_batch = PublicationReservationBatch::default();
@@ -392,7 +1096,7 @@ fn phase_completion_obeys_irreversible_rollback_and_published_boundaries() {
     let mut ledger =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("an independent operation remains usable");
-    ledger.try_complete_phase(Phase::Build).unwrap();
+    ledger.view().try_complete_phase(Phase::Build).unwrap();
     let mut published_batch = PublicationReservationBatch::default();
     let mut published = ledger
         .prepare_publication(&mut published_batch, &[])
@@ -401,7 +1105,7 @@ fn phase_completion_obeys_irreversible_rollback_and_published_boundaries() {
         .publish(&mut published)
         .expect("publication becomes durable");
     assert_eq!(
-        ledger.try_complete_phase(Phase::Finalize),
+        ledger.view().try_complete_phase(Phase::Finalize),
         Err(PhaseCompletionError::PublicationCompleted)
     );
     assert_eq!(
@@ -416,7 +1120,7 @@ fn phase_completion_obeys_irreversible_rollback_and_published_boundaries() {
 fn phase_shape_probe(
     ledger: &Ledger<Owner, Phase, Dimension>,
 ) -> (Vec<usize>, Option<(Phase, usize)>, u64, u64) {
-    let state = lock(&ledger.state);
+    let state = ledger.state.read();
     (
         state
             .phases
@@ -426,23 +1130,23 @@ fn phase_shape_probe(
         state
             .last_completed_phase
             .map(|completed| (completed.phase, completed.state_position)),
-        state.current_evidence_bytes,
-        state.peak_evidence_bytes,
+        state.current_administrative_bytes,
+        state.peak_administrative_bytes,
     )
 }
 
 #[test]
 fn phase_catalog_shape_faults_reject_completion_and_snapshot_without_mutation() {
-    let duplicate =
+    let mut duplicate =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("duplicate fault ledger");
     {
-        let mut state = lock(&duplicate.state);
+        let mut state = duplicate.state.write();
         state.phases[1].state_position = state.phases[0].state_position;
     }
     let duplicate_before = phase_shape_probe(&duplicate);
     assert_eq!(
-        duplicate.try_complete_phase(Phase::Build),
+        duplicate.view().try_complete_phase(Phase::Build),
         Err(PhaseCompletionError::CatalogShapeMismatch)
     );
     assert_eq!(
@@ -451,24 +1155,25 @@ fn phase_catalog_shape_faults_reject_completion_and_snapshot_without_mutation() 
     );
     assert_eq!(phase_shape_probe(&duplicate), duplicate_before);
 
-    let out_of_range =
+    let mut out_of_range =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("out-of-range fault ledger");
     out_of_range
+        .view()
         .try_complete_phase(Phase::Build)
         .expect("build completes before fault injection");
     {
-        let mut state = lock(&out_of_range.state);
+        let mut state = out_of_range.state.write();
         state.phases[1].state_position = state.phase_states.len();
     }
     let out_of_range_before = phase_shape_probe(&out_of_range);
     assert_eq!(
-        out_of_range.try_complete_phase(Phase::Build),
+        out_of_range.view().try_complete_phase(Phase::Build),
         Err(PhaseCompletionError::CatalogShapeMismatch),
         "idempotent completion still validates the whole catalog"
     );
     assert_eq!(
-        out_of_range.try_complete_phase(Phase::Finalize),
+        out_of_range.view().try_complete_phase(Phase::Finalize),
         Err(PhaseCompletionError::CatalogShapeMismatch),
         "forward completion still validates the whole catalog"
     );
@@ -478,14 +1183,15 @@ fn phase_catalog_shape_faults_reject_completion_and_snapshot_without_mutation() 
     );
     assert_eq!(phase_shape_probe(&out_of_range), out_of_range_before);
 
-    let missing_last =
+    let mut missing_last =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("missing-last fault ledger");
     missing_last
+        .view()
         .try_complete_phase(Phase::Finalize)
         .expect("finalize completes before fault injection");
     {
-        let mut state = lock(&missing_last.state);
+        let mut state = missing_last.state.write();
         state
             .last_completed_phase
             .as_mut()
@@ -494,7 +1200,7 @@ fn phase_catalog_shape_faults_reject_completion_and_snapshot_without_mutation() 
     }
     let missing_last_before = phase_shape_probe(&missing_last);
     assert_eq!(
-        missing_last.try_complete_phase(Phase::Build),
+        missing_last.view().try_complete_phase(Phase::Build),
         Err(PhaseCompletionError::CatalogShapeMismatch)
     );
     assert_eq!(
@@ -506,14 +1212,15 @@ fn phase_catalog_shape_faults_reject_completion_and_snapshot_without_mutation() 
 
 #[test]
 fn final_shape_failure_preserves_the_stored_completed_phase_key() {
-    let ledger =
+    let mut ledger =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("frozen phase catalog");
     ledger
+        .view()
         .try_complete_phase(Phase::Finalize)
         .expect("finalize completes before fault injection");
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         state
             .last_completed_phase
             .as_mut()
@@ -650,12 +1357,16 @@ fn producer_attempted_preserves_rejected_work_and_the_last_representable_value()
             .charge_attempted(Dimension::Bytes, initial)
             .expect("initial attempted work fits");
         assert_eq!(
-            ledger.charge_producer_attempted(Dimension::Bytes, amount, None),
+            ledger
+                .view()
+                .charge_producer_attempted(Dimension::Bytes, amount, None),
             expected
         );
         if attempted > limit {
             assert_eq!(
-                ledger.charge_producer_attempted(Dimension::Bytes, 0, None),
+                ledger
+                    .view()
+                    .charge_producer_attempted(Dimension::Bytes, 0, None),
                 Err(LedgerCause::LimitExceeded {
                     class: CounterClass::Attempted,
                     dimension: Dimension::Bytes,
@@ -792,7 +1503,9 @@ fn producer_consumed_batch_preserves_membership_precedence_and_atomic_snapshots(
         ledger.charge_consumed(Dimension::Bytes, 1).unwrap();
 
         assert_eq!(
-            ledger.charge_producer_consumed_batch(&charges, excluded),
+            ledger
+                .view()
+                .charge_producer_consumed_batch(&charges, excluded),
             expected,
             "producer charges: {charges:?}, excluded: {excluded:?}"
         );
@@ -899,7 +1612,10 @@ fn producer_consumed_batch_numeric_failures_leave_every_counter_unchanged() {
             .charge_consumed(Dimension::Records, consumed)
             .unwrap();
         let frame = (pending != 0).then(|| {
-            let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+            let (mut work, layout) = ledger
+                .view()
+                .bind_internal_work([Dimension::Records])
+                .unwrap();
             let frame = layout
                 .admit_observed(&mut work.work, [pending], WorkLane::Internal)
                 .expect("pending work fits before the competing batch");
@@ -910,7 +1626,7 @@ fn producer_consumed_batch_numeric_failures_leave_every_counter_unchanged() {
             [state.rows[0].state, state.rows[1].state]
         };
         assert_eq!(
-            ledger.charge_producer_consumed_batch(
+            ledger.view().charge_producer_consumed_batch(
                 &[
                     (Dimension::Bytes, 1),
                     (Dimension::Records, amounts[0]),
@@ -942,7 +1658,7 @@ fn producer_consumed_batch_reports_the_first_numeric_group_failure() {
     ledger.charge_attempted(Dimension::Records, 1).unwrap();
 
     assert_eq!(
-        ledger.charge_producer_consumed_batch(
+        ledger.view().charge_producer_consumed_batch(
             &[
                 (Dimension::Bytes, 2),
                 (Dimension::Records, u64::MAX),
@@ -995,7 +1711,10 @@ fn producer_membership_precedes_publication_without_changing_general_entry_order
         "the general batch retains its interleaved membership and ordering checks"
     );
     for excluded in [None, Some(Dimension::Records)] {
-        assert_eq!(ledger.charge_producer_consumed_batch(&[], excluded), Ok(()));
+        assert_eq!(
+            ledger.view().charge_producer_consumed_batch(&[], excluded),
+            Ok(())
+        );
     }
 
     for published in [false, true] {
@@ -1019,12 +1738,14 @@ fn producer_membership_precedes_publication_without_changing_general_entry_order
             (Dimension::Records, Some(Dimension::Records)),
         ] {
             assert_eq!(
-                ledger.charge_producer_attempted(dimension, 0, excluded),
+                ledger
+                    .view()
+                    .charge_producer_attempted(dimension, 0, excluded),
                 Err(LedgerCause::UnknownDimension { dimension })
             );
         }
         assert_eq!(
-            ledger.charge_producer_consumed_batch(
+            ledger.view().charge_producer_consumed_batch(
                 &[
                     (Dimension::Records, 0),
                     (Dimension::Bytes, 0),
@@ -1037,7 +1758,7 @@ fn producer_membership_precedes_publication_without_changing_general_entry_order
             })
         );
         assert_eq!(
-            ledger.charge_producer_consumed_batch(
+            ledger.view().charge_producer_consumed_batch(
                 &[(Dimension::Bytes, u64::MAX), (Dimension::Records, 0)],
                 Some(Dimension::Records),
             ),
@@ -1046,23 +1767,27 @@ fn producer_membership_precedes_publication_without_changing_general_entry_order
             })
         );
         assert_eq!(
-            ledger.charge_producer_attempted(Dimension::Bytes, u64::MAX, None),
+            ledger
+                .view()
+                .charge_producer_attempted(Dimension::Bytes, u64::MAX, None),
             Err(closed.clone())
         );
         assert_eq!(
-            ledger.charge_producer_consumed_batch(
+            ledger.view().charge_producer_consumed_batch(
                 &[(Dimension::Records, 0), (Dimension::Bytes, 0)],
                 None
             ),
             Err(closed.clone())
         );
         assert_eq!(
-            ledger.charge_producer_consumed_batch(&[(Dimension::Bytes, u64::MAX)], None),
+            ledger
+                .view()
+                .charge_producer_consumed_batch(&[(Dimension::Bytes, u64::MAX)], None),
             Err(closed.clone())
         );
         for excluded in [None, Some(Dimension::Records)] {
             assert_eq!(
-                ledger.charge_producer_consumed_batch(&[], excluded),
+                ledger.view().charge_producer_consumed_batch(&[], excluded),
                 Err(closed.clone())
             );
         }
@@ -1088,7 +1813,10 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
     );
     ledger.charge_attempted(Dimension::Records, 1).unwrap();
     let (layout, mut frame) = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         let frame = layout
             .admit_observed(&mut work.work, [3], WorkLane::Internal)
             .unwrap();
@@ -1106,7 +1834,9 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
             assert_eq!(state.header.open_envelopes, 1);
         }
         assert_eq!(
-            ledger.charge_producer_consumed_batch(&[(Dimension::Records, 1)], None),
+            ledger
+                .view()
+                .charge_producer_consumed_batch(&[(Dimension::Records, 1)], None),
             Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Consumed,
                 dimension: Dimension::Records,
@@ -1149,6 +1879,7 @@ fn producer_consumed_batch_preserves_pending_capacity_through_partial_completion
         assert!(!state.header.integrity_fault);
     }
     ledger
+        .view()
         .charge_producer_consumed_batch(&[(Dimension::Records, 1)], None)
         .unwrap();
     let state = &ledger.work;
@@ -1168,7 +1899,10 @@ fn linear_work_admission_records_attempted_before_consumed_completion() {
     let mut ledger = test_ledger(limits());
 
     let (layout, mut frame) = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         let frame = layout
             .admit_observed(&mut work.work, [3], WorkLane::Internal)
             .expect("three linear work units fit both counters");
@@ -1205,7 +1939,7 @@ fn linear_work_admission_records_attempted_before_consumed_completion() {
         .expect("completed linear work evidence");
     assert_eq!((complete.attempted(), complete.consumed()), (3, 3));
     assert!(matches!(
-        ledger.work.check_quiescent(ledger.work_catalog.len()),
+        ledger.as_read().check_work_quiescent(),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     ));
     assert_eq!(frame.remaining, [0]);
@@ -1214,10 +1948,7 @@ fn linear_work_admission_records_attempted_before_consumed_completion() {
         .0
         .resolve(layout, &mut frame, false)
         .expect("fully completed work still needs explicit resolution");
-    ledger
-        .work
-        .check_quiescent(ledger.work_catalog.len())
-        .unwrap();
+    ledger.as_read().check_work_quiescent().unwrap();
 }
 
 #[test]
@@ -1230,7 +1961,10 @@ fn linear_work_admission_preserves_attempted_when_consumed_capacity_is_short() {
     let mut ledger = test_ledger(constrained);
 
     let admission = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         layout.admit_observed(&mut work.work, [3], WorkLane::Internal)
     };
     assert!(matches!(
@@ -1263,6 +1997,7 @@ fn linear_work_batch_aggregates_one_dimension_before_recording_attempted() {
 
     let admission = {
         let (mut work, layout) = ledger
+            .view()
             .bind_internal_work([Dimension::Records, Dimension::Records])
             .unwrap();
         layout.admit_observed(&mut work.work, [1, 1], WorkLane::Internal)
@@ -1292,6 +2027,7 @@ fn linear_work_batch_aggregate_overflow_is_side_effect_free() {
 
     let admission = {
         let (mut work, layout) = ledger
+            .view()
             .bind_internal_work([Dimension::Bytes, Dimension::Bytes])
             .unwrap();
         layout.admit_observed(&mut work.work, [u64::MAX, 1], WorkLane::Internal)
@@ -1314,6 +2050,7 @@ fn linear_work_group_completion_commits_every_dimension_under_one_preflight() {
     let mut ledger = test_ledger(limits());
     let (layout, mut frame) = {
         let (mut work, layout) = ledger
+            .view()
             .bind_internal_work([Dimension::Bytes, Dimension::Records])
             .unwrap();
         let frame = layout
@@ -1349,6 +2086,7 @@ fn linear_work_group_completion_rejects_the_whole_invalid_prefix() {
     let mut ledger = test_ledger(limits());
     let (layout, mut frame) = {
         let (mut work, layout) = ledger
+            .view()
             .bind_internal_work([Dimension::Bytes, Dimension::Records])
             .unwrap();
         let frame = layout
@@ -1394,6 +2132,7 @@ fn linear_work_group_completion_preserves_every_prefix_after_competing_observed_
     let mut ledger = test_ledger(constrained);
     let (layout, mut frame) = {
         let (mut work, layout) = ledger
+            .view()
             .bind_internal_work([Dimension::Bytes, Dimension::Records])
             .unwrap();
         let frame = layout
@@ -1455,7 +2194,10 @@ fn linear_work_pending_capacity_prevents_oversell_and_partial_finish_releases_th
     .expect("pending-work limits");
     let mut ledger = test_ledger(constrained);
     let (layout, mut first) = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         let first = layout
             .admit_observed(&mut work.work, [2], WorkLane::Internal)
             .expect("the first frame reserves the complete consumed envelope");
@@ -1463,7 +2205,10 @@ fn linear_work_pending_capacity_prevents_oversell_and_partial_finish_releases_th
     };
 
     let competing = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         layout.admit_observed(&mut work.work, [1], WorkLane::Internal)
     };
     assert!(matches!(
@@ -1476,7 +2221,9 @@ fn linear_work_pending_capacity_prevents_oversell_and_partial_finish_releases_th
         })
     ));
     assert!(matches!(
-        ledger.preflight_repeated_observed_batch(&[(Dimension::Records, 1)], NonZeroU64::MIN,),
+        ledger
+            .as_read()
+            .preflight_repeated_observed_batch(&[(Dimension::Records, 1)], NonZeroU64::MIN,),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Consumed,
             dimension: Dimension::Records,
@@ -1532,7 +2279,10 @@ fn linear_completion_preserves_prefix_after_competing_observed_work() {
     .expect("pending observed-work limits");
     let mut ledger = test_ledger(constrained);
     let (layout, mut frame) = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         let frame = layout
             .admit_observed(&mut work.work, [2], WorkLane::Internal)
             .expect("the linear frame reserves the consumed envelope");
@@ -1612,7 +2362,10 @@ fn abandoned_linear_frame_preserves_observed_prefix_but_rejects_finalization() {
     .expect("pending observed-work limits");
     let mut ledger = test_ledger(constrained);
     let (layout, mut frame) = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         let frame = layout
             .admit_observed(&mut work.work, [2], WorkLane::Internal)
             .expect("the linear frame reserves the consumed envelope");
@@ -1702,7 +2455,10 @@ fn unresolved_linear_work_frame_blocks_prepare_and_final_snapshot() {
 fn corrupt_pending_frame_release_rejects_final_snapshot() {
     let mut ledger = test_ledger(limits());
     let (layout, mut frame) = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Records]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Records])
+            .unwrap();
         let frame = layout
             .admit_observed(&mut work.work, [1], WorkLane::Internal)
             .expect("one work unit is admitted");
@@ -1762,6 +2518,7 @@ fn repeated_observed_preflight_aggregates_duplicate_dimensions_without_mutation(
     let exact = NonZeroU64::new(8).expect("exact repetition count");
 
     ledger
+        .as_read()
         .preflight_repeated_observed_batch(&[(Dimension::Bytes, 1), (Dimension::Bytes, 1)], exact)
         .expect("two charges repeated eight times fit the exact limit");
     let unchanged = ledger
@@ -1771,6 +2528,7 @@ fn repeated_observed_preflight_aggregates_duplicate_dimensions_without_mutation(
     assert_eq!(unchanged.consumed(), 0);
 
     ledger
+        .as_read()
         .preflight_repeated_observed_batch(
             &[(Dimension::Bytes, 0), (Dimension::Bytes, 0)],
             NonZeroU64::new(u64::MAX).expect("maximum repetition count"),
@@ -1784,7 +2542,7 @@ fn repeated_observed_preflight_aggregates_duplicate_dimensions_without_mutation(
 
     let excess = NonZeroU64::new(9).expect("excess repetition count");
     assert!(matches!(
-        ledger.preflight_repeated_observed_batch(
+        ledger.as_read().preflight_repeated_observed_batch(
             &[(Dimension::Bytes, 1), (Dimension::Bytes, 1)],
             excess,
         ),
@@ -1806,6 +2564,7 @@ fn repeated_observed_preflight_aggregates_duplicate_dimensions_without_mutation(
 fn repeated_observed_preflight_binds_distinct_dimensions_and_checks_arithmetic() {
     let ledger = test_ledger(limits());
     ledger
+        .as_read()
         .preflight_repeated_observed_batch(
             &[(Dimension::Bytes, 1), (Dimension::Records, 2)],
             NonZeroU64::new(8).expect("repetition count"),
@@ -1813,7 +2572,7 @@ fn repeated_observed_preflight_binds_distinct_dimensions_and_checks_arithmetic()
         .expect("distinct dimensions fit their exact limits");
 
     assert!(matches!(
-        ledger.preflight_repeated_observed_batch(
+        ledger.as_read().preflight_repeated_observed_batch(
             &[(Dimension::Unknown, 1), (Dimension::Bytes, 1)],
             NonZeroU64::new(1).expect("repetition count"),
         ),
@@ -1822,7 +2581,7 @@ fn repeated_observed_preflight_binds_distinct_dimensions_and_checks_arithmetic()
         })
     ));
     assert!(matches!(
-        ledger.preflight_repeated_observed_batch(
+        ledger.as_read().preflight_repeated_observed_batch(
             &[(Dimension::Bytes, u64::MAX), (Dimension::Records, 1)],
             NonZeroU64::new(2).expect("repetition count"),
         ),
@@ -1832,7 +2591,7 @@ fn repeated_observed_preflight_binds_distinct_dimensions_and_checks_arithmetic()
         })
     ));
     assert!(matches!(
-        ledger.preflight_repeated_observed_batch(
+        ledger.as_read().preflight_repeated_observed_batch(
             &[(Dimension::Bytes, u64::MAX), (Dimension::Bytes, 1)],
             NonZeroU64::new(1).expect("repetition count"),
         ),
@@ -1937,6 +2696,7 @@ fn terminal_work_transfer_preserves_both_total_caps_and_all_prior_work() {
     ledger.charge_consumed(Dimension::Bytes, 12).unwrap();
     let before = ledger.dimension_evidence(Dimension::Bytes).unwrap();
     ledger
+        .view()
         .transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 30)
         .unwrap();
     assert_eq!(ledger.dimension_evidence(Dimension::Bytes).unwrap(), before);
@@ -1945,7 +2705,7 @@ fn terminal_work_transfer_preserves_both_total_caps_and_all_prior_work() {
         DimensionSnapshot::default()
     );
     let work = &ledger.work;
-    let state = lock(&ledger.state);
+    let state = ledger.state.read();
     let ordinary = dimension_entry(&state.dimensions, Dimension::Bytes)
         .unwrap()
         .policy
@@ -1981,12 +2741,12 @@ fn terminal_work_transfer_rejects_spent_attempted_or_consumed_capacity_atomicall
         ledger.charge_consumed(Dimension::Bytes, consumed).unwrap();
         let before = ledger.dimension_evidence(Dimension::Bytes).unwrap();
         assert!(
-            matches!(ledger.transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, transfer),
+            matches!(ledger.view().transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, transfer),
             Err(LedgerCause::LimitExceeded { class: actual, .. }) if actual == class)
         );
         assert_eq!(ledger.dimension_evidence(Dimension::Bytes).unwrap(), before);
         let work = &ledger.work;
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         assert_eq!(
             dimension_entry(&state.dimensions, Dimension::Bytes)
                 .unwrap()
@@ -2017,14 +2777,19 @@ fn terminal_work_transfer_respects_pending_work_and_current_tightened_policy() {
         .unwrap(),
     );
     let (layout, mut frame) = {
-        let (mut work, layout) = ledger.bind_internal_work([Dimension::Bytes]).unwrap();
+        let (mut work, layout) = ledger
+            .view()
+            .bind_internal_work([Dimension::Bytes])
+            .unwrap();
         let frame = layout
             .admit_observed(&mut work.work, [10], WorkLane::Internal)
             .unwrap();
         (layout, frame)
     };
     assert!(matches!(
-        ledger.transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 1),
+        ledger
+            .view()
+            .transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 1),
         Err(LedgerCause::OutstandingLinearWorkPermits { count: 1 })
     ));
     frame
@@ -2045,18 +2810,21 @@ fn terminal_work_transfer_respects_pending_work_and_current_tightened_policy() {
         .tighten_dimension_policy(Dimension::Bytes, DimensionPolicy::counter(15, 15, 0))
         .unwrap();
     assert!(matches!(
-        ledger.transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 6),
+        ledger
+            .view()
+            .transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 6),
         Err(LedgerCause::LimitExceeded {
             class: CounterClass::Attempted,
             ..
         })
     ));
     ledger
+        .view()
         .transfer_failure_terminal_work(Dimension::Bytes, Dimension::Records, 5)
         .unwrap();
     assert_eq!(ledger.dimension_evidence(Dimension::Bytes).unwrap(), before);
     let work = &ledger.work;
-    let state = lock(&ledger.state);
+    let state = ledger.state.read();
     assert_eq!(
         dimension_entry(&state.dimensions, Dimension::Bytes)
             .unwrap()
@@ -2085,8 +2853,11 @@ fn failed_snapshot_allocation_releases_only_its_owned_evidence_admission() {
             .charge_observed_batch(&[(Dimension::Bytes, 2)])
             .unwrap();
         let before = {
-            let state = lock(&ledger.state);
-            (state.current_evidence_bytes, state.peak_evidence_bytes)
+            let state = ledger.state.read();
+            (
+                state.current_administrative_bytes,
+                state.peak_administrative_bytes,
+            )
         };
         if over_envelope {
             test_fail_next_evidence_over_envelope();
@@ -2114,17 +2885,17 @@ fn failed_snapshot_allocation_releases_only_its_owned_evidence_admission() {
             ));
         }
         {
-            let state = lock(&ledger.state);
-            assert_eq!(state.current_evidence_bytes, before.0);
-            assert!(state.peak_evidence_bytes >= before.1);
-            assert!(state.peak_evidence_bytes > before.0);
+            let state = ledger.state.read();
+            assert_eq!(state.current_administrative_bytes, before.0);
+            assert!(state.peak_administrative_bytes >= before.1);
+            assert!(state.peak_administrative_bytes > before.0);
             assert_eq!(state.current_live_bytes, 3);
             assert_eq!(state.active_reservations, 1);
         }
         let snapshot = ledger
             .try_snapshot()
             .expect("owned failure cleanup permits a later snapshot");
-        assert_eq!(snapshot.current_evidence_bytes(), before.0);
+        assert_eq!(snapshot.current_administrative_bytes(), before.0);
         let bytes = snapshot.dimension(Dimension::Bytes).unwrap();
         assert_eq!(
             (
@@ -2135,7 +2906,11 @@ fn failed_snapshot_allocation_releases_only_its_owned_evidence_admission() {
             (2, 2, 3)
         );
         drop(reservation);
-        assert_eq!(ledger.finish().unwrap().current_evidence_bytes(), 0);
+        let expected_administration = ledger.known_administrative_bytes(0).unwrap();
+        assert_eq!(
+            ledger.finish().unwrap().current_administrative_bytes(),
+            expected_administration
+        );
     }
 }
 
@@ -2146,7 +2921,7 @@ fn snapshot_postallocation_work_failure_releases_admission_and_preserves_other_o
     ledger
         .charge_observed_batch(&[(Dimension::Records, 2)])
         .unwrap();
-    let evidence_before = lock(&ledger.state).current_evidence_bytes;
+    let evidence_before = ledger.state.read().current_administrative_bytes;
     ledger.work.header.integrity_fault = true;
     assert!(matches!(
         ledger.try_snapshot(),
@@ -2161,9 +2936,9 @@ fn snapshot_postallocation_work_failure_releases_admission_and_preserves_other_o
         }
     );
     {
-        let state = lock(&ledger.state);
-        assert_eq!(state.current_evidence_bytes, evidence_before);
-        assert!(state.peak_evidence_bytes > evidence_before);
+        let state = ledger.state.read();
+        assert_eq!(state.current_administrative_bytes, evidence_before);
+        assert!(state.peak_administrative_bytes > evidence_before);
         assert_eq!(state.current_live_bytes, 3);
         assert_eq!(state.active_reservations, 1);
     }
@@ -2178,17 +2953,17 @@ fn snapshot_postallocation_work_failure_releases_admission_and_preserves_other_o
 
 #[test]
 fn combined_snapshot_admission_failure_preserves_exact_evidence_accounting() {
-    let ledger = test_ledger(limits());
+    let mut ledger = test_ledger(limits());
     let (evidence_before, peak_before, original_limit) = {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         let dimension_plan =
             CapacityPlan::for_type::<(Dimension, DimensionSnapshot)>(0, 0, state.dimensions.len())
                 .expect("dimension snapshot capacity plan");
         let dimension_envelope = dimension_plan
             .envelope_delta_bytes()
             .expect("dimension snapshot envelope");
-        let evidence_before = state.current_evidence_bytes;
-        let peak_before = state.peak_evidence_bytes;
+        let evidence_before = state.current_administrative_bytes;
+        let peak_before = state.peak_administrative_bytes;
         let original_limit = state.evidence_byte_limit;
         state.evidence_byte_limit = evidence_before
             .checked_add(dimension_envelope)
@@ -2208,13 +2983,13 @@ fn combined_snapshot_admission_failure_preserves_exact_evidence_accounting() {
     ));
 
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         assert_eq!(
-            state.current_evidence_bytes, evidence_before,
+            state.current_administrative_bytes, evidence_before,
             "failed snapshot storage must release its complete local accounting"
         );
         assert_eq!(
-            state.peak_evidence_bytes, peak_before,
+            state.peak_administrative_bytes, peak_before,
             "atomic admission rejection occurs before either snapshot allocation"
         );
         state.evidence_byte_limit = original_limit;
@@ -2223,7 +2998,7 @@ fn combined_snapshot_admission_failure_preserves_exact_evidence_accounting() {
         ledger
             .try_snapshot()
             .expect("a later snapshot remains usable")
-            .current_evidence_bytes(),
+            .current_administrative_bytes(),
         evidence_before
     );
 }
@@ -2340,68 +3115,85 @@ fn shared_growth_rejects_missing_ownership_and_underreserved_accounting_before_a
     let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
         .lock()
         .expect("allocation test lock");
-    for underreserved in [false, true] {
-        let ledger = test_ledger(limits());
-        let baseline = lock(&ledger.state).current_evidence_bytes;
-        let mut values = vec![11_u64, 22];
-        let original_pointer = values.as_ptr();
-        let original_capacity = values.capacity();
-        let owned_bytes = capacity_bytes(&values).expect("tracked backing capacity");
-        let mut retained_bytes = if underreserved { owned_bytes } else { 0 };
-        let before = {
-            let mut state = lock(&ledger.state);
-            if underreserved {
-                // Inject corrupt aggregate coverage while the vector's own charge is exact.
-                state.current_evidence_bytes = owned_bytes - 1;
+    for promoted in [false, true] {
+        for underreserved in [false, true] {
+            let mut ledger = test_ledger(limits());
+            if promoted {
+                drop(ledger.reserve(Phase::Build, Dimension::Bytes, 0).unwrap());
+            }
+            let original_owner = ledger.state.shared().cloned();
+            let baseline = ledger.state.read().current_administrative_bytes;
+            let mut values = vec![11_u64, 22];
+            let original_pointer = values.as_ptr();
+            let original_capacity = values.capacity();
+            let owned_bytes = capacity_bytes(&values).expect("tracked backing capacity");
+            let mut retained_bytes = if underreserved { owned_bytes } else { 0 };
+            let before = {
+                let mut state = ledger.state.write();
+                if underreserved {
+                    // Inject corrupt aggregate coverage while the vector's own charge is exact.
+                    state.current_administrative_bytes = owned_bytes - 1;
+                } else {
+                    state.current_administrative_bytes += owned_bytes;
+                    state.peak_administrative_bytes = state
+                        .peak_administrative_bytes
+                        .max(state.current_administrative_bytes);
+                }
+                (
+                    state.current_administrative_bytes,
+                    state.peak_administrative_bytes,
+                )
+            };
+            test_set_evidence_allocation_failure(true);
+            let error = super::evidence::try_grow_selected_evidence_vec(
+                StorageOwner::Dynamic(&mut ledger.state),
+                &mut values,
+                original_capacity + 1,
+                &mut retained_bytes,
+                LedgerEvidencePurpose::Progress,
+            )
+            .expect_err("invalid coverage must reject before allocating a candidate");
+            let expected = if underreserved {
+                LedgerEvidenceError::Capacity {
+                    purpose: LedgerEvidencePurpose::Progress,
+                    cause: CapacityPlanError::CapacityOverflow,
+                }
             } else {
-                state.current_evidence_bytes += owned_bytes;
-                state.peak_evidence_bytes =
-                    state.peak_evidence_bytes.max(state.current_evidence_bytes);
+                LedgerEvidenceError::TrackedStorageCoverageMismatch {
+                    purpose: LedgerEvidencePurpose::Progress,
+                    retained_bytes: 0,
+                    capacity_bytes: owned_bytes,
+                }
+            };
+            assert_eq!(error, expected);
+            assert_eq!(values, [11, 22]);
+            assert_eq!(values.as_ptr(), original_pointer);
+            assert_eq!(values.capacity(), original_capacity);
+            assert_eq!(retained_bytes, if underreserved { owned_bytes } else { 0 });
+            assert_eq!(ledger.state.shared().is_some(), promoted);
+            if let Some(original) = original_owner {
+                assert!(Arc::ptr_eq(ledger.state.shared().unwrap(), &original));
             }
-            (state.current_evidence_bytes, state.peak_evidence_bytes)
-        };
-        test_set_evidence_allocation_failure(true);
-        let error = super::evidence::try_grow_shared_evidence_vec(
-            &ledger.state,
-            &mut values,
-            original_capacity + 1,
-            &mut retained_bytes,
-            LedgerEvidencePurpose::Progress,
-        )
-        .expect_err("invalid coverage must reject before allocating a candidate");
-        let expected = if underreserved {
-            LedgerEvidenceError::Capacity {
-                purpose: LedgerEvidencePurpose::Progress,
-                cause: CapacityPlanError::CapacityOverflow,
+            {
+                let state = ledger.state.read();
+                assert_eq!(
+                    (
+                        state.current_administrative_bytes,
+                        state.peak_administrative_bytes
+                    ),
+                    before
+                );
             }
-        } else {
-            LedgerEvidenceError::TrackedStorageCoverageMismatch {
-                purpose: LedgerEvidencePurpose::Progress,
-                retained_bytes: 0,
-                capacity_bytes: owned_bytes,
-            }
-        };
-        assert_eq!(error, expected);
-        assert_eq!(values, [11, 22]);
-        assert_eq!(values.as_ptr(), original_pointer);
-        assert_eq!(values.capacity(), original_capacity);
-        assert_eq!(retained_bytes, if underreserved { owned_bytes } else { 0 });
-        {
-            let state = lock(&ledger.state);
-            assert_eq!(
-                (state.current_evidence_bytes, state.peak_evidence_bytes),
-                before
+            assert!(
+                test_evidence_allocation_failure_is_armed(),
+                "coverage validation precedes allocation"
             );
-        }
-        assert!(
-            test_evidence_allocation_failure_is_armed(),
-            "coverage validation precedes allocation"
-        );
-        test_set_evidence_allocation_failure(false);
-        drop(values);
-        if !underreserved {
-            release_evidence(&mut lock(&ledger.state), owned_bytes);
-            assert_eq!(lock(&ledger.state).current_evidence_bytes, baseline);
+            test_set_evidence_allocation_failure(false);
+            drop(values);
+            if !underreserved {
+                release_evidence(&mut ledger.state.write(), owned_bytes);
+                assert_eq!(ledger.state.read().current_administrative_bytes, baseline);
+            }
         }
     }
 }
@@ -2411,40 +3203,55 @@ fn zero_sized_shared_storage_preserves_the_existing_ledger_evidence_charge() {
     let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
         .lock()
         .expect("allocation test lock");
-    let ledger = test_ledger(limits());
-    let before = {
-        let state = lock(&ledger.state);
-        (state.current_evidence_bytes, state.peak_evidence_bytes)
-    };
-    assert!(
-        before.0 > 0,
-        "the fixture retains independently owned frozen evidence"
-    );
-    let mut values = vec![(), ()];
-    let original_capacity = values.capacity();
-    let mut retained_bytes = 0;
-    test_set_evidence_allocation_failure(true);
-    super::evidence::try_grow_shared_evidence_vec(
-        &ledger.state,
-        &mut values,
-        usize::MAX,
-        &mut retained_bytes,
-        LedgerEvidencePurpose::Progress,
-    )
-    .expect("zero-sized storage already has logical capacity");
-    assert_eq!(values, [(), ()]);
-    assert_eq!(values.capacity(), original_capacity);
-    assert_eq!(retained_bytes, 0);
-    let state = lock(&ledger.state);
-    assert_eq!(
-        (state.current_evidence_bytes, state.peak_evidence_bytes),
-        before
-    );
-    assert!(
-        test_evidence_allocation_failure_is_armed(),
-        "zero-sized growth creates no replacement backing"
-    );
-    test_set_evidence_allocation_failure(false);
+    for promoted in [false, true] {
+        let mut ledger = test_ledger(limits());
+        if promoted {
+            drop(ledger.reserve(Phase::Build, Dimension::Bytes, 0).unwrap());
+        }
+        let original_owner = ledger.state.shared().cloned();
+        let before = {
+            let state = ledger.state.read();
+            (
+                state.current_administrative_bytes,
+                state.peak_administrative_bytes,
+            )
+        };
+        assert_eq!(ledger.known_administrative_bytes(0), Some(before.0));
+        let mut values = vec![(), ()];
+        let original_pointer = values.as_ptr();
+        let original_capacity = values.capacity();
+        let mut retained_bytes = 0;
+        test_set_evidence_allocation_failure(true);
+        super::evidence::try_grow_selected_evidence_vec(
+            StorageOwner::Dynamic(&mut ledger.state),
+            &mut values,
+            usize::MAX,
+            &mut retained_bytes,
+            LedgerEvidencePurpose::Progress,
+        )
+        .expect("zero-sized storage already has logical capacity");
+        assert_eq!(values, [(), ()]);
+        assert_eq!(values.as_ptr(), original_pointer);
+        assert_eq!(values.capacity(), original_capacity);
+        assert_eq!(retained_bytes, 0);
+        assert_eq!(ledger.state.shared().is_some(), promoted);
+        if let Some(original) = original_owner {
+            assert!(Arc::ptr_eq(ledger.state.shared().unwrap(), &original));
+        }
+        let state = ledger.state.read();
+        assert_eq!(
+            (
+                state.current_administrative_bytes,
+                state.peak_administrative_bytes
+            ),
+            before
+        );
+        assert!(
+            test_evidence_allocation_failure_is_armed(),
+            "zero-sized growth creates no replacement backing"
+        );
+        test_set_evidence_allocation_failure(false);
+    }
 }
 
 #[test]
@@ -2459,10 +3266,10 @@ fn injected_progress_allocation_failure_is_atomic_and_latched() {
         COMPLETE_PHASES,
     )
     .expect("complete test phase catalog");
-    let frozen_evidence_bytes = coordinator
+    let frozen_administrative_bytes = coordinator
         .try_ledger_snapshot()
         .expect("complete frozen evidence baseline")
-        .current_evidence_bytes();
+        .current_administrative_bytes();
 
     test_set_evidence_allocation_failure(true);
     let error = coordinator
@@ -2485,22 +3292,27 @@ fn injected_progress_allocation_failure_is_atomic_and_latched() {
         .try_ledger_snapshot()
         .expect("allocation failure leaves capturable evidence");
     assert_eq!(
-        interim.current_evidence_bytes(),
-        frozen_evidence_bytes,
+        interim.current_administrative_bytes(),
+        frozen_administrative_bytes,
         "failed growth must roll back current evidence bytes"
     );
     assert!(
-        interim.peak_evidence_bytes() > frozen_evidence_bytes,
+        interim.peak_administrative_bytes() > frozen_administrative_bytes,
         "the rejected allocator envelope remains visible in the high-water mark"
     );
 
+    let expected_administration = coordinator.known_administrative_bytes().unwrap();
+    assert_eq!(expected_administration, frozen_administrative_bytes);
     let failure = coordinator
         .finish()
         .expect_err("the accepted progress failure remains terminal");
     let (cause, final_snapshot) = failure.into_parts();
     assert_eq!(cause, crate::PublicationCause::Control(error));
-    assert_eq!(final_snapshot.current_evidence_bytes(), 0);
-    assert!(final_snapshot.peak_evidence_bytes() > frozen_evidence_bytes);
+    assert_eq!(
+        final_snapshot.current_administrative_bytes(),
+        expected_administration
+    );
+    assert!(final_snapshot.peak_administrative_bytes() > frozen_administrative_bytes);
 }
 
 #[test]
@@ -2518,10 +3330,10 @@ fn injected_progress_over_envelope_failure_preserves_storage_and_releases_on_fin
     coordinator
         .report_progress(Progress::Work, Unit::Work, 1, None)
         .expect("initial progress state");
-    let frozen_evidence_bytes = coordinator
+    let frozen_administrative_bytes = coordinator
         .try_ledger_snapshot()
         .expect("progress evidence baseline")
-        .current_evidence_bytes();
+        .current_administrative_bytes();
 
     test_fail_next_evidence_over_envelope();
     let error = coordinator
@@ -2548,21 +3360,26 @@ fn injected_progress_over_envelope_failure_preserves_storage_and_releases_on_fin
         .try_ledger_snapshot()
         .expect("terminal coordinator retains capturable evidence");
     assert_eq!(
-        interim.current_evidence_bytes(),
-        frozen_evidence_bytes,
+        interim.current_administrative_bytes(),
+        frozen_administrative_bytes,
         "failed growth must restore current evidence exactly"
     );
     assert!(
-        interim.peak_evidence_bytes() > frozen_evidence_bytes,
+        interim.peak_administrative_bytes() > frozen_administrative_bytes,
         "the transient candidate envelope remains visible in the high-water mark"
     );
 
+    let expected_administration = coordinator.known_administrative_bytes().unwrap();
+    assert_eq!(expected_administration, frozen_administrative_bytes);
     let failure = coordinator
         .finish()
         .expect_err("the envelope failure remains terminal");
     let (cause, final_snapshot) = failure.into_parts();
     assert_eq!(cause, crate::PublicationCause::Control(error));
-    assert_eq!(final_snapshot.current_evidence_bytes(), 0);
+    assert_eq!(
+        final_snapshot.current_administrative_bytes(),
+        expected_administration
+    );
 }
 
 #[test]
@@ -2570,7 +3387,7 @@ fn finalization_never_enters_the_evidence_allocator() {
     let _guard = EVIDENCE_ALLOCATION_TEST_LOCK
         .lock()
         .expect("allocation test lock");
-    let ledger = test_ledger(limits());
+    let mut ledger = test_ledger(limits());
     let reservation = ledger
         .reserve(Phase::Build, Dimension::Bytes, 1)
         .expect("live reservation");
@@ -2581,21 +3398,29 @@ fn finalization_never_enters_the_evidence_allocator() {
         .expect("scalar evidence is allocation-free");
     assert_eq!(evidence.current_live_bytes(), 0);
     assert!(test_evidence_allocation_failure_is_armed());
+    let expected_administration = ledger.known_administrative_bytes(0).unwrap();
     let snapshot = ledger.finish().expect("clean finalization");
-    assert_eq!(snapshot.current_evidence_bytes(), 0);
+    assert_eq!(
+        snapshot.current_administrative_bytes(),
+        expected_administration
+    );
     assert!(test_evidence_allocation_failure_is_armed());
     test_set_evidence_allocation_failure(false);
 
-    let ledger = test_ledger(limits());
+    let mut ledger = test_ledger(limits());
     let reservation = ledger
         .reserve(Phase::Build, Dimension::Bytes, 1)
         .expect("retained reservation");
+    let expected_administration = ledger.known_administrative_bytes(0).unwrap();
     test_set_evidence_allocation_failure(true);
     let error = ledger
         .finish()
         .expect_err("live state is an invariant failure");
     assert_eq!(error.snapshot().current_live_bytes(), 1);
-    assert!(error.snapshot().current_evidence_bytes() > 0);
+    assert_eq!(
+        error.snapshot().current_administrative_bytes(),
+        expected_administration
+    );
     assert!(test_evidence_allocation_failure_is_armed());
     test_set_evidence_allocation_failure(false);
     drop(reservation);
@@ -2603,10 +3428,11 @@ fn finalization_never_enters_the_evidence_allocator() {
 
 #[test]
 fn completed_phase_survives_clean_and_non_clean_final_snapshots() {
-    let clean =
+    let mut clean =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("clean frozen catalog");
     clean
+        .view()
         .try_complete_phase(Phase::Build)
         .expect("build completes");
     assert_eq!(
@@ -2617,10 +3443,11 @@ fn completed_phase_survives_clean_and_non_clean_final_snapshots() {
         Some(Phase::Build)
     );
 
-    let non_clean =
+    let mut non_clean =
         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build, Phase::Finalize])
             .expect("non-clean frozen catalog");
     non_clean
+        .view()
         .try_complete_phase(Phase::Build)
         .expect("build completes");
     let reservation = non_clean
@@ -2651,8 +3478,8 @@ fn probe_values<P, D>(probe: &LedgerTestProbe<P, D>) -> (u64, u64) {
 
 #[test]
 fn typed_foreign_attribution_push_returns_the_token_without_mutating_either_ledger() {
-    let target = test_ledger(typed_limits());
-    let foreign = test_ledger(typed_limits());
+    let mut target = test_ledger(typed_limits());
+    let mut foreign = test_ledger(typed_limits());
     let target_probe = target.test_probe();
     let foreign_probe = foreign.test_probe();
     let mut target_batch = target
@@ -2684,7 +3511,7 @@ fn typed_foreign_attribution_push_returns_the_token_without_mutating_either_ledg
 
 #[test]
 fn typed_commitment_resolves_its_dimension_before_entering_the_batch() {
-    let ledger = test_ledger(typed_limits());
+    let mut ledger = test_ledger(typed_limits());
     let probe = ledger.test_probe();
     let mut batch = ledger
         .try_attribution_batch::<CanonicalOutput>(Phase::Build, Dimension::Bytes, 0, 1)
@@ -2742,8 +3569,9 @@ fn sealed_exact_destinations_do_not_reopen_work_or_allow_early_primary_binding()
     ledger.seal_ordinary_work().unwrap();
     let before = ledger.try_snapshot().unwrap();
     ledger
-        .try_qualify_and_push_exact_primary_commitment_pair(
-            &baseline,
+        .as_read()
+        .try_qualify_and_push_exact_primary_commitment_pair_rows(
+            baseline.as_read(),
             &mut canonical,
             OutputCommitment::new(Dimension::Bytes, 1),
             &mut outcome_evidence,
@@ -2762,8 +3590,8 @@ fn sealed_exact_destinations_do_not_reopen_work_or_allow_early_primary_binding()
         Err(LedgerCause::PublicationAlreadyPending)
     ));
     assert_eq!(
-        ledger.try_bind_primary(
-            &mut baseline,
+        ledger.as_read().try_bind_primary_rows(
+            baseline.view(),
             Some(&mut canonical),
             Some(&mut outcome_evidence),
             true,
@@ -2773,8 +3601,9 @@ fn sealed_exact_destinations_do_not_reopen_work_or_allow_early_primary_binding()
     assert_eq!(ledger.try_snapshot().unwrap(), before);
     ledger.close_work().unwrap();
     ledger
-        .try_bind_primary(
-            &mut baseline,
+        .as_read()
+        .try_bind_primary_rows(
+            baseline.view(),
             Some(&mut canonical),
             Some(&mut outcome_evidence),
             true,
@@ -2833,13 +3662,15 @@ fn exact_pair_prequalification_matches_the_complete_future_batch_overflow() {
     let probe_before = probe_values(&probe);
     let canonical_len_before = canonical.commitment_len();
     let evidence_len_before = outcome_evidence.commitment_len();
-    let cause = match ledger.try_qualify_and_push_exact_primary_commitment_pair(
-        &baseline,
-        &mut canonical,
-        OutputCommitment::new(Dimension::Bytes, 1),
-        &mut outcome_evidence,
-        OutputCommitment::new(Dimension::Bytes, 1),
-    ) {
+    let cause = match ledger
+        .as_read()
+        .try_qualify_and_push_exact_primary_commitment_pair_rows(
+            baseline.as_read(),
+            &mut canonical,
+            OutputCommitment::new(Dimension::Bytes, 1),
+            &mut outcome_evidence,
+            OutputCommitment::new(Dimension::Bytes, 1),
+        ) {
         Err(CommitmentPairPushError::Ledger(cause)) => cause,
         Ok(()) => panic!("the complete future canonical batch must overflow"),
         Err(_) => panic!("the exact pair returned a non-ledger rejection"),
@@ -2874,8 +3705,9 @@ fn exact_pair_prequalification_matches_the_complete_future_batch_overflow() {
     let complete_canonical_len_before = canonical.commitment_len();
     let complete_evidence_len_before = outcome_evidence.commitment_len();
     let later_bind_cause = ledger
-        .try_bind_primary(
-            &mut baseline,
+        .as_read()
+        .try_bind_primary_rows(
+            baseline.view(),
             Some(&mut canonical),
             Some(&mut outcome_evidence),
             true,
@@ -2901,8 +3733,8 @@ fn exact_pair_prequalification_matches_the_complete_future_batch_overflow() {
 
 #[test]
 fn empty_typed_batch_still_rejects_a_foreign_ledger_owner() {
-    let target = test_ledger(typed_limits());
-    let foreign = test_ledger(typed_limits());
+    let mut target = test_ledger(typed_limits());
+    let mut foreign = test_ledger(typed_limits());
     let target_probe = target.test_probe();
     let foreign_probe = foreign.test_probe();
     let mut target_batch = target
@@ -2935,8 +3767,8 @@ fn empty_typed_batch_still_rejects_a_foreign_ledger_owner() {
 
 #[test]
 fn typed_foreign_fallback_batch_rejects_the_baseline_without_mutation() {
-    let target = test_ledger(typed_limits());
-    let foreign = test_ledger(typed_limits());
+    let mut target = test_ledger(typed_limits());
+    let mut foreign = test_ledger(typed_limits());
     let target_probe = target.test_probe();
     let foreign_probe = foreign.test_probe();
     let canonical = target
@@ -2978,7 +3810,7 @@ fn typed_foreign_fallback_batch_rejects_the_baseline_without_mutation() {
 #[test]
 fn typed_terminal_qualification_rejects_a_foreign_discard_batch() {
     let mut target = test_ledger(typed_limits());
-    let foreign = test_ledger(typed_limits());
+    let mut foreign = test_ledger(typed_limits());
     let target_probe = target.test_probe();
     let foreign_probe = foreign.test_probe();
     let canonical = target
@@ -3007,11 +3839,18 @@ fn typed_terminal_qualification_rejects_a_foreign_discard_batch() {
     let foreign_before = probe_values(&foreign_probe);
     assert_eq!(target_before.0, 1);
     assert_eq!(foreign_before.0, 2);
+    assert!(target_before.1 > 0);
+    assert!(foreign_before.1 > 5);
+    let foreign_source_storage = (
+        foreign_source.attributions.as_ptr(),
+        foreign_source.attributions.capacity(),
+    );
 
     let mut baseline = baseline;
     let mut foreign_source = Some(foreign_source);
     let rejection = target
-        .try_bind_primary(&mut baseline, foreign_source.as_mut(), None, true)
+        .as_read()
+        .try_bind_primary_rows(baseline.view(), foreign_source.as_mut(), None, true)
         .expect_err("foreign primary source must be rejected");
 
     assert!(matches!(rejection, LedgerCause::OwnerMismatch));
@@ -3019,29 +3858,44 @@ fn typed_terminal_qualification_rejects_a_foreign_discard_batch() {
     assert_eq!(probe_values(&foreign_probe), foreign_before);
     target.seal_ordinary_work().unwrap();
     target.close_work().unwrap();
-    let proof = baseline.into_fallback_proof(target, foreign_source, None);
-    let proof = match proof.try_into_qualified_discards() {
-        Ok(_) => panic!("a foreign discard batch must not qualify for terminal mutation"),
-        Err(proof) => proof,
-    };
-    drop(proof);
-    assert_eq!(probe_values(&target_probe), (0, 0));
-    assert_eq!(probe_values(&foreign_probe), (0, 0));
-}
-
-fn fault_inject_unacknowledged_discard_ready(
-    proof: TypedFreezeProof<Owner, Phase, Dimension>,
-) -> FreezeReadyTypedProof<Owner, Phase, Dimension> {
-    let qualified = match proof.qualify_terminal() {
-        Ok(qualified) => qualified,
-        Err(proof) => {
-            drop(proof);
-            panic!("fault-injected discard proof must qualify");
-        }
-    };
-    FreezeReadyTypedProof {
-        proof: Some(qualified),
-    }
+    let mut root = root_for_ledger(target);
+    let proof = root.fallback_proof(baseline, foreign_source, None);
+    assert!(
+        proof.try_into_qualified_discards().is_err(),
+        "a foreign discard batch must not qualify for terminal mutation"
+    );
+    assert!(target_probe.is_available());
+    assert!(foreign_probe.is_available());
+    assert_eq!(probe_values(&target_probe), target_before);
+    assert_eq!(probe_values(&foreign_probe), foreign_before);
+    assert!(
+        root.baseline
+            .as_ref()
+            .expect("the target baseline remains in the fixture")
+            .canonical_assembly
+            .capacity_cover
+            .is_some()
+    );
+    let foreign_source = root
+        .canonical_source
+        .as_ref()
+        .expect("the foreign batch remains in the fixture");
+    assert!(foreign_source.validate_selected_owner(&foreign));
+    assert_eq!(foreign_source.attribution_len(), 1);
+    assert_eq!(foreign_source.attributions[0].core.bytes, 5);
+    assert_eq!(foreign_source.active_count(), Some(foreign_before.0));
+    assert_eq!(
+        (
+            foreign_source.attributions.as_ptr(),
+            foreign_source.attributions.capacity(),
+        ),
+        foreign_source_storage
+    );
+    drop(root);
+    assert!(target_probe.is_available());
+    assert!(foreign_probe.is_available());
+    assert_eq!(probe_values(&target_probe), target_before);
+    assert_eq!(probe_values(&foreign_probe), foreign_before);
 }
 
 #[test]
@@ -3104,12 +3958,37 @@ fn unacknowledged_discards_reject_detach_and_retain_the_complete_cover() {
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let ready = fault_inject_unacknowledged_discard_ready(baseline.into_fallback_proof(
-        ledger,
-        Some(discard_canonical),
-        Some(discard_evidence),
-    ));
-    let error = match ready.try_into_detached() {
+    let mut root = root_for_ledger(ledger);
+    let mut baseline = baseline;
+    assert!(baseline.try_prepare_fallback_sources().is_ok());
+    root.baseline = Some(baseline);
+    root.canonical_source = Some(discard_canonical);
+    root.evidence_source = Some(discard_evidence);
+    let last_completed_phase = {
+        let mut loan = root.invocation.terminal_loan_for_test();
+        let known_administrative_bytes = loan.known_administrative_bytes();
+        let baseline = root
+            .baseline
+            .as_ref()
+            .expect("the fixture owns the prepared fallback baseline");
+        let mut ledger = loan.view();
+        ledger
+            .try_qualify_terminal(
+                TerminalBatchView {
+                    canonical: &baseline.canonical_assembly,
+                    evidence: &baseline.evidence_assembly,
+                    deferred_canonical_storage: None,
+                    deferred_evidence_storage_first: Some(&baseline.evidence),
+                    deferred_evidence_storage_second: Some(&baseline.fallback),
+                    discard_canonical: root.canonical_source.as_ref(),
+                    discard_evidence: root.evidence_source.as_ref(),
+                },
+                known_administrative_bytes,
+            )
+            .expect("fault-injected discard owners must qualify")
+    };
+    let invocation = root.invocation.take_terminal_invocation_for_test();
+    let error = match invocation.try_detach_typed(last_completed_phase, root.fallback_batches()) {
         Ok(proof) => {
             proof.retain_fail_closed();
             panic!("unacknowledged discard owners must reject exclusive detach");
@@ -3125,14 +4004,18 @@ fn unacknowledged_discards_reject_detach_and_retain_the_complete_cover() {
     assert_eq!(error.test_projected_live_bytes(), 0);
     assert!(error.test_cover_matches_state());
     assert!(
-        !probe.is_available(),
-        "owned detach must consume the ledger state"
+        probe.is_available(),
+        "a pre-detach failure must preserve the actual shared storage owner"
     );
 
     error.retain_fail_closed();
     let (cover_releases, storage_first) = test_detached_cover_release_observation();
     assert_eq!(cover_releases, 0);
     assert!(storage_first);
+    drop(root);
+    assert!(probe.is_available());
+    assert_eq!(probe.current_live_bytes(), before_live);
+    assert_eq!(probe.active_reservations(), before_active);
 }
 
 #[test]
@@ -3233,7 +4116,7 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
 
     let snapshot_before = ledger.try_snapshot().expect("pre-rejection snapshot");
     let probe_before = probe_values(&probe);
-    let publication_before = lock(&ledger.state).publication;
+    let publication_before = ledger.state.read().publication;
     let baseline_before = (
         batch_state!(&baseline.canonical_assembly),
         batch_state!(&baseline.evidence_assembly),
@@ -3244,8 +4127,9 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
     let evidence_source_before = batch_state!(&evidence_source);
 
     let rejection = ledger
-        .try_bind_primary(
-            &mut baseline,
+        .as_read()
+        .try_bind_primary_rows(
+            baseline.view(),
             Some(&mut canonical_source),
             Some(&mut evidence_source),
             true,
@@ -3266,7 +4150,7 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
         snapshot_before
     );
     assert_eq!(probe_values(&probe), probe_before);
-    assert_eq!(lock(&ledger.state).publication, publication_before);
+    assert_eq!(ledger.state.read().publication, publication_before);
     assert_eq!(
         (
             batch_state!(&baseline.canonical_assembly),
@@ -3280,8 +4164,9 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
     assert_eq!(batch_state!(&evidence_source), evidence_source_before);
 
     ledger
-        .try_bind_primary(
-            &mut baseline,
+        .as_read()
+        .try_bind_primary_rows(
+            baseline.view(),
             Some(&mut canonical_source),
             Some(&mut evidence_source),
             false,
@@ -3293,7 +4178,8 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let proof = ledger.finish_bound_primary(
+    let mut root = root_for_ledger(ledger);
+    let proof = root.primary_proof(
         baseline,
         Some(canonical_source),
         Some(evidence_source),
@@ -3304,10 +4190,12 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
         Ok(_) => panic!("evidence-only retry must leave only canonical storage for discard"),
         Err(_) => panic!("bound evidence-only retry must qualify for terminal freeze"),
     };
-    let detached = match discard
-        .release_discard_after_physical_cleanup()
-        .try_into_detached()
-    {
+    let ready = discard.release_discard_after_physical_cleanup();
+    let last_completed_phase = ready.last_completed_phase();
+    assert!(ready.seal_to_root().is_ok());
+    let invocation = root.invocation.take_terminal_invocation_for_test();
+    let batches = root.primary_batches(false);
+    let detached = match invocation.try_detach_typed(last_completed_phase, batches) {
         Ok(proof) => proof,
         Err(error) => {
             let kind = error.kind();
@@ -3328,7 +4216,7 @@ fn typed_primary_rejection_preserves_batches_for_evidence_only_retry() {
     let terminal = detached.commit_account_bound_for_test();
     assert_eq!(terminal.current_live_bytes, 0);
     assert_eq!(terminal.active_reservations, 0);
-    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert_eq!(terminal.current_administrative_bytes, 0);
     assert!(terminal.published);
 }
 
@@ -3415,24 +4303,46 @@ fn stateful_ledger(
 }
 
 fn detach_while_ord_panics(
-    proof: TypedFreezeProof<Owner, StatefulOrd, StatefulOrd>,
+    root: &mut NumericTerminalTestRoot<StatefulOrd, StatefulOrd>,
+    layout: TypedTerminalLayout,
 ) -> DetachedTypedFreezeProof<Owner, StatefulOrd, StatefulOrd> {
-    PANIC_ON_BOUND_ORD.store(true, Ordering::SeqCst);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match proof.try_into_qualified_discards() {
-            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => match proof.try_into_detached() {
-                Ok(proof) => proof,
-                Err(error) => {
-                    let kind = error.kind();
-                    error.retain_fail_closed();
-                    panic!("bound typed proof failed to detach: {kind:?}")
-                }
-            },
+        let proof = match layout {
+            TypedTerminalLayout::Fallback => root
+                .baseline
+                .as_mut()
+                .expect("the fixture owns the prepared fallback baseline")
+                .view()
+                .finish_prepared_fallback_proof(
+                    root.invocation.terminal_loan_for_test(),
+                    None,
+                    None,
+                ),
+            TypedTerminalLayout::Primary => root.borrow_primary_proof(true),
+        };
+        PANIC_ON_BOUND_ORD.store(true, Ordering::SeqCst);
+        let ready = match proof.try_into_qualified_discards() {
+            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => proof,
             Ok(proof) => {
                 proof.retain_fail_closed();
                 panic!("test proof unexpectedly requires physical discard acknowledgement")
             }
             Err(_) => panic!("bound typed proof must qualify"),
+        };
+        let last_completed_phase = ready.last_completed_phase();
+        assert!(ready.seal_to_root().is_ok());
+        let invocation = root.invocation.take_terminal_invocation_for_test();
+        let batches = match layout {
+            TypedTerminalLayout::Fallback => root.fallback_batches(),
+            TypedTerminalLayout::Primary => root.primary_batches(true),
+        };
+        match invocation.try_detach_typed(last_completed_phase, batches) {
+            Ok(proof) => proof,
+            Err(error) => {
+                let kind = error.kind();
+                error.retain_fail_closed();
+                panic!("bound typed proof failed to detach: {kind:?}")
+            }
         }
     }));
     PANIC_ON_BOUND_ORD.store(false, Ordering::SeqCst);
@@ -3448,6 +4358,7 @@ fn consumed_batch_never_compares_owner_keys_after_its_lookup_preflight() {
     ledger.charge_attempted(first, 1).unwrap();
     ledger.charge_attempted(second, 1).unwrap();
     let (mut work, roles) = ledger
+        .view()
         .bind_internal_work([first, first, second])
         .expect("all keys bind once");
     let comparisons = BOUND_ORD_COMPARISON_COUNT.load(Ordering::SeqCst);
@@ -3481,6 +4392,7 @@ fn producer_attempted_never_compares_owner_keys_after_binding() {
     let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
     let mut ledger = stateful_ledger(stateful_ord_limits(), &[StatefulOrd(2)]);
     let (mut work, roles) = ledger
+        .view()
         .bind_internal_work([StatefulOrd(7)])
         .expect("producer key binds once");
     let comparisons = BOUND_ORD_COMPARISON_COUNT.load(Ordering::SeqCst);
@@ -3511,7 +4423,7 @@ fn reservation_transition_never_compares_owner_keys_after_its_lookup_preflight()
     let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
     let phase = StatefulOrd(2);
     let dimension = StatefulOrd(7);
-    let ledger = stateful_ledger(stateful_ord_limits(), &[phase]);
+    let mut ledger = stateful_ledger(stateful_ord_limits(), &[phase]);
     let probe = ledger.test_probe();
     let first = ledger
         .reserve(phase, dimension, 2)
@@ -3546,7 +4458,7 @@ fn reservation_construction_binds_keys_once_and_resize_uses_only_bound_positions
     let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
     let phase = StatefulOrd(2);
     let dimension = StatefulOrd(7);
-    let ledger = stateful_ledger(stateful_ord_limits(), &[phase]);
+    let mut ledger = stateful_ledger(stateful_ord_limits(), &[phase]);
 
     BOUND_ORD_COMPARISONS_REMAINING.store(2, Ordering::SeqCst);
     let reservation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3580,35 +4492,48 @@ fn commitment_aggregate_panic_releases_current_evidence_before_unwind() {
     let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
     let phase = StatefulOrd(2);
     let dimension = StatefulOrd(7);
-    let mut ledger = stateful_ledger(stateful_ord_limits(), &[phase]);
-    let before = lock(&ledger.state).current_evidence_bytes;
-    let mut reservations = PublicationReservationBatch::default();
+    for promoted in [false, true] {
+        let mut ledger = stateful_ledger(stateful_ord_limits(), &[phase]);
+        if promoted {
+            drop(ledger.reserve(phase, dimension, 0).unwrap());
+        }
+        let before = ledger.state.read().current_administrative_bytes;
+        let backings = storage_backings(&ledger.state);
+        let original_owner = ledger.state.shared().cloned();
+        let mut reservations = PublicationReservationBatch::default();
 
-    PANIC_ON_BOUND_ORD.store(true, Ordering::SeqCst);
-    let aggregation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ledger.prepare_publication(&mut reservations, &[Commitment::new(dimension, 3)])
-    }));
-    PANIC_ON_BOUND_ORD.store(false, Ordering::SeqCst);
+        PANIC_ON_BOUND_ORD.store(true, Ordering::SeqCst);
+        let aggregation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ledger.prepare_publication(&mut reservations, &[Commitment::new(dimension, 3)])
+        }));
+        PANIC_ON_BOUND_ORD.store(false, Ordering::SeqCst);
 
-    assert!(
-        aggregation.is_err(),
-        "owner comparator must reach the test panic"
-    );
-    assert!(
-        !ledger.state.is_poisoned(),
-        "aggregate comparison must run outside the storage guard"
-    );
-    ledger
-        .work
-        .check_integrity(ledger.work_catalog.len())
-        .expect("aggregate unwind preserves numeric integrity");
-    ledger
-        .ensure_work_open()
-        .expect("failed aggregate never entered publication");
-    let state = lock(&ledger.state);
-    assert_eq!(state.current_evidence_bytes, before);
-    assert_eq!(state.publication, PublicationState::Open);
-    assert_eq!(state.dimensions[0].state.pending_publication, 0);
+        assert!(
+            aggregation.is_err(),
+            "owner comparator must reach the test panic"
+        );
+        assert_eq!(ledger.state.shared().is_some(), promoted);
+        if let Some(original) = original_owner {
+            let current = ledger.state.shared().unwrap();
+            assert!(Arc::ptr_eq(current, &original));
+            assert!(
+                !current.is_poisoned(),
+                "aggregate comparison must run outside the storage guard"
+            );
+        }
+        assert_eq!(storage_backings(&ledger.state), backings);
+        ledger
+            .work
+            .check_integrity(ledger.work_catalog.len())
+            .expect("aggregate unwind preserves numeric integrity");
+        ledger
+            .ensure_work_open()
+            .expect("failed aggregate never entered publication");
+        let state = ledger.state.read();
+        assert_eq!(state.current_administrative_bytes, before);
+        assert_eq!(state.publication, PublicationState::Open);
+        assert_eq!(state.dimensions[0].state.pending_publication, 0);
+    }
 }
 
 #[test]
@@ -3630,10 +4555,10 @@ fn pending_publication_publish_and_drop_use_positions_after_ord_reverses() {
     published
         .expect("publish compared a dimension after admission")
         .expect("bound publication must succeed");
-    assert_eq!(lock(&ledger.state).dimensions[1].state.committed, 3);
+    assert_eq!(ledger.state.read().dimensions[1].state.committed, 3);
 
     let mut rollback_ledger = stateful_ledger(stateful_multi_dimension_limits(), &[phase]);
-    let baseline_evidence = lock(&rollback_ledger.state).current_evidence_bytes;
+    let baseline_evidence = rollback_ledger.state.read().current_administrative_bytes;
     let mut rollback_reservations = PublicationReservationBatch::default();
     let rollback = rollback_ledger
         .prepare_publication(&mut rollback_reservations, &[Commitment::new(dimension, 4)])
@@ -3642,9 +4567,13 @@ fn pending_publication_publish_and_drop_use_positions_after_ord_reverses() {
     let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(rollback)));
     REVERSE_BOUND_ORD.store(false, Ordering::SeqCst);
     dropped.expect("rollback compared a dimension after admission");
-    let state = lock(&rollback_ledger.state);
+    let state = rollback_ledger.state.read();
     assert_eq!(state.dimensions[1].state.pending_publication, 0);
-    assert_eq!(state.current_evidence_bytes, baseline_evidence);
+    assert_eq!(
+        state.current_administrative_bytes,
+        baseline_evidence
+            + size_of::<Mutex<Option<LedgerState<StatefulOrd, StatefulOrd>>>>() as u64
+    );
     assert_eq!(state.publication, PublicationState::Closing);
     drop(state);
     assert_eq!(
@@ -3655,7 +4584,7 @@ fn pending_publication_publish_and_drop_use_positions_after_ord_reverses() {
 
 #[test]
 fn fallback_baseline_counts_zero_byte_attribution_capabilities() {
-    let ledger = test_ledger(typed_limits());
+    let mut ledger = test_ledger(typed_limits());
     let extra = ledger
         .reserve_operation_attribution::<OutcomeEvidenceDestination>(
             Phase::Build,
@@ -3687,14 +4616,14 @@ fn fallback_baseline_counts_zero_byte_attribution_capabilities() {
     drop(extra);
 }
 
-fn freeze_ready_primary_with_both_destinations() -> (
-    FreezeReadyTypedProof<Owner, Phase, Dimension>,
-    LedgerTestProbe<Phase, Dimension>,
-) {
+fn primary_with_both_destinations(
+    root: &mut TerminalTestRoot,
+) -> (LedgerTestProbe<Phase, Dimension>, u64) {
     let mut ledger = Ledger::<Owner, Phase, Dimension>::try_new(typed_limits(), &[Phase::Build])
         .expect("typed frozen catalog");
     let probe = ledger.test_probe();
     ledger
+        .view()
         .try_complete_phase(Phase::Build)
         .expect("build completes before terminal qualification");
     let canonical_assembly = ledger
@@ -3755,8 +4684,9 @@ fn freeze_ready_primary_with_both_destinations() -> (
             .is_ok()
     );
     ledger
-        .try_bind_primary(
-            &mut baseline,
+        .as_read()
+        .try_bind_primary_rows(
+            baseline.view(),
             Some(&mut canonical_source),
             Some(&mut evidence_source),
             true,
@@ -3768,28 +4698,41 @@ fn freeze_ready_primary_with_both_destinations() -> (
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let proof = ledger.finish_bound_primary(
-        baseline,
-        Some(canonical_source),
-        Some(evidence_source),
-        true,
-    );
-    let ready = match proof.try_into_qualified_discards() {
+    let index_bytes = capacity_bytes(&ledger.work_catalog).unwrap()
+        + capacity_bytes(&ledger.work.rows).unwrap()
+        + capacity_bytes(&ledger.phase_catalogue).unwrap();
+    root.install_ledger_for_test(ledger);
+    root.baseline = Some(baseline);
+    root.canonical_source = Some(canonical_source);
+    root.evidence_source = Some(evidence_source);
+    (probe, index_bytes)
+}
+
+fn freeze_ready_primary_with_both_destinations(
+    root: &mut TerminalTestRoot,
+) -> FreezeReadyTypedProof<'_, Owner, Phase, Progress, Unit, Dimension> {
+    match root
+        .borrow_primary_proof(true)
+        .try_into_qualified_discards()
+    {
         Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => proof,
         Ok(proof) => {
             proof.retain_fail_closed();
             panic!("bound primary proof unexpectedly requires a discard")
         }
         Err(_) => panic!("bound primary proof must qualify"),
-    };
-    (ready, probe)
+    }
 }
 
 #[test]
 fn detached_terminal_projection_preserves_live_cover_until_eligibility_commit() {
-    let (ready, probe) = freeze_ready_primary_with_both_destinations();
+    let mut root = TerminalTestRoot::new();
+    let (probe, index_bytes) = primary_with_both_destinations(&mut root);
+    let ready = freeze_ready_primary_with_both_destinations(&mut root);
     let shared_live = probe.current_live_bytes();
     let shared_active = probe.active_reservations();
+    let administrative_before = probe.current_administrative_bytes();
+    let shared_bytes = size_of::<Mutex<Option<LedgerState<Phase, Dimension>>>>() as u64;
     assert!(shared_live > 0);
     assert!(shared_active > 0);
     assert_eq!(
@@ -3807,7 +4750,11 @@ fn detached_terminal_projection_preserves_live_cover_until_eligibility_commit() 
         0
     );
 
-    let detached = match ready.try_into_detached() {
+    let last_completed_phase = ready.last_completed_phase();
+    assert!(ready.seal_to_root().is_ok());
+    let invocation = root.invocation.take_terminal_invocation_for_test();
+    let batches = root.primary_batches(true);
+    let detached = match invocation.try_detach_typed(last_completed_phase, batches) {
         Ok(proof) => proof,
         Err(error) => {
             let kind = error.kind();
@@ -3815,10 +4762,48 @@ fn detached_terminal_projection_preserves_live_cover_until_eligibility_commit() 
             panic!("exclusive terminal detach failed: {kind:?}")
         }
     };
+    let baseline = root
+        .baseline
+        .as_ref()
+        .expect("the detached baseline slots remain in the fixture");
+    for batch in [
+        &baseline.canonical_assembly,
+        root.canonical_source
+            .as_ref()
+            .expect("the detached canonical source slot remains in the fixture"),
+    ] {
+        assert_eq!(batch.attributions.capacity(), 0);
+        assert_eq!(batch.commitments.capacity(), 0);
+        assert!(batch.capacity_cover.is_none());
+        assert!(matches!(
+            &batch.owner,
+            super::reservation::AttributionBatchOwner::Empty(_)
+        ));
+    }
+    for batch in [
+        &baseline.evidence_assembly,
+        &baseline.fallback,
+        &baseline.evidence,
+        root.evidence_source
+            .as_ref()
+            .expect("the detached evidence source slot remains in the fixture"),
+    ] {
+        assert_eq!(batch.attributions.capacity(), 0);
+        assert_eq!(batch.commitments.capacity(), 0);
+        assert!(batch.capacity_cover.is_none());
+        assert!(matches!(
+            &batch.owner,
+            super::reservation::AttributionBatchOwner::Empty(_)
+        ));
+    }
+    drop(root);
     assert!(!probe.is_available(), "weak probes must not prevent detach");
     assert_eq!(detached.test_current_live_bytes(), shared_live);
     assert_eq!(detached.test_active_reservations(), shared_active);
-    assert!(detached.test_current_evidence_bytes() > 0);
+    assert_eq!(
+        detached.test_current_administrative_bytes(),
+        administrative_before - index_bytes - shared_bytes
+    );
     assert!(detached.test_cover_matches_state());
     let detached_dimension = detached
         .test_dimension_evidence(Dimension::Bytes)
@@ -3838,7 +4823,7 @@ fn detached_terminal_projection_preserves_live_cover_until_eligibility_commit() 
     let terminal = detached.commit_account_bound_for_test();
     assert_eq!(terminal.current_live_bytes, 0);
     assert_eq!(terminal.active_reservations, 0);
-    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert_eq!(terminal.current_administrative_bytes, 0);
     assert!(terminal.published);
     let (cover_releases, storage_first) = test_detached_cover_release_observation();
     assert!(cover_releases > 0);
@@ -3846,21 +4831,86 @@ fn detached_terminal_projection_preserves_live_cover_until_eligibility_commit() 
 }
 
 #[test]
+fn forgotten_freeze_ready_proof_preserves_actual_batches_through_root_drop() {
+    let mut root = TerminalTestRoot::new();
+    let (probe, _) = primary_with_both_destinations(&mut root);
+    let ready = freeze_ready_primary_with_both_destinations(&mut root);
+    let before = probe_values(&probe);
+    let administrative_before = probe.current_administrative_bytes();
+    assert!(before.0 > 0);
+    assert!(before.1 > 0);
+    assert!(administrative_before > 0);
+
+    std::mem::forget(ready);
+
+    let baseline = root
+        .baseline
+        .as_ref()
+        .expect("forgotten terminal permission leaves the actual baseline in the fixture");
+    assert_eq!(baseline.canonical_assembly.attribution_len(), 1);
+    assert_eq!(baseline.canonical_assembly.commitment_len(), 1);
+    assert_eq!(baseline.canonical_assembly.attributed_bytes(), Some(5));
+    assert_eq!(baseline.evidence_assembly.attribution_len(), 1);
+    assert_eq!(baseline.evidence_assembly.commitment_len(), 1);
+    assert_eq!(baseline.evidence_assembly.attributed_bytes(), Some(4));
+    for batch in [
+        &baseline.canonical_assembly,
+        root.canonical_source
+            .as_ref()
+            .expect("forgotten terminal permission leaves the canonical source in the fixture"),
+    ] {
+        assert!(batch.attributions.capacity() > 0);
+        assert!(batch.commitments.capacity() > 0);
+        assert!(batch.capacity_cover.is_some());
+        assert!(matches!(
+            &batch.owner,
+            super::reservation::AttributionBatchOwner::Shared(_)
+        ));
+    }
+    for batch in [
+        &baseline.evidence_assembly,
+        root.evidence_source
+            .as_ref()
+            .expect("forgotten terminal permission leaves the evidence source in the fixture"),
+    ] {
+        assert!(batch.attributions.capacity() > 0);
+        assert!(batch.commitments.capacity() > 0);
+        assert!(batch.capacity_cover.is_some());
+        assert!(matches!(
+            &batch.owner,
+            super::reservation::AttributionBatchOwner::Shared(_)
+        ));
+    }
+    assert!(probe.is_available());
+    assert!(probe.is_terminal_qualified());
+    assert_eq!(probe_values(&probe), before);
+    assert_eq!(probe.current_administrative_bytes(), administrative_before);
+
+    drop(root);
+
+    assert!(probe.is_available());
+    assert_eq!(probe_values(&probe), before);
+    assert_eq!(probe.current_administrative_bytes(), administrative_before);
+}
+
+#[test]
 fn extra_strong_ledger_owner_rejects_detach_and_retains_the_complete_cover() {
-    let (ready, probe) = freeze_ready_primary_with_both_destinations();
-    let extra_owner = Arc::clone(
-        &ready
-            .proof
-            .as_ref()
-            .expect("qualified proof")
-            .proof
-            .as_ref()
-            .expect("typed proof")
-            .ledger
-            .state,
-    );
+    let mut root = TerminalTestRoot::new();
+    let (probe, _) = primary_with_both_destinations(&mut root);
+    let ready = freeze_ready_primary_with_both_destinations(&mut root);
+    let extra_owner = probe
+        .state
+        .upgrade()
+        .expect("the original shared owner remains installed");
     let live_before = lock(&extra_owner).current_live_bytes;
-    let error = match ready.try_into_detached() {
+    let active_before = lock(&extra_owner).active_reservations;
+    let administrative_before = lock(&extra_owner).current_administrative_bytes;
+    let identity_before = Arc::as_ptr(&extra_owner);
+    let last_completed_phase = ready.last_completed_phase();
+    assert!(ready.seal_to_root().is_ok());
+    let invocation = root.invocation.take_terminal_invocation_for_test();
+    let batches = root.primary_batches(true);
+    let error = match invocation.try_detach_typed(last_completed_phase, batches) {
         Ok(proof) => {
             proof.retain_fail_closed();
             panic!("an extra strong ledger owner must reject exclusive detach")
@@ -3871,6 +4921,14 @@ fn extra_strong_ledger_owner_rejects_detach_and_retains_the_complete_cover() {
     assert_eq!(error.test_current_live_bytes(), live_before);
     assert!(error.test_cover_matches_state());
     assert!(probe.is_available());
+    assert_eq!(
+        Arc::as_ptr(&probe.state.upgrade().unwrap()),
+        identity_before
+    );
+    assert_eq!(
+        lock(&extra_owner).current_administrative_bytes,
+        administrative_before
+    );
     assert_eq!(lock(&extra_owner).dimensions[0].state.committed, 0);
     assert_eq!(
         lock(&extra_owner).dimensions[0]
@@ -3880,7 +4938,86 @@ fn extra_strong_ledger_owner_rejects_detach_and_retains_the_complete_cover() {
     );
     error.retain_fail_closed();
     assert_eq!(lock(&extra_owner).current_live_bytes, live_before);
+    assert_eq!(lock(&extra_owner).active_reservations, active_before);
     drop(extra_owner);
+    drop(root);
+    assert!(probe.is_available());
+    assert_eq!(probe.current_live_bytes(), live_before);
+    assert_eq!(probe.active_reservations(), active_before);
+}
+
+#[test]
+fn poisoned_ledger_rejects_detach_with_the_original_shared_owner_and_exact_cover() {
+    let mut root = TerminalTestRoot::new();
+    let (probe, _) = primary_with_both_destinations(&mut root);
+    let ready = freeze_ready_primary_with_both_destinations(&mut root);
+    let storage = probe
+        .state
+        .upgrade()
+        .expect("the original shared owner remains installed");
+    let identity = Arc::as_ptr(&storage);
+    let before = {
+        let state = lock(&storage);
+        (
+            state.current_live_bytes,
+            state.active_reservations,
+            state.current_administrative_bytes,
+            state.peak_administrative_bytes,
+            capacity_bytes(&state.dimension_snapshot_staging).unwrap(),
+            capacity_bytes(&state.phase_snapshot_staging).unwrap(),
+        )
+    };
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = storage.lock().unwrap();
+        panic!("poison the actual installed storage before detach");
+    }));
+    assert!(poisoned.is_err());
+    assert!(storage.is_poisoned());
+    drop(storage);
+
+    let last_completed_phase = ready.last_completed_phase();
+    assert!(ready.seal_to_root().is_ok());
+    let invocation = root.invocation.take_terminal_invocation_for_test();
+    let batches = root.primary_batches(true);
+    let error = match invocation.try_detach_typed(last_completed_phase, batches) {
+        Ok(proof) => {
+            proof.retain_fail_closed();
+            panic!("poisoned storage cannot become a publication capsule");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), TypedFreezeDetachErrorKind::PoisonedLedger);
+    let retained = probe
+        .state
+        .upgrade()
+        .expect("the original shared owner remains installed");
+    assert_eq!(Arc::as_ptr(&retained), identity);
+    assert!(retained.is_poisoned());
+    let state = lock(&retained);
+    assert_eq!(state.current_live_bytes, before.0);
+    assert_eq!(state.active_reservations, before.1);
+    assert_eq!(state.current_administrative_bytes, before.2);
+    assert_eq!(state.peak_administrative_bytes, before.3);
+    assert_eq!(state.dimension_snapshot_staging.capacity(), 0);
+    assert_eq!(state.phase_snapshot_staging.capacity(), 0);
+    assert_eq!(state.dimensions[0].state.committed_canonical_output, 0);
+    assert_eq!(state.dimensions[0].state.published_outcome_evidence, 0);
+    assert_eq!(
+        error
+            .projection
+            .as_ref()
+            .unwrap()
+            .current_administrative_bytes(),
+        before.2
+    );
+    assert!(before.4 + before.5 > 0);
+    drop(state);
+    error.retain_fail_closed();
+    drop(retained);
+    drop(root);
+    assert!(probe.is_available());
+    assert_eq!(probe.current_live_bytes(), before.0);
+    assert_eq!(probe.active_reservations(), before.1);
 }
 
 #[test]
@@ -3888,8 +5025,14 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
     let mut ledger = Ledger::<Owner, Phase, Dimension>::try_new(typed_limits(), &[Phase::Build])
         .expect("typed frozen catalog");
     let probe = ledger.test_probe();
-    let storage = Arc::clone(&ledger.state);
+    let storage = Arc::clone(
+        ledger
+            .state
+            .shared()
+            .expect("the test probe promoted actual storage"),
+    );
     ledger
+        .view()
         .try_complete_phase(Phase::Build)
         .expect("build completes before typed freeze");
     let canonical = ledger
@@ -3917,7 +5060,7 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
             Ok(baseline) => baseline,
             Err(_) => panic!("exact zero-byte baseline must be admitted"),
         };
-    assert_eq!(lock(&ledger.state).publication, PublicationState::Open);
+    assert_eq!(ledger.state.read().publication, PublicationState::Open);
     assert_eq!(ledger.work.header.mode, WorkMode::Ordinary);
     ledger
         .seal_ordinary_work()
@@ -3925,10 +5068,11 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    assert_eq!(lock(&ledger.state).publication, PublicationState::Closing);
+    assert_eq!(ledger.state.read().publication, PublicationState::Closing);
     assert_eq!(ledger.work.header.mode, WorkMode::Closed);
-    let qualified = match baseline
-        .into_fallback_proof(ledger, None, None)
+    let mut root = root_for_ledger(ledger);
+    let qualified = match root
+        .fallback_proof(baseline, None, None)
         .try_into_qualified_discards()
     {
         Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => proof,
@@ -3947,7 +5091,11 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
         Err(LedgerCause::PublicationAlreadyCompleted)
     );
     drop(storage);
-    let detached = match qualified.try_into_detached() {
+    let last_completed_phase = qualified.last_completed_phase();
+    assert!(qualified.seal_to_root().is_ok());
+    let invocation = root.invocation.take_terminal_invocation_for_test();
+    let detached = match invocation.try_detach_typed(last_completed_phase, root.fallback_batches())
+    {
         Ok(proof) => proof,
         Err(error) => {
             let kind = error.kind();
@@ -3964,7 +5112,7 @@ fn included_zero_byte_attribution_freezes_to_zero_active_capabilities() {
     let terminal = detached.commit_account_bound_for_test();
     assert_eq!(terminal.current_live_bytes, 0);
     assert_eq!(terminal.active_reservations, 0);
-    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert_eq!(terminal.current_administrative_bytes, 0);
     assert!(terminal.published);
 }
 
@@ -4002,17 +5150,44 @@ fn terminal_qualification_rejects_an_out_of_bounds_zero_byte_attribution() {
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let mut proof = baseline.into_fallback_proof(ledger, None, None);
+    let before = probe_values(&probe);
+    assert!(before.0 > 0);
+    assert!(before.1 > 0);
+    let evidence_storage = (
+        baseline.evidence_assembly.attributions.as_ptr(),
+        baseline.evidence_assembly.attributions.capacity(),
+    );
+    let mut root = root_for_ledger(ledger);
+    let proof = root.fallback_proof(baseline, None, None);
     assert_eq!(proof.evidence.attributions[0].core.bytes, 0);
     proof.evidence.attributions[0].core.dimension_position = usize::MAX;
     proof.evidence.attributions[0].core.phase_position = usize::MAX;
 
-    let proof = match proof.try_into_qualified_discards() {
-        Ok(_) => panic!("out-of-bounds zero-byte attribution must not qualify"),
-        Err(proof) => proof,
-    };
-    drop(proof);
-    assert_eq!(probe_values(&probe), (0, 0));
+    assert!(
+        proof.try_into_qualified_discards().is_err(),
+        "out-of-bounds zero-byte attribution must not qualify"
+    );
+    assert!(probe.is_available());
+    assert_eq!(probe_values(&probe), before);
+    let evidence = &root
+        .baseline
+        .as_ref()
+        .expect("the invalid attribution remains in the fixture")
+        .evidence_assembly;
+    assert_eq!(evidence.attribution_len(), 1);
+    assert_eq!(evidence.attributions[0].core.bytes, 0);
+    assert_eq!(evidence.attributions[0].core.dimension_position, usize::MAX);
+    assert_eq!(evidence.attributions[0].core.phase_position, usize::MAX);
+    assert_eq!(
+        (
+            evidence.attributions.as_ptr(),
+            evidence.attributions.capacity(),
+        ),
+        evidence_storage
+    );
+    drop(root);
+    assert!(probe.is_available());
+    assert_eq!(probe_values(&probe), before);
 }
 
 #[test]
@@ -4049,7 +5224,8 @@ fn terminal_qualification_rechecks_bound_commitments_after_policy_tightening() {
     let mut baseline = baseline;
     let mut source = Some(source);
     ledger
-        .try_bind_primary(&mut baseline, source.as_mut(), None, true)
+        .as_read()
+        .try_bind_primary_rows(baseline.view(), source.as_mut(), None, true)
         .unwrap_or_else(|_| panic!("commitment must bind under the original policy"));
     ledger
         .tighten_dimension_policy(
@@ -4064,21 +5240,56 @@ fn terminal_qualification_rechecks_bound_commitments_after_policy_tightening() {
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let proof = ledger.finish_bound_primary(baseline, source, None, true);
+    let before = probe_values(&probe);
+    assert!(before.0 > 0);
+    assert!(before.1 > 0);
+    let canonical_storage = (
+        baseline.canonical_assembly.attributions.as_ptr(),
+        baseline.canonical_assembly.commitments.as_ptr(),
+    );
+    let mut root = root_for_ledger(ledger);
+    let proof = root.primary_proof(baseline, source, None, true);
 
-    let proof = match proof.try_into_qualified_discards() {
-        Ok(_) => panic!("commitment above the final policy must not qualify"),
-        Err(proof) => proof,
-    };
-    drop(proof);
-    assert_eq!(probe_values(&probe), (0, 0));
+    assert!(
+        proof.try_into_qualified_discards().is_err(),
+        "commitment above the final policy must not qualify"
+    );
+    assert!(probe.is_available());
+    assert_eq!(probe_values(&probe), before);
+    let canonical = &root
+        .baseline
+        .as_ref()
+        .expect("the rejected commitment remains in the fixture")
+        .canonical_assembly;
+    assert_eq!(canonical.attribution_len(), 1);
+    assert_eq!(canonical.attributions[0].core.bytes, 0);
+    assert_eq!(canonical.commitment_len(), 1);
+    assert_eq!(canonical.commitments[0].amount(), 5);
+    assert_eq!(
+        (
+            canonical.attributions.as_ptr(),
+            canonical.commitments.as_ptr(),
+        ),
+        canonical_storage
+    );
+    let source = root
+        .canonical_source
+        .as_ref()
+        .expect("the original source storage remains in the fixture");
+    assert!(source.attributions.is_empty());
+    assert!(source.commitments.is_empty());
+    assert!(source.capacity_cover.is_some());
+    drop(root);
+    assert!(probe.is_available());
+    assert_eq!(probe_values(&probe), before);
 }
 
 #[test]
 fn typed_final_preflight_rejects_an_invalid_completed_phase_pair_without_mutation() {
-    let ledger = Ledger::<Owner, Phase, Dimension>::try_new(typed_limits(), &[Phase::Build])
+    let mut ledger = Ledger::<Owner, Phase, Dimension>::try_new(typed_limits(), &[Phase::Build])
         .expect("typed frozen catalog");
     ledger
+        .view()
         .try_complete_phase(Phase::Build)
         .expect("build completes before fault injection");
     let canonical = ledger
@@ -4096,7 +5307,7 @@ fn typed_final_preflight_rejects_an_invalid_completed_phase_pair_without_mutatio
     let probe = ledger.test_probe();
     let before = probe_values(&probe);
     {
-        let mut state = lock(&ledger.state);
+        let mut state = ledger.state.write();
         state
             .last_completed_phase
             .as_mut()
@@ -4157,8 +5368,11 @@ fn fallback_freeze_uses_stable_positions_for_attribution_and_capacity_cover() {
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let proof = baseline.into_fallback_proof(ledger, None, None);
-    let detached = detach_while_ord_panics(proof);
+    let mut root = root_for_ledger(ledger);
+    let mut baseline = baseline;
+    assert!(baseline.try_prepare_fallback_sources().is_ok());
+    root.baseline = Some(baseline);
+    let detached = detach_while_ord_panics(&mut root, TypedTerminalLayout::Fallback);
     let snapshot = detached.terminal_projection();
 
     assert_eq!(snapshot.current_live_bytes(), 0);
@@ -4166,7 +5380,7 @@ fn fallback_freeze_uses_stable_positions_for_attribution_and_capacity_cover() {
     let terminal = detached.commit_account_bound_for_test();
     assert_eq!(terminal.current_live_bytes, 0);
     assert_eq!(terminal.active_reservations, 0);
-    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert_eq!(terminal.current_administrative_bytes, 0);
     assert!(terminal.published);
 }
 
@@ -4211,7 +5425,8 @@ fn primary_freeze_uses_bound_source_attribution_cover_and_commitment_positions()
     let mut baseline = baseline;
     let mut source = Some(source);
     ledger
-        .try_bind_primary(&mut baseline, source.as_mut(), None, true)
+        .as_read()
+        .try_bind_primary_rows(baseline.view(), source.as_mut(), None, true)
         .unwrap_or_else(|_| panic!("exact primary publication must bind"));
     ledger
         .seal_ordinary_work()
@@ -4219,8 +5434,10 @@ fn primary_freeze_uses_bound_source_attribution_cover_and_commitment_positions()
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let proof = ledger.finish_bound_primary(baseline, source, None, true);
-    let detached = detach_while_ord_panics(proof);
+    let mut root = root_for_ledger(ledger);
+    root.baseline = Some(baseline);
+    root.canonical_source = source;
+    let detached = detach_while_ord_panics(&mut root, TypedTerminalLayout::Primary);
     let snapshot = detached.terminal_projection();
 
     assert_eq!(snapshot.current_live_bytes(), 0);
@@ -4237,7 +5454,7 @@ fn primary_freeze_uses_bound_source_attribution_cover_and_commitment_positions()
     let terminal = detached.commit_account_bound_for_test();
     assert_eq!(terminal.current_live_bytes, 0);
     assert_eq!(terminal.active_reservations, 0);
-    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert_eq!(terminal.current_administrative_bytes, 0);
     assert!(terminal.published);
 }
 
@@ -4285,7 +5502,8 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
     let mut baseline = baseline;
     let mut source = Some(source);
     ledger
-        .try_bind_primary(&mut baseline, source.as_mut(), None, true)
+        .as_read()
+        .try_bind_primary_rows(baseline.view(), source.as_mut(), None, true)
         .unwrap_or_else(|_| panic!("exact primary publication must bind"));
     ledger
         .seal_ordinary_work()
@@ -4293,24 +5511,31 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
     ledger
         .close_work()
         .expect("work closes before typed terminal qualification");
-    let proof = ledger.finish_bound_primary(baseline, source, None, true);
+    let mut root = root_for_ledger(ledger);
+    root.baseline = Some(baseline);
+    root.canonical_source = source;
 
-    REVERSE_BOUND_ORD.store(true, Ordering::SeqCst);
     let detached = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match proof.try_into_qualified_discards() {
-            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => match proof.try_into_detached() {
-                Ok(proof) => proof,
-                Err(error) => {
-                    let kind = error.kind();
-                    error.retain_fail_closed();
-                    panic!("bound primary proof failed to detach: {kind:?}")
-                }
-            },
+        let proof = root.borrow_primary_proof(true);
+        REVERSE_BOUND_ORD.store(true, Ordering::SeqCst);
+        let ready = match proof.try_into_qualified_discards() {
+            Ok(QualifiedTypedDiscardFreezeProof::None(proof)) => proof,
             Ok(proof) => {
                 proof.retain_fail_closed();
                 panic!("primary publication unexpectedly requires a discard")
             }
             Err(_) => panic!("bound typed proof must qualify after Ord reverses"),
+        };
+        let last_completed_phase = ready.last_completed_phase();
+        assert!(ready.seal_to_root().is_ok());
+        let invocation = root.invocation.take_terminal_invocation_for_test();
+        match invocation.try_detach_typed(last_completed_phase, root.primary_batches(true)) {
+            Ok(proof) => proof,
+            Err(error) => {
+                let kind = error.kind();
+                error.retain_fail_closed();
+                panic!("bound primary proof failed to detach: {kind:?}")
+            }
         }
     }));
     REVERSE_BOUND_ORD.store(false, Ordering::SeqCst);
@@ -4331,7 +5556,7 @@ fn terminal_freeze_keeps_commitments_on_bound_positions_after_ord_reverses() {
     let terminal = detached.commit_account_bound_for_test();
     assert_eq!(terminal.current_live_bytes, 0);
     assert_eq!(terminal.active_reservations, 0);
-    assert_eq!(terminal.current_evidence_bytes, 0);
+    assert_eq!(terminal.current_administrative_bytes, 0);
     assert!(terminal.published);
 }
 
@@ -4351,7 +5576,9 @@ fn consumed_batch_binds_every_dimension_before_its_numeric_mutation_tail() {
         PANIC_ON_BOUND_LOOKUP_TARGET.store(usize::from(second.0), Ordering::SeqCst);
         let binding = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if producer {
-                ledger.charge_producer_consumed_batch(&charges, excluded)
+                ledger
+                    .view()
+                    .charge_producer_consumed_batch(&charges, excluded)
             } else {
                 ledger.charge_consumed_batch(&charges)
             }
@@ -4362,7 +5589,10 @@ fn consumed_batch_binds_every_dimension_before_its_numeric_mutation_tail() {
             "the second key must panic before numeric mutation"
         );
         assert!(
-            !ledger.state.is_poisoned(),
+            ledger
+                .state
+                .shared()
+                .is_none_or(|state| !state.is_poisoned()),
             "key comparison must not hold the storage mutex"
         );
         let observation = &ledger.work;
@@ -4376,7 +5606,9 @@ fn consumed_batch_binds_every_dimension_before_its_numeric_mutation_tail() {
             .check_integrity(ledger.work_catalog.len())
             .expect("binding panic preserves numeric integrity");
         if producer {
-            ledger.charge_producer_consumed_batch(&charges, excluded)
+            ledger
+                .view()
+                .charge_producer_consumed_batch(&charges, excluded)
         } else {
             ledger.charge_consumed_batch(&charges)
         }
@@ -4423,7 +5655,7 @@ fn publication_rejection_preserves_all_commitments_and_reservation_owners_for_re
         .reserve(Phase::Build, Dimension::Bytes, backing_bytes)
         .unwrap();
     let mut batch = PublicationReservationBatch::try_new(reservations, Some(cover)).unwrap();
-    let evidence_before = lock(&ledger.state).current_evidence_bytes;
+    let evidence_before = ledger.state.read().current_administrative_bytes;
     assert!(matches!(
         ledger.prepare_publication(
             &mut batch,
@@ -4450,9 +5682,9 @@ fn publication_rejection_preserves_all_commitments_and_reservation_owners_for_re
         .ensure_work_open()
         .expect("rejected publication does not seal ordinary work");
     {
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         assert_eq!(state.publication, PublicationState::Open);
-        assert_eq!(state.current_evidence_bytes, evidence_before);
+        assert_eq!(state.current_administrative_bytes, evidence_before);
         assert_eq!(state.current_live_bytes, 3 + backing_bytes);
         assert_eq!(state.active_reservations, 2);
         for row in &state.dimensions {
@@ -4470,7 +5702,7 @@ fn publication_rejection_preserves_all_commitments_and_reservation_owners_for_re
         .expect("unchanged owners admit a smaller commitment group");
     assert!(batch.is_empty());
     {
-        let state = lock(&ledger.state);
+        let state = ledger.state.read();
         assert_eq!(
             (
                 state.dimensions[0].state.pending_publication,
@@ -4480,11 +5712,11 @@ fn publication_rejection_preserves_all_commitments_and_reservation_owners_for_re
         );
     }
     pending.rollback();
-    let state = lock(&ledger.state);
+    let state = ledger.state.read();
     assert_eq!(state.publication, PublicationState::Closing);
     assert_eq!(state.current_live_bytes, 0);
     assert_eq!(state.active_reservations, 0);
-    assert_eq!(state.current_evidence_bytes, evidence_before);
+    assert_eq!(state.current_administrative_bytes, evidence_before);
     for row in &state.dimensions {
         assert_eq!((row.state.pending_publication, row.state.committed), (0, 0));
     }
@@ -4498,7 +5730,7 @@ fn internal_split_keeps_storage_rejection_ahead_of_deferred_numeric_binding() {
     ledger.work.header.integrity_fault = true;
 
     {
-        let (internal, storage) = ledger.split_internal();
+        let (internal, mut storage) = ledger.split_internal();
         let prepared = internal.bind_ordinary([Dimension::Unknown]);
         assert!(matches!(
             storage.reserve(Phase::Build, Dimension::Unknown, 1),
@@ -4546,7 +5778,7 @@ fn joint_attribution_matches_existing_mode_destination_and_storage_error_precede
                         Ledger::<Owner, Phase, Dimension>::try_new(limits(), &[Phase::Build])
                             .unwrap();
                     ledger.work.header.mode = mode;
-                    lock(&ledger.state).publication = publication;
+                    ledger.state.write().publication = publication;
                     let expected = if evidence {
                         ledger
                             .reserve_operation_attribution::<OutcomeEvidenceDestination>(
@@ -4560,16 +5792,22 @@ fn joint_attribution_matches_existing_mode_destination_and_storage_error_precede
                             )
                             .map(|reservation| reservation.bytes())
                     };
-                    let (mut internal, storage) = ledger.split_internal();
+                    let (mut internal, mut storage) = ledger.split_internal();
                     let work = internal.reborrow().unwrap();
                     let actual = if evidence {
                         work.reserve_operation_attribution::<OutcomeEvidenceDestination, _, _>(
-                            &storage, phase, dimension, bytes,
+                            &mut storage,
+                            phase,
+                            dimension,
+                            bytes,
                         )
                         .map(|reservation| reservation.bytes())
                     } else {
                         work.reserve_operation_attribution::<CanonicalOutput, _, _>(
-                            &storage, phase, dimension, bytes,
+                            &mut storage,
+                            phase,
+                            dimension,
+                            bytes,
                         )
                         .map(|reservation| reservation.bytes())
                     };
@@ -4591,15 +5829,21 @@ fn joint_attribution_matches_existing_mode_destination_and_storage_error_precede
 #[test]
 fn joint_attribution_and_saved_layouts_recheck_live_protected_mode_and_integrity() {
     let mut ledger = test_ledger(limits());
-    ledger.configure_protected_work(Dimension::Records).unwrap();
+    ledger
+        .view()
+        .configure_protected_work(Dimension::Records)
+        .unwrap();
     let ordinary = {
         let (internal, _) = ledger.split_internal();
         internal.bind_ordinary([Dimension::Bytes]).unwrap()
     };
-    ledger.activate_protected_work(Dimension::Records).unwrap();
-    assert_eq!(lock(&ledger.state).publication, PublicationState::Closing);
+    ledger
+        .view()
+        .activate_protected_work(Dimension::Records)
+        .unwrap();
+    assert_eq!(ledger.state.read().publication, PublicationState::Closing);
 
-    let (mut internal, storage) = ledger.split_internal();
+    let (mut internal, mut storage) = ledger.split_internal();
     let protected = internal.bind_protected([Dimension::Records]).unwrap();
     let share = internal.bind_share([Dimension::Records]).unwrap();
     let mut work = internal.reborrow().unwrap();
@@ -4621,7 +5865,7 @@ fn joint_attribution_and_saved_layouts_recheck_live_protected_mode_and_integrity
         .unwrap();
     assert!(matches!(
         work.reserve_operation_attribution::<CanonicalOutput, _, _>(
-            &storage,
+            &mut storage,
             Phase::Build,
             Dimension::Bytes,
             1,
@@ -4630,7 +5874,7 @@ fn joint_attribution_and_saved_layouts_recheck_live_protected_mode_and_integrity
     ));
     let attribution = work
         .reserve_operation_attribution::<OutcomeEvidenceDestination, _, _>(
-            &storage,
+            &mut storage,
             Phase::Build,
             Dimension::Bytes,
             3,
@@ -4643,7 +5887,7 @@ fn joint_attribution_and_saved_layouts_recheck_live_protected_mode_and_integrity
     work.work.header.mode = WorkMode::Closed;
     assert!(matches!(
         work.reserve_operation_attribution::<OutcomeEvidenceDestination, _, _>(
-            &storage,
+            &mut storage,
             Phase::Unknown,
             Dimension::Unknown,
             1,
@@ -4653,7 +5897,7 @@ fn joint_attribution_and_saved_layouts_recheck_live_protected_mode_and_integrity
     work.work.header.integrity_fault = true;
     assert!(matches!(
         work.reserve_operation_attribution::<CanonicalOutput, _, _>(
-            &storage,
+            &mut storage,
             Phase::Build,
             Dimension::Unknown,
             1,
@@ -4683,8 +5927,8 @@ fn joint_attribution_and_saved_layouts_recheck_live_protected_mode_and_integrity
 fn exclusive_storage_planning_observes_independent_live_reservation_release() {
     let mut ledger = test_ledger(limits());
     let first = ledger.reserve(Phase::Build, Dimension::Bytes, 2).unwrap();
-    let before = ledger.planning_state();
-    let (_, storage) = ledger.split_internal();
+    let before = ledger.as_read().planning_state();
+    let (_, mut storage) = ledger.split_internal();
     assert_eq!(
         storage.planning_state().current_live_bytes(),
         before.current_live_bytes()

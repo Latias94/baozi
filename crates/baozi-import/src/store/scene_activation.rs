@@ -10,7 +10,8 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalCentralValidationOutcome, CanonicalFinal, CanonicalFreezePermitIssue,
     CanonicalGenerationSlots, CanonicalInvocationOutcome, CanonicalOutputSlot, CanonicalProofSlot,
     CanonicalSemanticWorkError, CanonicalValidationProgress, CanonicalValidationSlots,
-    CentrallyRejectedCanonicalStoreSession, FailureEvidenceOutcome, FrozenFailureState,
+    CentrallyRejectedCanonicalStoreSession, DynamicFailureEvidenceOutcome,
+    DynamicRootedFailureValidation, FailureEvidenceOutcome, FrozenFailureState,
     InterruptedCanonicalStoreSession, NeverActivatedStoreSession, PendingMinimalFallback,
     RejectedCanonicalStoreSession, RootedFailureValidation, StoreActivationContainmentAnchor,
     StoreCanonicalRejection, StoreNeverActivatedCause,
@@ -318,7 +319,7 @@ fn map_prepared_failure(
     reason = "failure preparation preserves the complete linear retained-store error owner"
 )]
 fn prepare_ordinary_failure<Cause>(
-    validation: RootedFailureValidation<
+    validation: DynamicRootedFailureValidation<
         '_,
         ImportOperationOwner,
         ImportProgressPhase,
@@ -371,7 +372,7 @@ fn prepare_ordinary_failure<Cause>(
     reason = "frozen failure preparation preserves the complete linear retained-store error owner"
 )]
 fn prepare_frozen_failure<Cause>(
-    validation: RootedFailureValidation<
+    validation: DynamicRootedFailureValidation<
         '_,
         ImportOperationOwner,
         ImportProgressPhase,
@@ -424,7 +425,7 @@ fn prepare_frozen_failure<Cause>(
     reason = "failure outcomes preserve exact retained evidence and containment owners without boxing"
 )]
 fn prepare_failure_outcome<'inv, Cause>(
-    outcome: FailureEvidenceOutcome<
+    outcome: DynamicFailureEvidenceOutcome<
         'inv,
         ImportOperationOwner,
         ImportProgressPhase,

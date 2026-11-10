@@ -24,7 +24,7 @@ use crate::authoring::{
     ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
     SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
 };
-use crate::ledger::ImportOperationControl;
+use crate::ledger::{ImportOperationControl, import_ledger_limits};
 use crate::limits::ResourceLimits;
 
 fn start_session<'inv>(
@@ -32,9 +32,10 @@ fn start_session<'inv>(
     control: ImportOperationControl,
 ) -> (ImportStoreSessionOwner<'inv>, PhysicalStorageAccount) {
     let limits = ResourceLimits::default();
-    let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits)
+    let import_limits = import_ledger_limits(&limits).expect("test import limits are valid");
+    let requirements = ImportStoreBootstrapRequirements::for_node_scene(&import_limits)
         .expect("the node Scene requirements must be valid");
-    let bootstrap = try_import_store_bootstrap(&limits, requirements)
+    let bootstrap = try_import_store_bootstrap(import_limits, requirements)
         .expect("the transition fixture must have a valid bootstrap");
     let factory = PhysicalStorageAccountFactory::try_new(
         PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
@@ -329,8 +330,9 @@ fn run_account_checking_body(
     mut body: impl for<'call> FnMut(&mut ImportStoreSessionOwner<'call>, &PhysicalStorageAccount),
 ) -> ImportStorePreparedScene {
     let limits = ResourceLimits::default();
-    let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits).unwrap();
-    let bootstrap = try_import_store_bootstrap(&limits, requirements).unwrap();
+    let import_limits = import_ledger_limits(&limits).expect("test import limits are valid");
+    let requirements = ImportStoreBootstrapRequirements::for_node_scene(&import_limits).unwrap();
+    let bootstrap = try_import_store_bootstrap(import_limits, requirements).unwrap();
     let factory = PhysicalStorageAccountFactory::try_new(
         PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1).unwrap(),
     )

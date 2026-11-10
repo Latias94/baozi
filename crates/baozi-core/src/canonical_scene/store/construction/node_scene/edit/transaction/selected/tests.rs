@@ -228,27 +228,36 @@ fn run(
                 start.start_plan,
             )
             .unwrap();
-            let mut mappings = SceneGeometryPlanStorage::try_new(
-                &mut operation,
-                start.keys.phase,
-                start.keys.dimension,
-                edits.len(),
-            )
-            .unwrap();
-            let mut secondary = SceneGeometryPlanStorage::try_new(
-                &mut operation,
-                start.keys.phase,
-                start.keys.dimension,
-                usize::from(replan),
-            )
-            .unwrap();
-            let mut rejected = SceneGeometryPlanStorage::try_new(
-                &mut operation,
-                start.keys.phase,
-                start.keys.dimension,
-                usize::from(replan),
-            )
-            .unwrap();
+            let mut mappings = operation
+                .with_action_execution(start.keys.dimension, |runtime| {
+                    SceneGeometryPlanStorage::try_new(
+                        runtime,
+                        start.keys.phase,
+                        start.keys.dimension,
+                        edits.len(),
+                    )
+                })
+                .unwrap();
+            let mut secondary = operation
+                .with_action_execution(start.keys.dimension, |runtime| {
+                    SceneGeometryPlanStorage::try_new(
+                        runtime,
+                        start.keys.phase,
+                        start.keys.dimension,
+                        usize::from(replan),
+                    )
+                })
+                .unwrap();
+            let mut rejected = operation
+                .with_action_execution(start.keys.dimension, |runtime| {
+                    SceneGeometryPlanStorage::try_new(
+                        runtime,
+                        start.keys.phase,
+                        start.keys.dimension,
+                        usize::from(replan),
+                    )
+                })
+                .unwrap();
             let owner = operation
                 .into_session_outcome_owner(
                     node_scene_activation_roles(start.keys).session_policy(),

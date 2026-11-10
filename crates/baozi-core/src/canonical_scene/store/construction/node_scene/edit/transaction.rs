@@ -40,9 +40,12 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalBodyOperation, CanonicalBodyStart, CanonicalBoundBodyError, CanonicalBoundBodyParts,
     CanonicalBoundInvocationFinish, CanonicalDispositionSlot, CanonicalFailureRequirements,
     CanonicalInvocationHost, CanonicalLane, CanonicalReservation, CanonicalSemanticWorkSession,
+    FiniteCanonicalBoundBodyParts, FiniteCanonicalBoundInvocationFinish,
+    FiniteCanonicalDispositionSlot, FiniteCanonicalInvocationHost,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    CanonicalInheritanceSource, RetainedStoreStartError, RetainedStoreStartPlan,
+    CanonicalInheritanceSource, FiniteRetainedStoreStartPlan, FiniteStoreExitError,
+    FiniteStoreLedgerPlan, RetainedStoreStartError, RetainedStoreStartPlan,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationRequest, CanonicalTableShape,
@@ -394,6 +397,67 @@ pub fn run_scene_edit_body<'host, 'source, O, PP, U, T, Proof, EA, EV, EG, CK, C
 ) -> Result<
     CanonicalBoundInvocationFinish<'host, 'source, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>,
     CanonicalBoundBodyError,
+>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    host.run_bound_derived_body(
+        control,
+        ledger,
+        &input.as_node_scene().canonical,
+        plan,
+        body,
+    )
+}
+
+/// Binds the actual Scene source to a finite invocation before lending its startup permissions.
+#[allow(
+    clippy::type_complexity,
+    clippy::result_large_err,
+    reason = "Core preserves concrete fixed owners and the original domain on every finite exit"
+)]
+pub fn run_finite_scene_edit_body<'host, 'source, O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>(
+    host: &'host mut FiniteCanonicalInvocationHost<O, PP, U, T, Proof, EA, EV, EG, CK, CT, EK, ET>,
+    input: &'source ValidatedScene,
+    control: OperationControl<PP, U>,
+    ledger: FiniteStoreLedgerPlan,
+    plan: FiniteRetainedStoreStartPlan,
+    body: impl for<'call, 'entry> FnMut(
+        FiniteCanonicalBoundBodyParts<
+            'call,
+            'entry,
+            'source,
+            O,
+            PP,
+            U,
+            T,
+            Proof,
+            EA,
+            EV,
+            CanonicalInheritanceSource,
+        >,
+        FiniteCanonicalDispositionSlot<'call, CK, CT, EK, ET>,
+    ) -> Result<(), FiniteStoreExitError<O, PP, U>>,
+) -> Result<
+    FiniteCanonicalBoundInvocationFinish<
+        'host,
+        'source,
+        O,
+        PP,
+        U,
+        T,
+        Proof,
+        EA,
+        EV,
+        EG,
+        CK,
+        CT,
+        EK,
+        ET,
+    >,
+    FiniteStoreExitError<O, PP, U>,
 >
 where
     O: OperationOwner,

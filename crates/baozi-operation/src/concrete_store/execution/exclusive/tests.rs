@@ -3,8 +3,8 @@ use super::*;
 use crate::ledger::{Ledger, LedgerLimits};
 use crate::retained::RetainedHandleSharePlan;
 use crate::{
-    CancellationSignal, OperationControl, OperationCoordinator, PhysicalStorageAccountFactory,
-    PhysicalStorageAccountLimits,
+    CancellationSignal, CancellationToken, OperationControl, OperationCoordinator,
+    PhysicalStorageAccountFactory, PhysicalStorageAccountLimits,
 };
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
@@ -48,16 +48,27 @@ impl ProgressUnit for ParserUnit {
     }
 }
 
-struct ParserPolls(Arc<AtomicUsize>);
+struct ParserPolls(Arc<AtomicUsize>, CancellationToken);
 
 impl CancellationSignal for ParserPolls {
     fn is_cancelled(&self) -> bool {
         self.0.fetch_add(1, Ordering::SeqCst);
-        false
+        self.1.is_cancelled()
     }
 }
 
 fn with_parser_operation(
+    body: impl FnOnce(
+        &mut RetainedStoreOperation<'_, Owner, ParserProgress, ParserUnit>,
+        StoreDimensionKey,
+        &AtomicUsize,
+    ),
+) {
+    with_cancellable_parser_operation(CancellationToken::new(), body);
+}
+
+fn with_cancellable_parser_operation(
+    cancellation: CancellationToken,
     body: impl FnOnce(
         &mut RetainedStoreOperation<'_, Owner, ParserProgress, ParserUnit>,
         StoreDimensionKey,
@@ -117,7 +128,8 @@ fn with_parser_operation(
         .try_create_account(PhysicalStorageAccountLimits::new(1 << 20, 32).unwrap())
         .unwrap();
     let polls = Arc::new(AtomicUsize::new(0));
-    let control = OperationControl::default().with_cancellation(ParserPolls(Arc::clone(&polls)));
+    let control = OperationControl::default()
+        .with_cancellation(ParserPolls(Arc::clone(&polls), cancellation));
     let mut root = StoreInvocationRoot::<Owner, ParserProgress, ParserUnit>::new();
     let mut operation =
         RetainedStoreOperation::try_start(&mut root, control, ledger_plan, &account, start)
@@ -129,6 +141,483 @@ fn with_parser_operation(
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn read_row_handback_keeps_actual_remainder_and_direct_debt_until_checkpoint() {
+    with_parser_operation(|operation, key, polls| {
+        let mut reads = 0;
+        operation
+            .with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |child| {
+                        child.host.context.parts.ordinary.debt.set(255);
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                assert!(row.ready_for_read()?);
+                                reads += 1;
+                                row.complete_read(1)?;
+                                assert!(!row.ready_for_read()?);
+                                Ok(())
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(reads, 1);
+                        assert_eq!(child.host.frame.remaining, [1]);
+                        assert!(child.host.frame.active);
+                        assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                        assert_eq!(polls.load(Ordering::SeqCst), 1);
+                        child.checkpoint()?;
+                        assert_eq!(polls.load(Ordering::SeqCst), 2);
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                assert!(row.ready_for_read()?);
+                                reads += 1;
+                                row.complete_read(1)
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(child.host.frame.remaining, [0]);
+                        assert_eq!(child.work_counters(key)?, (2, 2, 0));
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 1);
+                        Ok(())
+                    },
+                )?;
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reads, 2);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+    });
+}
+
+#[test]
+fn read_row_debt_checkpoint_cancellation_retains_only_the_first_classification() {
+    let cancellation = CancellationToken::new();
+    with_cancellable_parser_operation(cancellation.clone(), |operation, key, polls| {
+        let classified = Cell::new(0);
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result =
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [2], [None], |child| {
+                    child.host.context.parts.ordinary.debt.set(255);
+                    child.with_read_row(
+                        &mut |row| -> Result<(), StoreInvocationError> {
+                            assert!(row.ready_for_read()?);
+                            classified.set(classified.get() + 1);
+                            row.complete_read(1)?;
+                            assert!(!row.ready_for_read()?);
+                            Ok(())
+                        },
+                        |cause| cause,
+                        |_, cause| cause,
+                    )?;
+                    cancellation.cancel();
+                    let cause = child.checkpoint().unwrap_err();
+                    assert!(matches!(
+                        &cause,
+                        StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                            crate::ControlCause::Cancelled {
+                                origin: crate::CancellationOrigin::Signal
+                            }
+                        ))
+                    ));
+                    assert_eq!(polls.load(Ordering::SeqCst), 2);
+                    assert_eq!(classified.get(), 1);
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                    assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                    let next = child.with_read_row(
+                        &mut |_| -> Result<(), StoreInvocationError> {
+                            panic!("cancelled row body entered")
+                        },
+                        |cause| cause,
+                        |_, cause| cause,
+                    );
+                    assert!(matches!(
+                        next,
+                        Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                            crate::ControlCause::Cancelled {
+                                origin: crate::CancellationOrigin::Signal
+                            }
+                        )))
+                    ));
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                    Err::<(), _>(cause)
+                });
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(context.work_counters(key)?, (2, 1, 0));
+            assert_eq!(
+                context.parts.ordinary.failure.get(),
+                Some(PreparationFailureCode::from_control(
+                    &crate::ControlCause::Cancelled {
+                        origin: crate::CancellationOrigin::Signal
+                    }
+                ))
+            );
+            result
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                crate::ControlCause::Cancelled {
+                    origin: crate::CancellationOrigin::Signal
+                }
+            )))
+        ));
+        assert_eq!(classified.get(), 1);
+    });
+}
+
+#[test]
+fn read_span_two_units_reach_checkpoint_after_the_real_scalar_anchor() {
+    let cancellation = CancellationToken::new();
+    with_cancellable_parser_operation(cancellation.clone(), |operation, key, polls| {
+        let classified = Cell::new(0);
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result =
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [4], [None], |child| {
+                    child.host.context.parts.ordinary.debt.set(253);
+                    child.with_read_row(
+                        &mut |row| -> Result<(), StoreInvocationError> {
+                            let bytes = b"abcd";
+                            assert!(row.ready_for_read()?);
+                            assert!(bytes[0].is_ascii());
+                            classified.set(1);
+                            row.complete_read(1)?;
+                            assert!(row.ready_for_read()?);
+                            let bound = row.read_span_bound(3);
+                            assert_eq!(bound, 2);
+                            let prefix = &bytes[1..1 + usize::try_from(bound).unwrap()];
+                            assert!(prefix.is_ascii());
+                            classified.set(classified.get() + prefix.len());
+                            row.complete_read_units(NonZeroU64::new(bound).unwrap())?;
+                            assert!(!row.ready_for_read()?);
+                            assert_eq!(row.read_span_bound(1), 0);
+                            Ok(())
+                        },
+                        |cause| cause,
+                        |_, cause| cause,
+                    )?;
+                    assert_eq!(classified.get(), 3);
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (4, 3, 0));
+                    assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                    cancellation.cancel();
+                    let cause = child.checkpoint().unwrap_err();
+                    assert!(matches!(
+                        &cause,
+                        StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                            crate::ControlCause::Cancelled {
+                                origin: crate::CancellationOrigin::Signal
+                            }
+                        ))
+                    ));
+                    assert_eq!(polls.load(Ordering::SeqCst), 2);
+                    assert!(
+                        child
+                            .with_read_row(
+                                &mut |_| -> Result<(), StoreInvocationError> {
+                                    panic!("cancelled span classified the fourth byte")
+                                },
+                                |cause| cause,
+                                |_, cause| cause,
+                            )
+                            .is_err()
+                    );
+                    assert_eq!(classified.get(), 3);
+                    assert_eq!(child.host.frame.remaining, [1]);
+                    assert_eq!(child.work_counters(key)?, (4, 3, 0));
+                    assert_eq!(child.host.context.parts.ordinary.debt.get(), 256);
+                    Err::<(), _>(cause)
+                });
+            context.parts.work.check_quiescent().unwrap();
+            assert_eq!(context.work_counters(key)?, (4, 3, 0));
+            result
+        });
+        assert!(matches!(
+            result,
+            Err(StoreInvocationError::Runtime(StoreRuntimeError::Control(
+                crate::ControlCause::Cancelled {
+                    origin: crate::CancellationOrigin::Signal
+                }
+            )))
+        ));
+        assert_eq!(classified.get(), 3);
+    });
+}
+
+#[test]
+fn read_spans_in_registry_mode_neither_change_direct_debt_nor_poll() {
+    with_parser_operation(|operation, key, polls| {
+        let boundary = StoreImporterBoundary::default();
+        assert!(boundary.begin());
+        operation
+            .with_parser_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [257],
+                    [None],
+                    |child| {
+                        let before = polls.load(Ordering::SeqCst);
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                assert!(row.ready_for_read()?);
+                                assert_eq!(row.read_span_bound(u64::MAX), 256);
+                                row.complete_read_units(NonZeroU64::new(256).unwrap())?;
+                                assert!(row.ready_for_read()?);
+                                assert_eq!(row.read_span_bound(u64::MAX), 1);
+                                row.complete_read_units(NonZeroU64::MIN)
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(polls.load(Ordering::SeqCst), before);
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 0);
+                        assert_eq!(child.work_counters(key)?, (257, 257, 0));
+                        Ok(())
+                    },
+                )?;
+                assert_eq!(context.parts.ordinary.debt.get(), 1);
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+
+#[test]
+fn read_span_rejection_keeps_the_successful_prefix_and_debt_atomic() {
+    for (units, ledger_failure) in [(3, true), (257, false), (u64::MAX, false)] {
+        with_parser_operation(|operation, key, _| {
+            let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                let result = context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |child| {
+                        child.host.context.parts.ordinary.debt.set(0);
+                        let result = child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                row.complete_read_units(NonZeroU64::MIN)?;
+                                let cause = row
+                                    .complete_read_units(NonZeroU64::new(units).unwrap())
+                                    .unwrap_err();
+                                if ledger_failure {
+                                    assert!(matches!(
+                                        &cause,
+                                        StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                                            LedgerCause::InactiveLinearWorkPermit
+                                        ))
+                                    ));
+                                } else {
+                                    assert!(matches!(
+                                        &cause,
+                                        StoreInvocationError::Runtime(
+                                            StoreRuntimeError::FallbackOnly
+                                        )
+                                    ));
+                                }
+                                assert_eq!(row.read_span_bound(1), 0);
+                                assert!(row.complete_read_units(NonZeroU64::MIN).is_err());
+                                assert!(row.complete_read(0).is_err());
+                                assert!(row.ready_for_read().is_err());
+                                Err(cause)
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        );
+                        assert_eq!(child.host.frame.remaining, [1]);
+                        assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 1);
+                        result
+                    },
+                );
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                assert_eq!(
+                    context.parts.ordinary.failure.get(),
+                    Some(if ledger_failure {
+                        PreparationFailureCode::ledger()
+                    } else {
+                        PreparationFailureCode::product_graph(INVALID_COST)
+                    })
+                );
+                context.parts.work.check_quiescent().unwrap();
+                result
+            });
+            assert!(result.is_err());
+        });
+    }
+}
+
+#[test]
+fn read_row_registry_units_do_not_change_direct_debt() {
+    with_parser_operation(|operation, key, _| {
+        let boundary = StoreImporterBoundary::default();
+        assert!(boundary.begin());
+        operation
+            .with_parser_execution::<_, StoreInvocationError>(&boundary, |context| {
+                let layout = context.bind_group([key])?;
+                context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [257],
+                    [None],
+                    |child| {
+                        child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                for _ in 0..257 {
+                                    assert!(row.ready_for_read()?);
+                                    row.complete_read(1)?;
+                                }
+                                Ok(())
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        )?;
+                        assert_eq!(child.host.context.parts.ordinary.debt.get(), 0);
+                        assert_eq!(child.work_counters(key)?, (257, 257, 0));
+                        Ok(())
+                    },
+                )?;
+                assert_eq!(context.parts.ordinary.debt.get(), 1);
+                context.parts.work.check_quiescent().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+}
+
+#[test]
+fn read_row_numeric_failure_stops_zero_writes_and_normal_or_error_returns() {
+    for propagated in [false, true] {
+        with_parser_operation(|operation, key, _| {
+            let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+                let layout = context.bind_group([key])?;
+                let result = context.parser_child::<_, StoreInvocationError, 1>(
+                    layout,
+                    [2],
+                    [None],
+                    |child| {
+                        let result = child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                row.complete_read(1)?;
+                                let cause = row.complete_read(2).unwrap_err();
+                                assert!(matches!(
+                                    &cause,
+                                    StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                                        LedgerCause::InactiveLinearWorkPermit
+                                    ))
+                                ));
+                                assert!(row.complete_read(0).is_err());
+                                assert!(row.complete_read(1).is_err());
+                                assert!(row.ready_for_read().is_err());
+                                if propagated { Err(cause) } else { Ok(()) }
+                            },
+                            |cause| cause,
+                            |host, cause| {
+                                assert!(host.host.frame.active);
+                                assert_eq!(host.host.frame.remaining, [1]);
+                                cause
+                            },
+                        );
+                        if propagated {
+                            assert!(matches!(
+                                &result,
+                                Err(StoreInvocationError::Runtime(StoreRuntimeError::Ledger(
+                                    LedgerCause::InactiveLinearWorkPermit
+                                )))
+                            ));
+                        } else {
+                            assert!(matches!(
+                                &result,
+                                Err(StoreInvocationError::Runtime(
+                                    StoreRuntimeError::FallbackOnly
+                                ))
+                            ));
+                        }
+                        assert!(!child.host.frame.active);
+                        assert_eq!(child.host.frame.remaining, [1]);
+                        assert_eq!(child.work_counters(key)?, (2, 1, 0));
+                        assert!(
+                            child
+                                .with_read_row(
+                                    &mut |_| -> Result<(), StoreInvocationError> {
+                                        panic!("stopped host reentered")
+                                    },
+                                    |cause| cause,
+                                    |_, cause| cause,
+                                )
+                                .is_err()
+                        );
+                        // Even an integration caller ignoring this result cannot manufacture success.
+                        Ok(())
+                    },
+                );
+                assert!(result.is_err());
+                assert_ne!(
+                    context.parts.ordinary.execution_state.get(),
+                    StoreExecutionState::IncompleteSuccess
+                );
+                assert_eq!(
+                    context.parts.ordinary.failure.get(),
+                    Some(PreparationFailureCode::ledger())
+                );
+                assert_eq!(context.work_counters(key)?, (2, 1, 0));
+                context.parts.work.check_quiescent().unwrap();
+                result
+            });
+            assert!(result.is_err());
+        });
+    }
+}
+
+#[test]
+fn read_row_unwind_keeps_only_completed_units_and_the_scope_guard_armed() {
+    with_parser_operation(|operation, key, _| {
+        let physical = Cell::new(0);
+        let result = operation.with_exclusive_execution::<_, StoreInvocationError>(|context| {
+            let layout = context.bind_group([key])?;
+            let result =
+                context.parser_child::<_, StoreInvocationError, 1>(layout, [3], [None], |child| {
+                    let unwind = catch_unwind(AssertUnwindSafe(|| {
+                        let _: Result<(), StoreInvocationError> = child.with_read_row(
+                            &mut |row| -> Result<(), StoreInvocationError> {
+                                physical.set(1);
+                                row.complete_read(1)?;
+                                physical.set(2);
+                                panic!("second classification interrupted before completion")
+                            },
+                            |cause| cause,
+                            |_, cause| cause,
+                        );
+                    }));
+                    assert!(unwind.is_err());
+                    assert!(!child.host.frame.active);
+                    assert_eq!(child.host.frame.remaining, [2]);
+                    assert_eq!(child.work_counters(key)?, (3, 1, 0));
+                    assert!(child.checkpoint().is_err());
+                    Ok(())
+                });
+            assert!(result.is_err());
+            assert_eq!(physical.get(), 2);
+            assert_eq!(context.work_counters(key)?, (3, 1, 0));
+            context.parts.work.check_quiescent().unwrap();
+            result
+        });
+        assert!(result.is_err());
+    });
 }
 
 #[test]
@@ -505,7 +994,7 @@ fn a_scan_boundary_cannot_heal_a_caught_physical_prefix_panic() {
 #[test]
 fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, storage) = owner.exclusive().unwrap();
+    let (mut exclusive, mut storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .admit_observed(&mut exclusive.work, [4], WorkLane::Producer)
@@ -514,7 +1003,7 @@ fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
     // pending-policy violation. This probes the same completion category as the legacy live alias.
     assert!(
         exclusive
-            .tighten_policy(&storage, key, DimensionPolicy::counter(8, 2, 0))
+            .tighten_policy(&mut storage, key, DimensionPolicy::counter(8, 2, 0))
             .is_err()
     );
     let physical = Cell::new(0);
@@ -551,7 +1040,7 @@ fn host_completion_failure_cleans_the_suffix_before_any_result_is_disposed() {
 #[test]
 fn unapplied_completion_failure_has_no_invented_consumption_and_no_later_abandonment() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .admit_observed(&mut exclusive.work, [1], WorkLane::Producer)
@@ -581,7 +1070,7 @@ fn unapplied_completion_failure_has_no_invented_consumption_and_no_later_abandon
 #[test]
 fn an_internal_frame_does_not_claim_or_close_the_attempted_only_parser_channels() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let parent_layout = exclusive.bind([key]).unwrap();
     let mut parent = parent_layout
         .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Parent)
@@ -623,7 +1112,7 @@ fn an_internal_frame_does_not_claim_or_close_the_attempted_only_parser_channels(
 #[test]
 fn real_import_boundary_defers_only_unclassified_unwind_and_caught_return_is_sticky() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let failure = Cell::new(None);
     let execution_state = Cell::new(StoreExecutionState::Running);
@@ -686,7 +1175,7 @@ fn real_import_boundary_defers_only_unclassified_unwind_and_caught_return_is_sti
 #[test]
 fn cleanup_fault_precedes_later_import_disposition_and_preserves_the_actual_prefix() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, _storage) = owner.exclusive().unwrap();
+    let (mut exclusive, _storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let failure = Cell::new(Some(PreparationFailureCode::ledger()));
     let state = Cell::new(StoreExecutionState::Running);
@@ -776,8 +1265,7 @@ fn failure_materializer_observes_active_frame_before_resolution() {
     let execution_state = Cell::new(StoreExecutionState::Running);
     let share_work = RetainedHandleSharePlan::new(internal_key, internal_key);
     let (poll, progress, ledger) = coordinator.split_exclusive_progress_and_ledger();
-    let (work, storage) = ledger.exclusive().unwrap();
-    let progress = progress.bind(storage.progress_evidence());
+    let (work, storage) = ledger.view().into_exclusive().unwrap();
     let share_layout = work.bind(share_work.charges().map(|(key, _)| key)).unwrap();
     let mut context = StoreInvocation {
         parts: ExclusiveOperationParts {
@@ -873,14 +1361,14 @@ fn failure_materializer_observes_active_frame_before_resolution() {
 #[test]
 fn parser_completion_failure_after_real_write_resolves_suffix_without_abandonment() {
     let (mut owner, key) = actual_ledger();
-    let (mut exclusive, storage) = owner.exclusive().unwrap();
+    let (mut exclusive, mut storage) = owner.view().into_exclusive().unwrap();
     let layout = exclusive.bind([key]).unwrap();
     let frame = layout
         .begin_parser(&mut exclusive.work, [2], [None], ParserChannel::Child)
         .unwrap();
     // Tightening uses the actual owner before borrowing its action guard. No outside alias.
     exclusive
-        .tighten_policy(&storage, key, DimensionPolicy::counter(8, 0, 0))
+        .tighten_policy(&mut storage, key, DimensionPolicy::counter(8, 0, 0))
         .unwrap();
     let failure = Cell::new(None);
     let execution_state = Cell::new(StoreExecutionState::Running);
@@ -1445,18 +1933,18 @@ fn borrowed_storage_observations_follow_atomic_transitions_and_actual_token_rele
                     .try_admit_dimension(StoreDimensionSemanticId::new(catalog, NonZeroU64::MIN))
                     .unwrap();
                 let observation = context.storage_observation(storage_key)?;
-                let baseline = observation.live_bytes();
+                let baseline = observation.live_bytes(context);
                 let mut reservation = context.ordinary_storage().reserve(phase, storage_key, 8)?;
-                assert_eq!(observation.live_bytes(), baseline + 8);
+                assert_eq!(observation.live_bytes(context), baseline + 8);
                 {
                     let services = context.services();
                     services.validate_live_owner(&reservation)?;
                     services.transition(&mut reservation, phase, storage_key, 4)?;
                 }
                 assert_eq!(reservation.raw.bytes(), 4);
-                assert_eq!(observation.live_bytes(), baseline + 4);
+                assert_eq!(observation.live_bytes(context), baseline + 4);
                 reservation.release_storage([0_u8; 4]);
-                assert_eq!(observation.live_bytes(), baseline);
+                assert_eq!(observation.live_bytes(context), baseline);
                 Ok(())
             })
             .unwrap();
@@ -1477,11 +1965,11 @@ fn borrowed_storage_transition_keeps_the_original_retained_output_rejection() {
                 .try_admit_dimension(StoreDimensionSemanticId::new(catalog, NonZeroU64::MIN))
                 .unwrap();
             let observation = context.storage_observation(storage_key)?;
-            let baseline = observation.live_bytes();
+            let baseline = observation.live_bytes(context);
             let mut retained = context
                 .services()
                 .reserve_retained(phase, storage_key, 8, 1)?;
-            let before = observation.live_bytes();
+            let before = observation.live_bytes(context);
             let result = context
                 .services()
                 .transition(&mut retained, phase, storage_key, 4);
@@ -1493,9 +1981,9 @@ fn borrowed_storage_transition_keeps_the_original_retained_output_rejection() {
             ));
             assert_eq!(retained.raw.bytes(), 8);
             assert_eq!(retained.physical.as_ref().unwrap().admitted_bytes(), 8);
-            assert_eq!(observation.live_bytes(), before);
+            assert_eq!(observation.live_bytes(context), before);
             retained.release_storage([0_u8; 8]);
-            assert_eq!(observation.live_bytes(), baseline);
+            assert_eq!(observation.live_bytes(context), baseline);
             result
         });
         assert!(matches!(

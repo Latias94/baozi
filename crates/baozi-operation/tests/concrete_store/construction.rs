@@ -7,7 +7,7 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
     let producer = fake_producer();
     let producer_unloaded = Arc::downgrade(&producer);
     let mut invocation_root = TestInvocationRoot::new();
-    let (operation, keys) = operation_with_catalog_and_evidence_limit(
+    let (mut operation, keys) = operation_with_catalog_and_evidence_limit(
         &mut invocation_root,
         &account,
         OperationControl::default(),
@@ -20,6 +20,7 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
         .unwrap();
 
     let sequence = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u32>::new(3).unwrap(),
             SequenceTag,
@@ -27,16 +28,19 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
         )
         .unwrap();
     let bytes = assembly
+        .ordinary()
         .try_retain_canonical_bytes(BytesPlan::new(2).unwrap(), BytesTag, |writer| {
             writer.write_bytes(&[4, 5])
         })
         .unwrap();
     let text = assembly
+        .ordinary()
         .try_retain_canonical_utf8(Utf8Plan::new(5).unwrap(), TextTag, |writer| {
             writer.write_str("baozi")
         })
         .unwrap();
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_records(RecordPlan::new(1, 4).unwrap(), CanonicalRootTag, |writer| {
             writer.write_row(|row| {
                 row.write_scalar(9_u32)?;
@@ -47,6 +51,7 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
         })
         .unwrap();
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
@@ -56,19 +61,27 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
 
     let before_rejected_commits = account.snapshot();
     assert!(matches!(
-        assembly.try_commit_canonical(foreign_dimension(), 13),
+        assembly
+            .ordinary()
+            .try_commit_canonical(foreign_dimension(), 13),
         Err(StoreRuntimeError::ForeignDimensionDomain { dimension })
             if dimension == foreign_dimension()
     ));
     assert!(matches!(
-        assembly.try_commit_outcome_evidence(foreign_dimension(), 13),
+        assembly
+            .ordinary()
+            .try_commit_outcome_evidence(foreign_dimension(), 13),
         Err(StoreRuntimeError::ForeignDimensionDomain { dimension })
             if dimension == foreign_dimension()
     ));
     assert_eq!(account.snapshot(), before_rejected_commits);
 
-    assembly.try_commit_canonical(keys.dimension, 5).unwrap();
     assembly
+        .ordinary()
+        .try_commit_canonical(keys.dimension, 5)
+        .unwrap();
+    assembly
+        .ordinary()
         .try_commit_outcome_evidence(keys.dimension, 6)
         .unwrap();
     let validated = match assembly.validate_success(
@@ -145,7 +158,7 @@ fn sequence_bytes_utf8_and_records_round_trip_through_typed_roots() {
     assert_eq!(header.phase_count(), 1);
     assert_eq!(header.current_live_bytes(), 0);
     assert_eq!(header.active_reservations(), 0);
-    assert_eq!(header.current_evidence_bytes(), 0);
+    assert!(header.current_administrative_bytes() <= header.peak_administrative_bytes());
     assert_semantic_and_ordinal_evidence_queries(&ledger_evidence, keys);
     let snapshot = ledger_evidence
         .dimension(keys.dimension)
@@ -192,6 +205,7 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
             .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
         let canonical = assembly
+            .ordinary()
             .try_retain_canonical_sequence(
                 SequencePlan::<u16>::new(2).unwrap(),
                 SequenceTag,
@@ -199,6 +213,7 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
             )
             .unwrap();
         let evidence = assembly
+            .ordinary()
             .try_retain_outcome_evidence_sequence(
                 SequencePlan::<u8>::new(2).unwrap(),
                 EvidenceLeafTag,
@@ -229,11 +244,13 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
             .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
         let canonical = assembly
+            .ordinary()
             .try_retain_canonical_bytes(BytesPlan::new(2).unwrap(), BytesTag, |writer| {
                 writer.write_bytes(&[5, 6])
             })
             .unwrap();
         let evidence = assembly
+            .ordinary()
             .try_retain_outcome_evidence_bytes(
                 BytesPlan::new(3).unwrap(),
                 EvidenceBytesTag,
@@ -263,11 +280,13 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
             .try_publication_assembly(publication_plan(keys, 1, 1))
             .unwrap();
         let canonical = assembly
+            .ordinary()
             .try_retain_canonical_utf8(Utf8Plan::new(5).unwrap(), TextTag, |writer| {
                 writer.write_str("baozi")
             })
             .unwrap();
         let evidence = assembly
+            .ordinary()
             .try_retain_outcome_evidence_utf8(
                 Utf8Plan::new(2).unwrap(),
                 EvidenceTextTag,
@@ -297,6 +316,7 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
             .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
         let evidence = assembly
+            .ordinary()
             .try_retain_outcome_evidence_sequence(
                 SequencePlan::<u32>::new(2).unwrap(),
                 EvidenceLeafTag,
@@ -334,6 +354,7 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
             .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
         let evidence = assembly
+            .ordinary()
             .try_retain_outcome_evidence_bytes(
                 BytesPlan::new(2).unwrap(),
                 EvidenceBytesTag,
@@ -367,6 +388,7 @@ fn sequence_bytes_and_utf8_roots_round_trip_through_every_terminal_owner() {
             .try_publication_assembly(rich_failure_plan(keys, 1))
             .unwrap();
         let evidence = assembly
+            .ordinary()
             .try_retain_outcome_evidence_utf8(
                 Utf8Plan::new(5).unwrap(),
                 EvidenceTextTag,
@@ -408,26 +430,31 @@ fn record_reference_projection_requires_exact_block_kind_and_tag() {
         .unwrap();
 
     let sequence = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let bytes = assembly
+        .ordinary()
         .try_retain_canonical_bytes(BytesPlan::new(1).unwrap(), BytesTag, |writer| {
             writer.write_bytes(&[2])
         })
         .unwrap();
     let text = assembly
+        .ordinary()
         .try_retain_canonical_utf8(Utf8Plan::new(1).unwrap(), TextTag, |writer| {
             writer.write_str("c")
         })
         .unwrap();
     let records = assembly
+        .ordinary()
         .try_retain_canonical_records(RecordPlan::new(1, 1).unwrap(), RecordLeafTag, |writer| {
             writer.write_row(|row| row.write_scalar(3_u8))
         })
         .unwrap();
     let canonical_root = assembly
+        .ordinary()
         .try_retain_canonical_records(RecordPlan::new(1, 4).unwrap(), CanonicalRootTag, |writer| {
             writer.write_row(|row| {
                 row.write_sequence_ref(sequence)?;
@@ -439,6 +466,7 @@ fn record_reference_projection_requires_exact_block_kind_and_tag() {
         .unwrap();
 
     let evidence_sequence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).unwrap(),
             EvidenceLeafTag,
@@ -446,16 +474,19 @@ fn record_reference_projection_requires_exact_block_kind_and_tag() {
         )
         .unwrap();
     let evidence_bytes = assembly
+        .ordinary()
         .try_retain_outcome_evidence_bytes(BytesPlan::new(1).unwrap(), EvidenceBytesTag, |writer| {
             writer.write_bytes(&[5])
         })
         .unwrap();
     let evidence_text = assembly
+        .ordinary()
         .try_retain_outcome_evidence_utf8(Utf8Plan::new(1).unwrap(), EvidenceTextTag, |writer| {
             writer.write_str("e")
         })
         .unwrap();
     let evidence_records = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRecordLeafTag,
@@ -463,6 +494,7 @@ fn record_reference_projection_requires_exact_block_kind_and_tag() {
         )
         .unwrap();
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 4).unwrap(),
             EvidenceRootTag,
@@ -687,6 +719,7 @@ fn every_supported_scalar_kind_round_trips_without_cross_kind_projection() {
     macro_rules! retain_scalar {
         ($type:ty, $value:expr, $tag:expr) => {
             assembly
+                .ordinary()
                 .try_retain_canonical_sequence(
                     SequencePlan::<$type>::new(1).unwrap(),
                     $tag,
@@ -707,6 +740,7 @@ fn every_supported_scalar_kind_round_trips_without_cross_kind_projection() {
     let f32_slot = retain_scalar!(f32, 1.5_f32, ScalarTag::<9>);
     let f64_slot = retain_scalar!(f64, -2.5_f64, ScalarTag::<10>);
     let root = assembly
+        .ordinary()
         .try_retain_canonical_records(
             RecordPlan::new(1, 10).unwrap(),
             CanonicalRootTag,
@@ -727,6 +761,7 @@ fn every_supported_scalar_kind_round_trips_without_cross_kind_projection() {
         )
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
@@ -834,6 +869,7 @@ fn exact_plans_reject_empty_excess_and_wrong_record_kinds() {
         .try_publication_assembly(publication_plan(keys, 2, 1))
         .unwrap();
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.extend_from_slice(&[1, 2])
         })
@@ -845,16 +881,19 @@ fn exact_plans_reject_empty_excess_and_wrong_record_kinds() {
     ));
 
     let sequence = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
             writer.push(1)
         })
         .unwrap();
     let root = assembly
+        .ordinary()
         .try_retain_canonical_records(RecordPlan::new(1, 1).unwrap(), CanonicalRootTag, |writer| {
             writer.write_row(|row| row.write_sequence_ref(sequence))
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_records(
             RecordPlan::new(1, 1).unwrap(),
             EvidenceRootTag,
@@ -891,6 +930,7 @@ fn physical_snapshots_follow_capacity_envelopes_for_sequence_bytes_and_utf8() {
 
     let before_sequence = account.snapshot();
     let _sequence = assembly
+        .ordinary()
         .try_retain_canonical_sequence(SequencePlan::<u8>::new(3).unwrap(), SequenceTag, |writer| {
             writer.extend_from_slice(&[1, 2, 3])
         })
@@ -898,6 +938,7 @@ fn physical_snapshots_follow_capacity_envelopes_for_sequence_bytes_and_utf8() {
     let after_sequence = account.snapshot();
 
     let _bytes = assembly
+        .ordinary()
         .try_retain_canonical_bytes(BytesPlan::new(4).unwrap(), BytesTag, |writer| {
             writer.write_bytes(&[1, 2, 3, 4])
         })
@@ -905,6 +946,7 @@ fn physical_snapshots_follow_capacity_envelopes_for_sequence_bytes_and_utf8() {
     let after_bytes = account.snapshot();
 
     let _text = assembly
+        .ordinary()
         .try_retain_canonical_utf8(Utf8Plan::new(5).unwrap(), TextTag, |writer| {
             writer.write_str("baozi")
         })

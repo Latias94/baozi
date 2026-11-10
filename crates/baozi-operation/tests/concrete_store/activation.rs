@@ -231,9 +231,10 @@ type TestFinalNeverActivated<'inv, E> = CanonicalFinal<
     >,
 >;
 
-fn activate_scoped<'inv, 'scope, T, E, CanonicalKind, CanonicalTag>(
+fn activate_scoped<'host, 'op, 'scope, T, E, CanonicalKind, CanonicalTag>(
     permit: CanonicalActivationPermit<
-        'inv,
+        'host,
+        'op,
         'scope,
         TestOwner,
         TestProgress,
@@ -243,8 +244,8 @@ fn activate_scoped<'inv, 'scope, T, E, CanonicalKind, CanonicalTag>(
         CanonicalKind,
         CanonicalTag,
     >,
-    mut materialize: impl for<'lane> FnMut(
-        CanonicalLane<'inv, 'lane, TestOwner, TestProgress, TestUnit>,
+    mut materialize: impl for<'loan, 'lane> FnMut(
+        CanonicalLane<'loan, 'lane, TestOwner, TestProgress, TestUnit>,
     ) -> CanonicalMaterialization<
         'lane,
         T,
@@ -267,8 +268,8 @@ fn run_scoped_activation<'inv, T, E, CanonicalKind, CanonicalTag>(
     output_slot: CanonicalOutputSlot<'inv, T>,
     activation_slots: CanonicalActivationSlots<'inv, E>,
     activation: TestScopedActivation,
-    materialize: impl for<'lane> FnMut(
-        CanonicalLane<'inv, 'lane, TestOwner, TestProgress, TestUnit>,
+    materialize: impl for<'loan, 'lane> FnMut(
+        CanonicalLane<'loan, 'lane, TestOwner, TestProgress, TestUnit>,
     ) -> CanonicalMaterialization<
         'lane,
         T,
@@ -396,7 +397,8 @@ fn canonical_activation_authorities_remain_linear() {
         RetainedStoreSessionOutcomeOwner<'inv, TestOwner, TestProgress, TestUnit>;
     type ActivationPermit<'inv> = CanonicalActivationPermit<
         'inv,
-        'static,
+        'inv,
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,
@@ -407,7 +409,8 @@ fn canonical_activation_authorities_remain_linear() {
     >;
     type ActivationFailure<'inv> = CanonicalActivationSealFailure<
         'inv,
-        'static,
+        'inv,
+        'inv,
         TestOwner,
         TestProgress,
         TestUnit,

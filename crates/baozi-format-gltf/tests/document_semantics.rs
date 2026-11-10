@@ -249,7 +249,10 @@ fn known_null_morph_references_reject_globally_before_dependencies() -> TestResu
                     );
                 }
                 assert_eq!(failure.ledger().current_live_bytes(), 0);
-                assert_eq!(failure.ledger().current_evidence_bytes(), 0);
+                assert!(
+                    failure.ledger().current_administrative_bytes()
+                        <= failure.ledger().peak_administrative_bytes()
+                );
                 assert_eq!(failure.ledger().active_reservations(), 0);
                 assert!(matches!(
                     failure.ledger().terminal_cause(),

@@ -4,6 +4,22 @@ use super::*;
 use crate::control::discard_untrusted_panic_payload;
 use std::cell::Cell;
 
+/// Disposes one original capture or payload without replacing an earlier unwind cause.
+pub(super) fn drop_captured_value<T>(
+    value: &mut Option<T>,
+    first_panic: &mut Option<Box<dyn std::any::Any + Send>>,
+    record_failure: impl FnOnce(),
+) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(value.take()))) {
+        record_failure();
+        if first_panic.is_some() {
+            discard_untrusted_panic_payload(payload);
+        } else {
+            *first_panic = Some(payload);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum PayloadOrder {
     ProofBeforeOutput,
@@ -14,6 +30,31 @@ pub(super) struct PayloadLoan<'inv, T> {
     value: &'inv mut Option<T>,
     order: &'inv Cell<PayloadOrder>,
     identity: *const (),
+}
+
+/// Keeps an in-flight permission under caught cleanup before its concrete owner is rebound.
+pub(super) struct PayloadValue<T> {
+    pub(super) value: Option<T>,
+}
+
+impl<T> PayloadValue<T> {
+    pub(super) fn new(value: T) -> Self {
+        Self { value: Some(value) }
+    }
+
+    pub(super) fn take(&mut self) -> Option<T> {
+        self.value.take()
+    }
+
+    pub(super) fn dispose(&mut self) -> Result<(), ()> {
+        drop_scoped_value(self.value.take())
+    }
+}
+
+impl<T> Drop for PayloadValue<T> {
+    fn drop(&mut self) {
+        let _ = self.dispose();
+    }
 }
 
 impl<'inv, T> PayloadLoan<'inv, T> {
@@ -120,7 +161,7 @@ impl<T, Proof> Drop for PayloadPair<T, Proof> {
 }
 
 /// The concrete stage owner can quarantine its storage after a callback value fails to drop.
-pub(super) trait PayloadStorage {
+pub trait PayloadStorage {
     fn contain_payload_failure(self);
 }
 
@@ -148,6 +189,14 @@ impl<T, S: PayloadStorage> PayloadOwner<T, S> {
             Some((_, storage)) => storage,
             None => panic!("payload owner is consumed only as a whole"),
         }
+    }
+
+    pub(super) fn storage_mut(&mut self) -> &mut S {
+        &mut self
+            .parts
+            .as_mut()
+            .expect("a live payload owner retains its storage")
+            .1
     }
 
     pub(super) fn into_parts(mut self) -> (T, S) {
@@ -196,6 +245,42 @@ where
     }
 }
 
+impl<O, PP, U, L> PayloadStorage
+    for crate::concrete_store::finite::FiniteRetainedStoreOperation<'_, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.contain_activation_fault();
+    }
+}
+
+impl<O, PP, U, L> PayloadStorage
+    for crate::concrete_store::finite::FiniteRetainedStorePublicationAssembly<'_, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.contain_activation_fault();
+    }
+}
+
+impl<O, PP, U> PayloadStorage
+    for crate::concrete_store::finite::FiniteUnrootedStoreFailure<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.contain_activation_fault();
+    }
+}
+
 impl<'inv, O, PP, U> PayloadStorage for RawStoreFailureAssembly<'inv, O, PP, U>
 where
     O: OperationOwner,
@@ -230,31 +315,7 @@ where
     }
 }
 
-impl<'inv, O, PP, U, CK, CT, EK, ET> PayloadStorage
-    for StoreSuccessFreezePermit<'inv, O, PP, U, CK, CT, EK, ET>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn contain_payload_failure(self) {
-        let _ = self.contain_activation_fault();
-    }
-}
-
 impl<'inv, O, PP, U, EK, ET> PayloadStorage for StoreFailureAssembly<'inv, O, PP, U, EK, ET>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn contain_payload_failure(self) {
-        let _ = self.contain_activation_fault();
-    }
-}
-
-impl<'inv, O, PP, U, CK, CT, EK, ET> PayloadStorage
-    for StoreSuccessFreezeContribution<'inv, O, PP, U, CK, CT, EK, ET>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -273,5 +334,73 @@ where
 {
     fn contain_payload_failure(self) {
         let _ = self.contain_activation_fault();
+    }
+}
+
+impl<O, PP, U, CK, CT, EK, ET> PayloadStorage
+    for crate::concrete_store::finite::ValidatedFiniteStoreSuccess<'_, O, PP, U, CK, CT, EK, ET>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
+    }
+}
+
+impl<O, PP, U, EK, ET> PayloadStorage
+    for crate::concrete_store::finite::FiniteStoreFailureAssembly<'_, O, PP, U, EK, ET>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
+    }
+}
+
+impl<O, PP, U> PayloadStorage
+    for crate::concrete_store::finite::FiniteStoreFallbackOnly<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
+    }
+}
+
+impl<EK, ET> PayloadStorage for PreparedStoreFailureOutcome<EK, ET> {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl PayloadStorage for PreparedStoreFallback {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl<EK, ET> PayloadStorage for crate::concrete_store::PreparedFiniteStoreFailureOutcome<EK, ET> {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl PayloadStorage for crate::concrete_store::PreparedFiniteStoreFallback {
+    fn contain_payload_failure(self) {
+        self.quarantine_cause_drop_failure();
+    }
+}
+impl<O, PP, U, EK, ET> PayloadStorage
+    for crate::concrete_store::finite::ValidatedFiniteStoreFailure<'_, O, PP, U, EK, ET>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn contain_payload_failure(self) {
+        let _ = self.into_request_error();
     }
 }

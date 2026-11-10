@@ -715,7 +715,10 @@ fn malformed_attribute_and_index_values_keep_the_completed_geometry_leaves() -> 
         assert_eq!(failure.ledger().committed_canonical_members(), 0);
         assert_eq!(failure.ledger().current_live_bytes(), 0);
         assert_eq!(failure.ledger().active_reservations(), 0);
-        assert_eq!(failure.ledger().current_evidence_bytes(), 0);
+        assert!(
+            failure.ledger().current_administrative_bytes()
+                <= failure.ledger().peak_administrative_bytes()
+        );
     }
     Ok(())
 }

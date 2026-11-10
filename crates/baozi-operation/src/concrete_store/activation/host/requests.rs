@@ -36,7 +36,7 @@ where
         disposition: CanonicalDispositionSlot<'inv, CK, CT, EK, ET>,
         request: OperationDisposition,
     ) -> Result<(), StoreActivationContainment> {
-        if !disposition.is_vacant_for(self.raw.invocation_identity()) {
+        if !disposition.is_vacant_for(self.raw.loan().invocation_identity()) {
             return Err(contain_operation(self));
         }
         if let OperationDisposition::MinimalFallback { code } = request {
@@ -77,7 +77,7 @@ where
             NeverActivatedAuthority::FallbackOnly(operation) => (operation, true),
         };
         if !disposition.is_vacant_for(cause.identity())
-            || !disposition.is_vacant_for(operation.raw.invocation_identity())
+            || !disposition.is_vacant_for(operation.raw.loan().invocation_identity())
         {
             let _ = drop_scoped_value(cause);
             return Err(contain_operation(operation));
@@ -118,6 +118,7 @@ where
         let UnrootedFailureEvidence {
             owner,
             domain,
+            state,
             failure_code,
             failure_work,
             outcome_evidence_destination_dimension,
@@ -136,7 +137,10 @@ where
             });
         }
         disposition.install(PendingDisposition::Rejected(PendingRejected {
-            store: DeferredUnrootedStoreFailure { domain },
+            store: DeferredUnrootedStoreFailure {
+                domain: domain.defer(),
+                state,
+            },
             failure_code,
             failure_work,
             destination: outcome_evidence_destination_dimension,

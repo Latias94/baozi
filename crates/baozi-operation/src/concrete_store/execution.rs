@@ -6,8 +6,9 @@ use crate::retained::{ExecutionError, ExecutionOrdinaryStorage};
 pub use exclusive::{
     StoreActionExecution, StoreChildAdmission, StoreExtensionResult, StoreFailureStorage,
     StoreImporterBoundary, StoreInvocation, StoreInvocationError, StoreInvocationLayout,
-    StoreInvocationParser, StoreInvocationServices, StoreScanReturn,
+    StoreInvocationParser, StoreInvocationServices, StoreParserReadRow, StoreScanReturn,
 };
+pub(super) use exclusive::{execute_store_action_parts, execute_store_parts};
 
 /// Ordinary storage and real poll authority, borrowing no numeric work or progress state.
 pub struct StoreOrdinaryStorage<'b, 'op: 'b, O, PP, U> {

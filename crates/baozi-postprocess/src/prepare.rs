@@ -15,7 +15,7 @@ pub use options::{
 pub use report::{GeometryPreparationReport, PreparedPrimitiveReport};
 
 use crate::direct_error::FailureOwner;
-use crate::operation::runtime::{REJECTION_CODE, ScratchVec};
+use crate::operation::runtime::{EditInvocationError, REJECTION_CODE, ScratchVec};
 use crate::scene_edit::{
     EditCanonicalSlots, EditCause, EditFailure, EditTerminal, PreparedEdit, validate_changed,
 };
@@ -25,10 +25,9 @@ use crate::{
 };
 use baozi_core::__scene_integration::integration::{
     SceneEditBootstrap, SceneEditEvidence, SceneGeometryReplacement, SceneTriangleOrigins,
-    run_scene_edit_body,
+    run_finite_scene_edit_body,
 };
 use baozi_core::{PrimitiveId, ValidatedScene};
-use baozi_operation::__retained_store_integration::activation::CanonicalBoundBodyError;
 
 /// Scalar counts for the selected evidence wire format, accumulated with replacement admission.
 #[derive(Default)]
@@ -62,6 +61,9 @@ impl SelectionEvidenceWork {
 
 /// Prepare a generation-qualified selection atomically with explicit policies and limits.
 /// Source positions and all retained attributes remain borrowed until the one final transaction.
+/// Requested handles are resolved in caller order; the first failed lookup is reported before
+/// duplicate-target or topology checks. Successfully resolved targets are processed in canonical
+/// Scene mesh/primitive order, independently of the caller's order.
 #[allow(clippy::result_large_err)]
 pub fn prepare_triangles(
     input: ValidatedScene,
@@ -109,18 +111,10 @@ pub enum PreparationCause {
     MorphDependency(baozi_core::MorphDeltaSemantic),
     #[error("preparation would narrow the {0:?} dependency")]
     PrecisionLoss(baozi_core::AttributeSemanticKind),
-    #[error("preparation could not start: {0}")]
-    Start(baozi_operation::__retained_store_integration::authority::RetainedStoreStartError),
     #[error("preparation was interrupted: {0}")]
     Runtime(baozi_operation::StoreRuntimeError),
     #[error("preparation stopped: {0}")]
     Control(crate::PostProcessControlCause),
-    #[error("preparation requires fail-closed containment: {0}")]
-    Containment(
-        baozi_operation::__retained_store_integration::activation::StoreActivationContainment,
-    ),
-    #[error("preparation could not freeze its terminal: {0}")]
-    Publication(baozi_operation::StorePrepareError),
 }
 
 pub struct PreparationFailure {
@@ -171,16 +165,14 @@ impl From<baozi_operation::StoreRuntimeError> for PreparationCause {
         }
     }
 }
-impl From<EditFailure> for PreparationFailure {
-    fn from(e: EditFailure) -> Self {
+impl From<crate::scene_edit::EditSemanticFailure> for PreparationFailure {
+    fn from(e: crate::scene_edit::EditSemanticFailure) -> Self {
         let cause = match e.cause {
             EditCause::Runtime { source } => source.into(),
             EditCause::Control { cause } => PreparationCause::Control(cause),
             EditCause::FinalControl => PreparationCause::FinalControl,
             EditCause::MorphDependency { semantic } => PreparationCause::MorphDependency(semantic),
             EditCause::PrecisionLoss { semantic } => PreparationCause::PrecisionLoss(semantic),
-            EditCause::Containment { source } => PreparationCause::Containment(source),
-            EditCause::Preparation { source } => PreparationCause::Publication(source),
             _ => PreparationCause::Transaction,
         };
         Self {
@@ -202,30 +194,24 @@ pub(crate) fn run(
     let bootstrap = match SceneEditBootstrap::try_new() {
         Ok(b) => b,
         Err(_) => {
-            return Err(PostProcessRunFailure::new(
-                input,
-                PostProcessRunError::ResourcePolicyInitialization,
-            ));
+            return crate::error::reject_resource_policy(input);
         }
     };
     let (writer_limits, failure_requirements, admission) = bootstrap.into_parts();
     let Some((keys, ledger, start)) =
         crate::operation::runtime::plan_selected_runtime(writer_limits, options.budgets)
     else {
-        return Err(PostProcessRunFailure::new(
-            input,
-            PostProcessRunError::ResourcePolicyInitialization,
-        ));
+        return crate::error::reject_resource_policy(input);
     };
     let mut invocation_host = crate::operation::runtime::EditHost::new();
     let source_generation = input.generation();
     let mut body_cause = None;
-    let mut body_containment = None;
+    let did_attach = std::cell::Cell::new(false);
     let source = &input;
     let local_cause = &mut body_cause;
-    let containment = &mut body_containment;
+    let attached = &did_attach;
     let mut activation = Some((admission, failure_requirements));
-    let body = run_scene_edit_body(
+    let body = run_finite_scene_edit_body(
         &mut invocation_host,
         source,
         control.into_runtime(),
@@ -234,7 +220,10 @@ pub(crate) fn run(
         move |parts, disposition| {
             let mut startup = parts.startup;
             let prepared = match startup.with_action_execution(keys.work, |runtime| {
-                input::prepare(source, targets, options, runtime, keys)
+                let prepared = input::prepare(source, targets, options, runtime, keys)?;
+                #[cfg(test)]
+                cleanup_tests::preparation_returned(&prepared);
+                Ok::<_, PreparationCause>(prepared)
             }) {
                 Ok(prepared) => prepared,
                 Err(cause) => {
@@ -242,42 +231,26 @@ pub(crate) fn run(
                     if let Err(cause) = startup.request_failure(disposition, REJECTION_CODE) {
                         *local_cause = Some(cause.into());
                     }
-                    return;
+                    return Ok(());
                 }
             };
-            let any_changed = match startup.with_action_execution(keys.work, |runtime| {
-                for primitive in prepared.values() {
-                    if crate::operation::runtime::run_unit(runtime, || primitive.changed())? {
-                        return Ok::<_, baozi_operation::StoreRuntimeError>(true);
-                    }
-                }
-                Ok(false)
-            }) {
-                Ok(changed) => changed,
-                Err(cause) => {
-                    drop(prepared);
-                    *local_cause = Some(cause.into());
-                    if let Err(cause) = startup.request_failure(disposition, REJECTION_CODE) {
+            let prepared = match prepared {
+                input::PreparedSelection::Unchanged => {
+                    if let Err(cause) = startup.request_unchanged(disposition) {
                         *local_cause = Some(cause.into());
                     }
-                    return;
+                    return Ok(());
                 }
+                input::PreparedSelection::Prepared(prepared) => prepared,
             };
-            if !any_changed {
-                drop(prepared);
-                if let Err(cause) = startup.request_unchanged(disposition) {
-                    *local_cause = Some(cause.into());
-                }
-                return;
-            }
             let mut operation = match startup.attach() {
                 Ok(operation) => operation,
-                Err(cause) => {
+                Err(_cause) => {
                     drop(prepared);
-                    *local_cause = Some(PreparationCause::Start(cause));
-                    return;
+                    return Ok(());
                 }
             };
+            attached.set(true);
             let mut replacements =
                 match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
                     ScratchVec::new(runtime, keys, prepared.values().len())
@@ -286,10 +259,12 @@ pub(crate) fn run(
                     Err(cause) => {
                         drop(prepared);
                         *local_cause = Some(cause.into());
-                        *containment = operation
-                            .request_minimal_fallback(disposition, REJECTION_CODE)
-                            .err();
-                        return;
+                        if let Err(cause) =
+                            operation.request_minimal_fallback(disposition, REJECTION_CODE)
+                        {
+                            *local_cause = Some(cause.into());
+                        }
+                        return Ok(());
                     }
                 };
             let mut evidence_work = SelectionEvidenceWork::default();
@@ -331,10 +306,11 @@ pub(crate) fn run(
                 drop(replacements);
                 drop(prepared);
                 *local_cause = Some(cause.into());
-                *containment = operation
-                    .request_minimal_fallback(disposition, REJECTION_CODE)
-                    .err();
-                return;
+                if let Err(cause) = operation.request_minimal_fallback(disposition, REJECTION_CODE)
+                {
+                    *local_cause = Some(cause.into());
+                }
+                return Ok(());
             }
             let qualified = evidence_work
                 .validation_work()
@@ -352,27 +328,32 @@ pub(crate) fn run(
                 drop(replacements);
                 drop(prepared);
                 *local_cause = Some(cause.into());
-                *containment = operation
-                    .request_minimal_fallback(disposition, REJECTION_CODE)
-                    .err();
-                return;
+                if let Err(cause) = operation.request_minimal_fallback(disposition, REJECTION_CODE)
+                {
+                    *local_cause = Some(cause.into());
+                }
+                return Ok(());
             }
             let mappings =
-                match baozi_core::__scene_integration::integration::SceneGeometryPlanStorage::try_new(
-                    &mut operation,
-                    keys.planning,
-                    keys.scratch,
-                    replacements.values().len(),
-                ) {
+                match crate::operation::runtime::with_execution(&mut operation, keys, |runtime| {
+                    baozi_core::__scene_integration::integration::SceneGeometryPlanStorage::try_new(
+                        runtime,
+                        keys.planning,
+                        keys.scratch,
+                        replacements.values().len(),
+                    )
+                }) {
                     Ok(mappings) => mappings,
                     Err(cause) => {
                         drop(replacements);
                         drop(prepared);
                         *local_cause = Some(cause.into());
-                        *containment = operation
-                            .request_minimal_fallback(disposition, REJECTION_CODE)
-                            .err();
-                        return;
+                        if let Err(cause) =
+                            operation.request_minimal_fallback(disposition, REJECTION_CODE)
+                        {
+                            *local_cause = Some(cause.into());
+                        }
+                        return Ok(());
                     }
                 };
             let (admission, failure_requirements) = activation
@@ -388,8 +369,7 @@ pub(crate) fn run(
                     drop(mappings);
                     drop(replacements);
                     drop(prepared);
-                    *containment = Some(cause);
-                    return;
+                    return Err(cause);
                 }
             };
             #[cfg(test)]
@@ -417,30 +397,41 @@ pub(crate) fn run(
             );
             drop(replacements);
             drop(prepared);
-            *containment = requested.err();
+            requested
         },
     );
+    let mut invocation_error = None;
     let result = match body {
-        Ok(finish) => crate::scene_edit::finish_bound_edit(finish),
-        Err(CanonicalBoundBodyError::Start(cause)) => {
-            return Err(failure(
-                input,
-                PreparationFailure::new(PreparationCause::Start(cause)),
-                invocation,
-            ));
+        Ok(finish) => {
+            crate::scene_edit::finish_bound_edit(finish, did_attach.get(), &mut invocation_error)
         }
-        Err(CanonicalBoundBodyError::Body(error)) => {
-            if let Some(source) = error.containment().copied().or(body_containment) {
-                Err(EditFailure::new(EditCause::Containment { source }))
-            } else {
-                return Err(failure(
-                    input,
-                    PreparationFailure::new(body_cause.unwrap_or(PreparationCause::Transaction)),
-                    invocation,
-                ));
-            }
-        }
+        Err(error) => Err(EditFailure::invocation(error, &mut invocation_error)),
     };
+    finish_preparation(
+        input,
+        invocation,
+        options,
+        source_generation,
+        result,
+        &mut invocation_error,
+        body_cause,
+    )
+}
+
+// Build the public result after materialization releases its nested stack frames.
+#[expect(
+    clippy::result_large_err,
+    reason = "the public failure owns its original Scene and invocation residue without allocating"
+)]
+fn finish_preparation(
+    input: ValidatedScene,
+    invocation: Invocation,
+    options: TrianglePreparationOptions,
+    source_generation: baozi_core::SceneGenerationId,
+    result: Result<EditTerminal, EditFailure>,
+    invocation_error: &mut Option<EditInvocationError>,
+    body_cause: Option<PreparationCause>,
+) -> Result<PostProcessRunOutcome, PostProcessRunFailure> {
     match result {
         Ok(EditTerminal::Unchanged { resources }) => {
             let report = report_for(
@@ -473,7 +464,17 @@ pub(crate) fn run(
             PreparationFailure::new(PreparationCause::Transaction),
             invocation,
         )),
-        Err(error) => {
+        Err(EditFailure::Invocation) => Err(PostProcessRunFailure::new(
+            input,
+            PostProcessRunError::Invocation {
+                failure: crate::PostProcessInvocationFailure::new(
+                    invocation_error
+                        .take()
+                        .expect("the entry owns its original invocation error"),
+                ),
+            },
+        )),
+        Err(EditFailure::Semantic(error)) => {
             let mut error = PreparationFailure::from(error);
             if let Some(cause) = body_cause {
                 error.cause = match error.cause {
@@ -579,9 +580,6 @@ fn failure(
                 PreparationCause::PrecisionLoss(semantic) => N::PrecisionLoss { semantic },
                 PreparationCause::Runtime(source) => source.into(),
                 PreparationCause::Control(cause) => N::Control { cause },
-                PreparationCause::Start(source) => N::Start { source },
-                PreparationCause::Containment(source) => N::Containment { source },
-                PreparationCause::Publication(source) => N::Preparation { source },
                 _ => N::CoreRejected,
             };
             PostProcessRunError::Normals {
@@ -601,9 +599,6 @@ fn failure(
                 PreparationCause::PrecisionLoss(semantic) => T::PrecisionLoss { semantic },
                 PreparationCause::Runtime(source) => source.into(),
                 PreparationCause::Control(cause) => T::Control { cause },
-                PreparationCause::Start(source) => T::Start { source },
-                PreparationCause::Containment(source) => T::Containment { source },
-                PreparationCause::Publication(source) => T::Preparation { source },
                 _ => T::CoreRejected,
             };
             PostProcessRunError::Tangents {
@@ -623,9 +618,6 @@ fn failure(
                 }
                 PreparationCause::Runtime(source) => source.into(),
                 PreparationCause::Control(cause) => P::Control { cause },
-                PreparationCause::Start(source) => P::Start { source },
-                PreparationCause::Containment(source) => P::Containment { source },
-                PreparationCause::Publication(source) => P::Preparation { source },
                 _ => P::CoreRejected,
             };
             PostProcessRunError::Triangulation {

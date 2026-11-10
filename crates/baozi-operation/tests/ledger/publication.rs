@@ -144,12 +144,17 @@ fn pending_and_rolled_back_boundaries_seal_all_accounting_mutation() {
     assert_eq!(records.pending_publication(), 0);
     assert_eq!(records.committed(), 0);
     drop(zero);
+    let expected_administrative_bytes =
+        coordinator.ledger_snapshot().current_administrative_bytes();
     let snapshot = coordinator
         .finish()
         .expect("rollback releases every token without reopening");
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.active_reservations(), 0);
-    assert_eq!(snapshot.current_evidence_bytes(), 0);
+    assert_eq!(
+        snapshot.current_administrative_bytes(),
+        expected_administrative_bytes
+    );
 }
 
 #[test]
@@ -279,7 +284,10 @@ fn pending_drop_releases_live_and_commitments_without_reopening_the_operation() 
         .expect("rolled-back operation can finalize");
     assert_eq!(snapshot.current_live_bytes(), 0);
     assert_eq!(snapshot.peak_live_bytes(), publication_capacity_bytes() + 6);
-    assert_eq!(snapshot.current_evidence_bytes(), 0);
+    assert_eq!(
+        snapshot.current_administrative_bytes(),
+        rolled_back.current_administrative_bytes()
+    );
 
     let mut fresh = publication_coordinator(20);
     let replacement = fresh
@@ -331,7 +339,8 @@ fn publication_batch_releases_accounted_vector_capacity_on_rollback() {
         publication_capacity_bytes() + 4
     );
     pending.rollback();
-    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
+    let rolled_back = coordinator.ledger_snapshot();
+    assert_eq!(rolled_back.current_live_bytes(), 0);
     assert!(matches!(
         coordinator
             .checkpoint()
@@ -369,7 +378,10 @@ fn publication_batch_releases_accounted_vector_capacity_on_rollback() {
         snapshot.dimension(Dimension::Records).unwrap().committed(),
         0
     );
-    assert_eq!(snapshot.current_evidence_bytes(), 0);
+    assert_eq!(
+        snapshot.current_administrative_bytes(),
+        rolled_back.current_administrative_bytes()
+    );
 }
 
 #[test]

@@ -115,7 +115,7 @@ fn run() -> Result<(), ProbeError> {
     if ledger.active_reservations() != 0 {
         return Err(ProbeError::TerminalInvariant("active_reservations"));
     }
-    if ledger.current_evidence_bytes() != 0 {
+    if ledger.current_administrative_bytes() != 0 {
         return Err(ProbeError::TerminalInvariant("current_evidence_bytes"));
     }
     let dimension = |key| {
@@ -174,11 +174,11 @@ fn run() -> Result<(), ProbeError> {
     );
     println!(
         "ledger_current_evidence_bytes={}",
-        ledger.current_evidence_bytes()
+        ledger.current_administrative_bytes()
     );
     println!(
         "ledger_peak_evidence_bytes={}",
-        ledger.peak_evidence_bytes()
+        ledger.peak_administrative_bytes()
     );
     println!("reviewed_peak_live_envelope_bytes={reviewed_peak}");
     println!("primary_bytes_attempted={}", primary.attempted());

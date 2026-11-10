@@ -17,17 +17,18 @@ fn assert_canonical_panic_containment(
         Err(RetainedPublicationError::Writer(RetainedWriterError::Physical(cause)))
             if cause == RetainedAllocationError::BuilderPanicked && cause.charge_retained()
     ));
-    let operation = assembly.operation.as_ref().unwrap();
+    let operation = assembly.loan().operation.as_ref().unwrap();
     assert!(!operation.has_outstanding_work_permit());
     assert!(!operation.planning_matches_baseline(storage_before));
     let work = assembly
+        .loan()
         .test_dimension_evidence(TestDimension::Bytes)
         .unwrap();
     assert_eq!(
         (work.attempted(), work.consumed()),
         (work_before.attempted() + 5, work_before.consumed() + 3)
     );
-    let account = assembly.fields.account.as_ref().unwrap();
+    let account = assembly.loan().fields.account.as_ref().unwrap();
     let charge = account
         .checked_retained_charge::<u64>(empty_plan())
         .unwrap();
@@ -36,13 +37,14 @@ fn assert_canonical_panic_containment(
         work_before.current_live_bytes() + charge.bytes
     );
     assert_eq!(
-        assembly.test_ledger_probe().active_reservations(),
+        assembly.loan().test_ledger_probe().active_reservations(),
         reservations_before + 1
     );
-    assert_eq!(assembly.canonical_len(), 0);
-    assert_eq!(assembly.canonical_new_blocks(), 0);
+    assert_eq!(assembly.loan().canonical_len(), 0);
+    assert_eq!(assembly.loan().canonical_new_blocks(), 0);
     assert_eq!(
         assembly
+            .loan()
             .fields
             .canonical_batch
             .as_ref()
@@ -50,7 +52,7 @@ fn assert_canonical_panic_containment(
             .attribution_len(),
         1
     );
-    assert!(!assembly.test_storage_graph_is_exact());
+    assert!(!assembly.loan().test_storage_graph_is_exact());
     let physical = account.snapshot();
     assert!(physical.poisoned());
     assert_eq!(
@@ -76,35 +78,43 @@ fn controlled_canonical_body_panic_preserves_prefix_and_retains_charge() {
         let account = account(&factory, u64::MAX, 128);
         let mut root = TestInvocationRoot::new();
         let mut assembly = ordinary_assembly(&mut root, &account, OperationControl::default());
-        let storage_before = assembly.operation.as_ref().unwrap().planning_baseline();
+        let storage_before = assembly
+            .loan()
+            .operation
+            .as_ref()
+            .unwrap()
+            .planning_baseline();
         let physical_before = account.snapshot();
         let work_before = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
-        let reservations_before = assembly.test_ledger_probe().active_reservations();
+        let reservations_before = assembly.loan().test_ledger_probe().active_reservations();
         let shares_before = account.share_call_count();
 
-        let result = assembly.try_retain_canonical_controlled::<CanonicalRootTag>(
-            TestDimension::Bytes,
-            empty_plan(),
-            |_emplacer, mut control| {
-                if borrowed {
-                    let mut permission = control
-                        .try_begin_borrowed(NonZeroU64::new(3).unwrap())
-                        .unwrap_or_else(|_| panic!("borrowed panic envelope must be admitted"));
-                    assert!(permission.complete_units(NonZeroU64::MIN).is_ok());
-                    assert_eq!(permission.remaining_units(), 2);
-                    panic!("controlled builder body panicked with a borrowed permission");
-                } else {
-                    let mut permission = control
-                        .try_begin(NonZeroU64::new(3).unwrap())
-                        .unwrap_or_else(|_| panic!("panic envelope must be admitted"));
-                    assert!(permission.complete_units(NonZeroU64::MIN).is_ok());
-                    assert_eq!(permission.remaining_units(), 2);
-                    panic!("controlled builder body panicked with an owning permission");
-                }
-            },
-        );
+        let result = assembly
+            .loan_mut()
+            .try_retain_canonical_controlled::<CanonicalRootTag>(
+                TestDimension::Bytes,
+                empty_plan(),
+                |_emplacer, mut control| {
+                    if borrowed {
+                        let mut permission = control
+                            .try_begin_borrowed(NonZeroU64::new(3).unwrap())
+                            .unwrap_or_else(|_| panic!("borrowed panic envelope must be admitted"));
+                        assert!(permission.complete_units(NonZeroU64::MIN).is_ok());
+                        assert_eq!(permission.remaining_units(), 2);
+                        panic!("controlled builder body panicked with a borrowed permission");
+                    } else {
+                        let mut permission = control
+                            .try_begin(NonZeroU64::new(3).unwrap())
+                            .unwrap_or_else(|_| panic!("panic envelope must be admitted"));
+                        assert!(permission.complete_units(NonZeroU64::MIN).is_ok());
+                        assert_eq!(permission.remaining_units(), 2);
+                        panic!("controlled builder body panicked with an owning permission");
+                    }
+                },
+            );
 
         assert_eq!(account.share_call_count(), shares_before + 1);
         assert_canonical_panic_containment(
@@ -140,19 +150,25 @@ fn controlled_canonical_capture_drop_panic_resolves_forgotten_permission_at_host
         let account = account(&factory, u64::MAX, 128);
         let mut root = TestInvocationRoot::new();
         let mut assembly = ordinary_assembly(&mut root, &account, OperationControl::default());
-        let storage_before = assembly.operation.as_ref().unwrap().planning_baseline();
+        let storage_before = assembly
+            .loan()
+            .operation
+            .as_ref()
+            .unwrap()
+            .planning_baseline();
         let physical_before = account.snapshot();
         let work_before = assembly
+            .loan()
             .test_dimension_evidence(TestDimension::Bytes)
             .unwrap();
-        let reservations_before = assembly.test_ledger_probe().active_reservations();
+        let reservations_before = assembly.loan().test_ledger_probe().active_reservations();
         let shares_before = account.share_call_count();
         let capture_dropped = Cell::new(false);
         let builder_returned_ok = Cell::new(false);
         let returned_ok = &builder_returned_ok;
         let capture = PanickingCallbackCapture(&capture_dropped);
 
-        let result = assembly.try_retain_canonical_controlled(
+        let result = assembly.loan_mut().try_retain_canonical_controlled(
             TestDimension::Bytes,
             empty_plan(),
             move |emplacer, mut control| {

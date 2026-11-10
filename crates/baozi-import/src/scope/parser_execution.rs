@@ -5,8 +5,9 @@ use crate::store::{ImportExecutionFailure, ImportStoreVocabulary, project_store_
 use baozi_operation::__retained_store_integration::activation::{
     StoreChildAdmission, StoreExtensionResult, StoreFailureStorage, StoreInvocationError,
     StoreInvocationLayout, StoreInvocationParser, StoreInvocationServices, StoreOrdinaryStorage,
-    StoreParserWorkError, StoreScanReturn,
+    StoreParserReadRow, StoreParserWorkError, StoreScanReturn,
 };
+use std::num::NonZeroU64;
 
 type OrdinaryStorage<'b, 'op> =
     StoreOrdinaryStorage<'b, 'op, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
@@ -332,6 +333,41 @@ pub struct ParseParser<'borrow, 'frame, 'ctx, 'op, 'session, const N: usize, con
     views: &'borrow ParseViews<'borrow, 'session>,
 }
 
+/// Private text integration over the actual numeric row; error projection is the only adapter.
+pub(crate) struct ParseReadRow<'borrow, 'read, 'session> {
+    numeric: &'borrow mut StoreParserReadRow<'read>,
+    vocabulary: &'borrow ImportStoreVocabulary,
+    views: &'borrow ParseViews<'borrow, 'session>,
+}
+
+impl ParseReadRow<'_, '_, '_> {
+    #[inline]
+    pub(crate) fn ascii_span_bound(&self, maximum: u64) -> u64 {
+        self.numeric.read_span_bound(maximum)
+    }
+
+    #[inline]
+    pub(crate) fn ready_for_read(&mut self) -> ParseResult<bool> {
+        self.numeric
+            .ready_for_read()
+            .map_err(|cause| self.views.runtime(self.vocabulary, cause))
+    }
+
+    #[inline]
+    pub(crate) fn complete_read(&mut self, amount: u64) -> ParseResult<()> {
+        self.numeric
+            .complete_read(amount)
+            .map_err(|cause| self.views.runtime(self.vocabulary, cause))
+    }
+
+    #[inline]
+    pub(crate) fn complete_ascii_span(&mut self, units: NonZeroU64) -> ParseResult<()> {
+        self.numeric
+            .complete_read_units(units)
+            .map_err(|cause| self.views.runtime(self.vocabulary, cause))
+    }
+}
+
 impl<'borrow, 'op, 'session> ParseServices<'borrow, 'op, 'session> {
     pub fn error_view(&self) -> ParseErrorView<'session> {
         ParseErrorView {
@@ -590,6 +626,16 @@ impl<'session, 'inv: 'session> ParseContext<'session, 'inv> {
 }
 
 impl<'op, 'session> ParseRoot<'_, 'op, 'session> {
+    #[cfg(test)]
+    pub(crate) fn tighten_test_decode_work(&mut self, attempted: u64, consumed: u64) {
+        self.store
+            .tighten_dimension_policy(
+                ImportDimension::DecodeWork,
+                baozi_operation::DimensionPolicy::counter(attempted, consumed, 0),
+            )
+            .expect("fixture policies must only tighten decode work before parsing");
+    }
+
     pub fn error_view(&self) -> ParseErrorView<'session> {
         ParseErrorView {
             terminal: self.views.terminal,
@@ -1139,6 +1185,30 @@ impl<'op, 'session, const N: usize, const CHILD: bool>
         )
     }
 }
+impl ParseParser<'_, '_, '_, '_, '_, 1, true> {
+    pub(crate) fn with_read_row<T>(
+        &mut self,
+        body: &mut impl FnMut(&mut ParseReadRow<'_, '_, '_>) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        self.views.preflight()?;
+        let views = self.views;
+        let vocabulary = self.vocabulary;
+        let value = self.numeric.with_read_row(
+            &mut |numeric| {
+                body(&mut ParseReadRow {
+                    numeric,
+                    vocabulary,
+                    views,
+                })
+            },
+            |cause| views.runtime(vocabulary, cause),
+            |_, cause| cause,
+        )?;
+        views.preflight()?;
+        Ok(value)
+    }
+}
+
 impl<const CHILD: bool> ParseParser<'_, '_, '_, '_, '_, 1, CHILD> {
     /// Admits another singleton chunk after the previous chunk has been completed.
     ///

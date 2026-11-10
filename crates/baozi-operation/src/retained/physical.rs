@@ -482,45 +482,166 @@ where
     }
 
     pub(super) fn try_commit(mut self) -> Result<Physical, FinalizationContainmentError> {
-        let eligibility = self
-            .physical
+        let proof = &mut self.proof;
+        let (physical, ()) = try_commit_fields(&mut self.physical, |permit| {
+            proof
+                .take()
+                .unwrap_or_else(|| unreachable_final_owner_state())
+                .commit_account_bound(permit)
+        })?;
+        Ok(physical)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static REJECT_NEXT_ACCOUNT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn reject_next_account_bound_commit() {
+    REJECT_NEXT_ACCOUNT_COMMIT.with(|pending| assert!(!pending.replace(true)));
+}
+
+/// Eligibility belongs to the physical graph; numerical ownership stays in the concrete guard.
+fn try_commit_fields<Physical, Facts>(
+    physical: &mut Option<Physical>,
+    commit: impl for<'permit> FnOnce(DetachedLedgerCommitPermit<'permit>) -> Facts,
+) -> Result<(Physical, Facts), FinalizationContainmentError>
+where
+    Physical: AccountBoundPublicationManifest,
+{
+    #[cfg(test)]
+    if REJECT_NEXT_ACCOUNT_COMMIT.with(|pending| pending.replace(false)) {
+        let _ = physical
             .as_ref()
             .unwrap_or_else(|| unreachable_final_owner_state())
             .publication_account()
-            .try_publication_eligibility();
-        let eligibility = match eligibility {
-            Ok(eligibility) => eligibility,
-            Err(quarantine) => {
-                let cause = self.contain_after_quarantine(quarantine);
-                return Err(cause);
-            }
-        };
-        let proof = self
-            .proof
+            .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+    }
+    let eligibility = physical
+        .as_ref()
+        .unwrap_or_else(|| unreachable_final_owner_state())
+        .publication_account()
+        .try_publication_eligibility();
+    let eligibility = match eligibility {
+        Ok(eligibility) => eligibility,
+        Err(quarantine) => {
+            return Err(physical
+                .take()
+                .unwrap_or_else(|| unreachable_final_owner_state())
+                .contain_after_quarantine(quarantine));
+        }
+    };
+    let facts = commit(eligibility.into_ledger_commit_permit());
+    Ok((
+        physical
             .take()
-            .unwrap_or_else(|| unreachable_final_owner_state());
-        proof.commit_account_bound(eligibility.into_ledger_commit_permit());
-        Ok(self
-            .physical
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state()))
+            .unwrap_or_else(|| unreachable_final_owner_state()),
+        facts,
+    ))
+}
+
+/// The finite consumer keeps its real fixed projection and numerical cover in their own guard.
+#[must_use = "the finite physical graph must be jointly committed or contained"]
+pub(super) struct FiniteAccountBoundJointCommit<Physical, O, P, D>
+where
+    Physical: AccountBoundPublicationManifest,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(super) physical: Option<Physical>,
+    proof: Option<crate::ledger::finite::FiniteDetachedTypedFreezeProof<O, P, D>>,
+}
+
+/// Normal rejection transfers the original numerical owner after physical containment.
+pub(super) struct FiniteCommitFailure<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(super) cause: FinalizationContainmentError,
+    pub(super) proof: crate::ledger::finite::FiniteDetachedTypedFreezeProof<O, P, D>,
+}
+
+type FiniteJointCommitResult<Physical, O, P, D> = Result<
+    (Physical, crate::ledger::finite::FiniteLedgerSnapshot<P, D>),
+    FiniteCommitFailure<O, P, D>,
+>;
+
+impl<O: OperationOwner, P: Copy + Ord, D: Copy + Ord> std::fmt::Debug
+    for FiniteCommitFailure<O, P, D>
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FiniteCommitFailure")
+            .field("cause", &self.cause)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Physical, O, P, D> FiniteAccountBoundJointCommit<Physical, O, P, D>
+where
+    Physical: AccountBoundPublicationManifest,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    pub(super) fn new(
+        physical: Physical,
+        proof: crate::ledger::finite::FiniteDetachedTypedFreezeProof<O, P, D>,
+    ) -> Self {
+        Self {
+            physical: Some(physical),
+            proof: Some(proof),
+        }
     }
 
-    fn contain_after_quarantine(
-        &mut self,
-        quarantine: AccountPoisoned,
-    ) -> FinalizationContainmentError {
-        let physical = self
-            .physical
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state());
-        let proof = self
-            .proof
-            .take()
-            .unwrap_or_else(|| unreachable_final_owner_state());
-        let cause = physical.contain_after_quarantine(quarantine);
-        proof.retain_fail_closed();
-        cause
+    pub(super) fn try_commit(mut self) -> FiniteJointCommitResult<Physical, O, P, D> {
+        let proof = &mut self.proof;
+        let result = try_commit_fields(&mut self.physical, |permit| {
+            proof
+                .take()
+                .unwrap_or_else(|| unreachable_final_owner_state())
+                .commit_account_bound(permit)
+        });
+        result.map_err(|cause| self.into_error(cause))
+    }
+
+    pub(super) fn into_error(
+        mut self,
+        cause: FinalizationContainmentError,
+    ) -> FiniteCommitFailure<O, P, D> {
+        assert!(
+            self.physical.is_none(),
+            "physical containment must finish before transferring numerical residue"
+        );
+        FiniteCommitFailure {
+            cause,
+            proof: self
+                .proof
+                .take()
+                .unwrap_or_else(|| unreachable_final_owner_state()),
+        }
+    }
+}
+
+impl<Physical, O, P, D> Drop for FiniteAccountBoundJointCommit<Physical, O, P, D>
+where
+    Physical: AccountBoundPublicationManifest,
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical.contain_uncommitted(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(proof) = self.proof.take() {
+            proof.retain_fail_closed();
+        }
     }
 }
 
@@ -704,6 +825,12 @@ pub(super) struct StartupAccountOwners {
     pub(super) evidence_account: PhysicalStorageAccount,
     pub(super) fallback_lease_owner: PhysicalStorageAccount,
     pub(super) evidence_lease_owner: PhysicalStorageAccount,
+}
+
+pub(super) struct FiniteStartupAccountOwners {
+    pub(super) fallback_account: PhysicalStorageAccount,
+    pub(super) fallback_lease_owner: PhysicalStorageAccount,
+    pub(super) terminal_account: PhysicalStorageAccount,
 }
 
 #[cfg(test)]
@@ -905,6 +1032,23 @@ impl Drop for PendingStartRetainedAdmissions<'_> {
                 self.state = PendingStartRetainedAdmissionState::RolledBack;
                 drop(self.containment_owner.take());
             }
+        }
+    }
+}
+
+impl<'account> PendingRetainedAdmission<'account> {
+    /// The sole finite physical Ready transition already committed this one real owner.
+    pub(super) fn from_precommitted_startup_single(
+        account: &'account PhysicalStorageAccount,
+        charge: AdmissionCharge,
+        lease_owner: PhysicalStorageAccount,
+        _authority: ReadyStartupPhysicalSplitAuthority,
+    ) -> Self {
+        Self {
+            account,
+            charge,
+            state: PendingRetainedAdmissionState::Pending,
+            lease_owner: Some(lease_owner),
         }
     }
 }

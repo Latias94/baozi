@@ -1,6 +1,6 @@
 use super::*;
 
-use baozi_operation::__retained_store_integration::activation::PreparedFailureEvidence;
+use baozi_operation::__retained_store_integration::activation::DynamicPreparedFailureEvidence;
 
 struct FailureCausePanicOnDrop;
 
@@ -294,7 +294,11 @@ fn rejected_session_with_cause<'inv, Cause>(
 fn prepared_failure_with_cause<Cause>(
     account: &PhysicalStorageAccount,
     cause: Cause,
-) -> PreparedFailureEvidence<StoreNeverActivatedCause<Cause>, ScalarSequence<u8>, EvidenceLeafTag> {
+) -> DynamicPreparedFailureEvidence<
+    StoreNeverActivatedCause<Cause>,
+    ScalarSequence<u8>,
+    EvidenceLeafTag,
+> {
     let mut invocation_host = TestInvocationHost::new();
     let (state, failure_fallback) =
         rejected_session_with_cause(&mut invocation_host, account, cause);

@@ -292,6 +292,188 @@
 ///     drop(escaped);
 /// }
 /// ```
+/// Finite failure authoring uses the same final boundary with concrete fixed-capacity owners:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalFinal, FiniteNeverActivatedSession, FiniteRejectedSession,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn build<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     never: CanonicalFinal<FiniteNeverActivatedSession<'inv, O, P, U, ()>>,
+///     rejected: CanonicalFinal<FiniteRejectedSession<'inv, O, P, U, ()>>,
+/// ) {
+///     let _ = never.build_failure_evidence::<(), ()>(|lane| lane.abort());
+///     let _ = rejected.build_failure_evidence::<(), ()>(|lane| lane.abort());
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteNeverActivatedSession;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     never: FiniteNeverActivatedSession<'_, O, P, U, ()>,
+/// ) {
+///     let _ = never.build_failure_evidence::<(), ()>(|lane| lane.abort());
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteRejectedSession;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     rejected: FiniteRejectedSession<'_, O, P, U, ()>,
+/// ) {
+///     let _ = rejected.prepare_minimal_fallback();
+/// }
+/// ```
+///
+/// A restored finite failure validates and prepares without exposing its storage for replacement:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalCauseSlot, FiniteRootedFailureEvidence, RootedFailureValidation,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
+/// fn finish<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     rooted: FiniteRootedFailureEvidence<'inv, O, P, U, (), (), ()>,
+///     slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     if let Ok(RootedFailureValidation::Valid(validated)) =
+///         rooted.validate_rich_failure(slot, |_, _| true)
+///     {
+///         let _ = validated.try_prepare(progress);
+///     }
+/// }
+/// ```
+///
+/// The underlying finite body products independently exclude each consuming transition:
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::{
+///     activation::{CanonicalCauseSlot, RootedFailureEvidence}, authority::FiniteStoreFailureAssembly,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
+/// fn premature<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     rooted: RootedFailureEvidence<'inv, (), FiniteStoreFailureAssembly<'inv, O, P, U, (), ()>>,
+///     slot: CanonicalCauseSlot<'inv, StoreRuntimeError>,
+/// ) {
+///     let _ = rooted.validate_rich_failure(slot, |_, _| true);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::{
+///     activation::ValidatedFailureEvidence, authority::ValidatedFiniteStoreFailure,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     validated: ValidatedFailureEvidence<'inv, (), ValidatedFiniteStoreFailure<'inv, O, P, U, (), ()>>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     let _ = validated.try_prepare(progress);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteCentralFallback;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn premature<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     fallback: FiniteCentralFallback<'_, O, P, U>,
+/// ) {
+///     let _ = fallback.prepare_minimal_fallback();
+/// }
+/// ```
+///
+/// Finite success also requires a restored candidate and one invariant joint scope:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalFinal, CanonicalCauseSlot, CanonicalFreezeInterruption,
+///     FiniteCentralCandidate, FiniteCanonicalFreezePermitIssue,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn finish<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     candidate: CanonicalFinal<FiniteCentralCandidate<'inv, O, P, U, (), (), (), (), (), ()>>,
+///     interruption: CanonicalCauseSlot<'inv, CanonicalFreezeInterruption>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     if let Ok(FiniteCanonicalFreezePermitIssue::Ready(permit)) =
+///         candidate.try_issue_freeze_permit(interruption, progress)
+///     {
+///         let _ = permit.bind_joint_commit(|joint, seal| joint.prepare(seal));
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalCauseSlot, CanonicalFreezeInterruption, FiniteCentralCandidate,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn early<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     candidate: FiniteCentralCandidate<'inv, O, P, U, (), (), (), (), (), ()>,
+///     slot: CanonicalCauseSlot<'inv, CanonicalFreezeInterruption>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     let _ = candidate.try_issue_freeze_permit(slot, progress);
+/// }
+/// ```
+///
+/// Frozen and ordinary finite failures accept different terminal operations:
+///
+/// ```
+/// use baozi_operation::__retained_store_integration::activation::{
+///     FiniteValidatedFailureEvidence, FrozenFailureState,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn frozen<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     failure: FiniteValidatedFailureEvidence<'_, O, P, U, (), (), (), FrozenFailureState>,
+/// ) {
+///     let _ = failure.try_prepare_frozen();
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::{
+///     FiniteValidatedFailureEvidence, FrozenFailureState,
+/// };
+/// use baozi_operation::{FinalProgress, OperationOwner, ProgressPhase, ProgressUnit};
+/// fn wrong<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     failure: FiniteValidatedFailureEvidence<'_, O, P, U, (), (), (), FrozenFailureState>,
+///     progress: FinalProgress<P, U>,
+/// ) {
+///     let _ = failure.try_prepare(progress);
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use baozi_operation::__retained_store_integration::activation::FiniteValidatedFailureEvidence;
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn wrong<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     failure: FiniteValidatedFailureEvidence<'_, O, P, U, (), (), ()>,
+/// ) {
+///     let _ = failure.try_prepare_frozen();
+/// }
+/// ```
+///
+/// A finite contribution cannot consume the dynamic seal from a different nested binder:
+///
+/// ```compile_fail,E0521
+/// use baozi_operation::__retained_store_integration::activation::{
+///     CanonicalFreezePermit, FiniteCanonicalFreezePermit,
+/// };
+/// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+/// fn mismatch<'inv, O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+///     dynamic: CanonicalFreezePermit<'inv, O, P, U, (), (), (), (), (), ()>,
+///     finite: FiniteCanonicalFreezePermit<'inv, O, P, U, (), (), (), (), (), ()>,
+/// ) {
+///     dynamic.bind_joint_commit(|_, dynamic_seal| {
+///         finite.bind_joint_commit(|joint, _| { let _ = joint.prepare(dynamic_seal); });
+///     });
+/// }
+/// ```
 #[must_use = "the restored canonical state must complete its terminal transition or be dropped"]
 pub struct CanonicalFinal<S> {
     pub(super) state: S,

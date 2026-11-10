@@ -6,7 +6,8 @@ use crate::ledger::{InternalWork, StartupAccountShareEnvelope, StartupAccountSha
 use crate::retained::account::AccountPoisonReason;
 use crate::retained::allocation::{RetainedAllocation, RetainedSetId};
 use crate::retained::physical::{
-    PhysicalStorageAccount, PublicationOpenAdmissionError, StartupAccountOwners,
+    FiniteStartupAccountOwners, PhysicalStorageAccount, PublicationOpenAdmissionError,
+    StartupAccountOwners,
 };
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -130,6 +131,29 @@ pub(in crate::retained) fn try_admit_start_share_work<D: Copy + Ord + fmt::Debug
         evidence_account,
         fallback_lease_owner,
         evidence_lease_owner,
+    })
+}
+
+pub(in crate::retained) fn try_admit_finite_start_share_work<D: Copy + Ord + fmt::Debug>(
+    work: &mut InternalWork<'_, D>,
+    account: &PhysicalStorageAccount,
+    account_shares: StartupAccountShareEnvelope<D, 3>,
+) -> Result<FiniteStartupAccountOwners, RetainedWriterError<D>> {
+    let [
+        fallback_account_step,
+        fallback_lease_step,
+        terminal_account_step,
+    ] = account_shares.into_steps();
+    let fallback_account =
+        try_share_startup_account_after_work(work, account, fallback_account_step)?;
+    let fallback_lease_owner =
+        try_share_startup_account_after_work(work, account, fallback_lease_step)?;
+    let terminal_account =
+        try_share_startup_account_after_work(work, account, terminal_account_step)?;
+    Ok(FiniteStartupAccountOwners {
+        fallback_account,
+        fallback_lease_owner,
+        terminal_account,
     })
 }
 

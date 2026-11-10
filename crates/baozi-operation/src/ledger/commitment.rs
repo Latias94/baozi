@@ -1,11 +1,11 @@
-use super::evidence::SharedEvidenceVec;
+use super::evidence::StorageCandidate;
+use super::storage::{DynamicStorage, StorageOwner, StorageView};
 use super::{
     AttributionReservationBatch, Commitment, CounterClass, DestinationKind, DestinationState,
-    DimensionEntry, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose, LedgerState,
-    PublicationDestination,
+    DimensionEntry, LedgerCause, LedgerEvidenceError, LedgerEvidencePurpose,
+    PublicationDestination, release_evidence,
 };
 use crate::OperationOwner;
-use std::sync::{Arc, Mutex};
 
 pub(super) enum AggregateCommitmentError<D> {
     Ledger(LedgerCause<D>),
@@ -13,7 +13,21 @@ pub(super) enum AggregateCommitmentError<D> {
 }
 
 pub(super) struct CommitmentAggregate<'a, P, D> {
-    evidence: SharedEvidenceVec<'a, P, D, AggregatedCommitment<D>>,
+    values: Vec<AggregatedCommitment<D>>,
+    admission: CommitmentEvidenceAdmission<'a, P, D>,
+}
+
+struct CommitmentEvidenceAdmission<'a, P, D> {
+    storage: &'a mut DynamicStorage<P, D>,
+    bytes: u64,
+}
+
+impl<P, D> Drop for CommitmentEvidenceAdmission<'_, P, D> {
+    fn drop(&mut self) {
+        if self.bytes != 0 {
+            release_evidence(&mut self.storage.write(), self.bytes);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,31 +38,43 @@ pub(super) struct AggregatedCommitment<D> {
 }
 
 impl<P, D> CommitmentAggregate<'_, P, D> {
-    pub(super) fn entries(&self) -> &[AggregatedCommitment<D>] {
-        &self.evidence.values
+    pub(super) fn parts(&mut self) -> (&mut DynamicStorage<P, D>, &[AggregatedCommitment<D>]) {
+        (self.admission.storage, &self.values)
     }
 
     /// Transfers backing and its charge together to the pending publication owner.
-    pub(super) fn into_parts(self) -> (Vec<AggregatedCommitment<D>>, u64) {
-        self.evidence.into_parts()
+    pub(super) fn into_parts(mut self) -> (Vec<AggregatedCommitment<D>>, u64) {
+        (
+            std::mem::take(&mut self.values),
+            std::mem::take(&mut self.admission.bytes),
+        )
     }
 }
 
 /// Builds the positioned batch before the caller acquires work or storage guards.
 pub(super) fn aggregate_commitments<'a, P, D>(
-    storage: &'a Arc<Mutex<LedgerState<P, D>>>,
+    storage: &'a mut DynamicStorage<P, D>,
     catalogue: &[D],
     commitments: &[Commitment<D>],
 ) -> Result<CommitmentAggregate<'a, P, D>, AggregateCommitmentError<D>>
 where
     D: Copy + Ord,
 {
-    let mut evidence = SharedEvidenceVec::<P, D, AggregatedCommitment<D>>::try_with_capacity(
-        storage,
-        commitments.len(),
-        LedgerEvidencePurpose::Publication,
-    )
-    .map_err(AggregateCommitmentError::Evidence)?;
+    let (values, bytes) = if commitments.is_empty() {
+        (Vec::new(), 0)
+    } else {
+        StorageCandidate::<P, D, AggregatedCommitment<D>>::try_with_capacity(
+            StorageOwner::Dynamic(&mut *storage),
+            commitments.len(),
+            LedgerEvidencePurpose::Publication,
+        )
+        .map_err(AggregateCommitmentError::Evidence)?
+        .into_parts()
+    };
+    let mut aggregate = CommitmentAggregate {
+        values,
+        admission: CommitmentEvidenceAdmission { storage, bytes },
+    };
     for commitment in commitments {
         let dimension_position = catalogue
             .binary_search(&commitment.dimension)
@@ -57,12 +83,12 @@ where
                     dimension: commitment.dimension,
                 })
             })?;
-        match evidence
+        match aggregate
             .values
             .binary_search_by_key(&dimension_position, |entry| entry.dimension_position)
         {
             Ok(position) => {
-                let Some(amount) = evidence.values[position]
+                let Some(amount) = aggregate.values[position]
                     .amount
                     .checked_add(commitment.amount)
                 else {
@@ -73,9 +99,9 @@ where
                         },
                     ));
                 };
-                evidence.values[position].amount = amount;
+                aggregate.values[position].amount = amount;
             }
-            Err(position) => evidence.values.insert(
+            Err(position) => aggregate.values.insert(
                 position,
                 AggregatedCommitment {
                     dimension: commitment.dimension,
@@ -85,7 +111,7 @@ where
             ),
         }
     }
-    Ok(CommitmentAggregate { evidence })
+    Ok(aggregate)
 }
 
 pub(super) fn validate_commitments<D: Copy>(
@@ -117,10 +143,6 @@ pub(super) fn validate_commitments<D: Copy>(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn validate_typed_commitments<O, P, D, Destination>(
     dimensions: &[DimensionEntry<D>],
     batch: &AttributionReservationBatch<O, P, D, Destination>,
@@ -134,10 +156,6 @@ where
     validate_typed_commitment_batches(dimensions, [Some(batch)])
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn validate_typed_commitment_pair<O, P, D, Destination>(
     dimensions: &[DimensionEntry<D>],
     first: &AttributionReservationBatch<O, P, D, Destination>,
@@ -152,10 +170,6 @@ where
     validate_typed_commitment_batches(dimensions, [Some(first), Some(second)])
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn validate_typed_commitment_batches<O, P, D, Destination, const N: usize>(
     dimensions: &[DimensionEntry<D>],
     batches: [Option<&AttributionReservationBatch<O, P, D, Destination>>; N],
@@ -224,12 +238,8 @@ where
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-private until the U4 canonical consumers switch atomically"
-)]
 pub(super) fn preflight_typed_publication_batch<O, P, D, Destination>(
-    state: &LedgerState<P, D>,
+    state: &StorageView<'_, P, D>,
     batch: &AttributionReservationBatch<O, P, D, Destination>,
 ) -> Result<(), LedgerCause<D>>
 where
@@ -245,7 +255,7 @@ where
 }
 
 pub(super) fn preflight_typed_discard_batch<O, P, D, Destination>(
-    state: &LedgerState<P, D>,
+    state: &StorageView<'_, P, D>,
     batch: &AttributionReservationBatch<O, P, D, Destination>,
 ) -> Result<(), LedgerCause<D>>
 where

@@ -1060,7 +1060,8 @@ pub(super) fn submit_parts<'session>(
                     "glTF synthetic root has no unique projection",
                 ));
             };
-            let projection_tag = match projection.source.kind {
+            let projection = selected_sources.source(ctx, *projection)?.entity.id;
+            let projection_tag = match projection.kind {
                 crate::source_map::SourceEntityKind::Document => 0_u8,
                 crate::source_map::SourceEntityKind::Scene => 1_u8,
                 _ => {
@@ -1069,7 +1070,7 @@ pub(super) fn submit_parts<'session>(
                     ));
                 }
             };
-            let projection_index = u64::try_from(projection.source.source_index)
+            let projection_index = u64::try_from(projection.source_index)
                 .map_err(|_| ctx.allocation_failure("gltf-profile-projection-index"))?;
             // Fixed framing: request mode/index, then resolved projection kind/index.
             // DocumentDefault has no requested locator and encodes its index lane as zero.
@@ -1455,11 +1456,8 @@ fn push_owner_sources<'session>(
         values.try_push(&mut ctx.services()?, ProvenanceLocalId::new(source))?;
         previous = source;
     }
-    for link in selected_sources.for_owner(ctx, owner)? {
-        let source_id = ctx.child(&work_group, [1], |child| {
-            child.run([1], || Ok::<_, baozi_import::ParseFailure>(link.source))
-        })?;
-        let source = selected_sources.source_index(ctx, resource_count, source_id)?;
+    for &ordinal in selected_sources.for_owner(ctx, owner)? {
+        let source = selected_sources.ordinal_source_index(ctx, resource_count, ordinal)?;
         if source == 0 {
             continue;
         }

@@ -11,8 +11,96 @@ use crate::operation::runtime::{ActiveRuntime, RuntimeKeys, ScratchVec, run_unit
 use crate::{ExistingNormals, ExistingTangents, NormalCause, NormalMode, TangentCause};
 use baozi_core::{
     AttributeData, AttributeDomain, AttributeRef, AttributeSemanticRef, FrontFaceWinding,
-    PrimitiveId, TopologyKind, ValidatedScene,
+    PrimitiveId, PrimitiveRef, TopologyKind, ValidatedScene,
 };
+
+#[cfg(test)]
+pub(super) mod selection_tests;
+#[cfg(test)]
+use selection_tests::{Leaf, before_leaf, entered_leaf, returned_leaf};
+
+pub(super) enum SelectedPrimitives<'scene> {
+    Empty,
+    One([PrimitiveRef<'scene>; 1]),
+    Many(ScratchVec<PrimitiveRef<'scene>>),
+}
+
+impl<'scene> SelectedPrimitives<'scene> {
+    fn resolve(
+        scene: &'scene ValidatedScene,
+        targets: &[PrimitiveId],
+        operation: &mut ActiveRuntime<'_>,
+        keys: RuntimeKeys,
+    ) -> Result<Self, PreparationCause> {
+        match targets {
+            [] => Ok(Self::Empty),
+            [target] => {
+                let primitive = run_unit(operation, || scene.primitive(*target))?
+                    .map_err(PreparationCause::Target)?;
+                Ok(Self::One([primitive]))
+            }
+            _ => {
+                let mut selected = ScratchVec::new(operation, keys, targets.len())?;
+                #[cfg(test)]
+                selection_tests::storage_ready(operation, keys, selected.values());
+                for &target in targets {
+                    #[cfg(test)]
+                    before_leaf(operation, Leaf::Lookup, selected.values());
+                    let primitive = run_unit(operation, || {
+                        #[cfg(test)]
+                        entered_leaf();
+                        scene.primitive(target)
+                    });
+                    #[cfg(test)]
+                    selection_tests::lookup_returned(operation, selected.values(), &primitive);
+                    let primitive = primitive?.map_err(PreparationCause::Target)?;
+                    #[cfg(test)]
+                    before_leaf(operation, Leaf::Append, selected.values());
+                    let appended = run_unit(operation, || {
+                        #[cfg(test)]
+                        entered_leaf();
+                        selected.values_mut().push(primitive)
+                    });
+                    #[cfg(test)]
+                    returned_leaf(operation, selected.values(), appended.is_ok());
+                    appended?;
+                }
+                sort_selected(selected.values_mut(), operation)?;
+                for pair in selected.values().windows(2) {
+                    #[cfg(test)]
+                    before_leaf(operation, Leaf::Duplicate, selected.values());
+                    let duplicate = run_unit(operation, || {
+                        #[cfg(test)]
+                        entered_leaf();
+                        pair[0].id() == pair[1].id()
+                    });
+                    #[cfg(test)]
+                    returned_leaf(operation, selected.values(), duplicate.is_ok());
+                    if duplicate? {
+                        return Err(PreparationCause::DuplicateTarget);
+                    }
+                }
+                Ok(Self::Many(selected))
+            }
+        }
+    }
+
+    pub(super) fn as_slice(&self) -> &[PrimitiveRef<'scene>] {
+        match self {
+            Self::Empty => &[],
+            Self::One(selected) => selected,
+            Self::Many(selected) => selected.values(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn scratch_values(&self) -> Option<&Vec<PrimitiveRef<'scene>>> {
+        match self {
+            Self::Many(selected) => Some(selected.values()),
+            Self::Empty | Self::One(_) => None,
+        }
+    }
+}
 
 pub(super) struct PreparedPrimitive {
     pub target: PrimitiveId,
@@ -24,6 +112,11 @@ pub(super) struct PreparedPrimitive {
     pub normal_domain: AttributeDomain,
     pub uv_set: u32,
     pub uv_domain: AttributeDomain,
+}
+
+pub(super) enum PreparedSelection {
+    Unchanged,
+    Prepared(ScratchVec<PreparedPrimitive>),
 }
 
 impl PreparedPrimitive {
@@ -40,13 +133,6 @@ impl PreparedPrimitive {
             uv_domain: AttributeDomain::Vertex,
         }
     }
-
-    pub(super) fn changed(&self) -> bool {
-        self.origins.is_some()
-            || self.normals.is_some()
-            || self.tangents.is_some()
-            || self.remove_tangents
-    }
 }
 
 pub(super) fn prepare(
@@ -55,58 +141,12 @@ pub(super) fn prepare(
     options: TrianglePreparationOptions,
     operation: &mut ActiveRuntime<'_>,
     keys: RuntimeKeys,
-) -> Result<ScratchVec<PreparedPrimitive>, PreparationCause> {
-    if targets.is_empty() {
-        return ScratchVec::new(operation, keys, 0).map_err(PreparationCause::from);
-    }
-    let mut sorted = ScratchVec::new(operation, keys, targets.len())?;
-    for &target in targets {
-        run_unit(operation, || sorted.values_mut().push(target))?;
-    }
-    sort_targets(sorted.values_mut(), operation)?;
-    let mut selected = ScratchVec::new(operation, keys, targets.len())?;
-    // Public handles stay opaque. Resolve their source ordering in one borrowed scene walk.
-    for &target in sorted.values() {
-        run_unit(operation, || scene.primitive(target))?.map_err(PreparationCause::Target)?;
-    }
-    let mut meshes = run_unit(operation, || scene.meshes())?;
-    loop {
-        let mesh = run_unit(operation, || meshes.next())?;
-        let Some(mesh) = mesh else {
-            break;
-        };
-        let mut primitives = run_unit(operation, || mesh.primitives())?;
-        loop {
-            let primitive = run_unit(operation, || primitives.next())?;
-            let Some(primitive) = primitive else {
-                break;
-            };
-            let id = run_unit(operation, || primitive.id())?;
-            let (mut first, mut last) = (0, sorted.values().len());
-            let mut found = false;
-            while first < last {
-                let middle = first + (last - first) / 2;
-                match run_unit(operation, || sorted.values()[middle].cmp(&id))? {
-                    std::cmp::Ordering::Less => first = middle + 1,
-                    std::cmp::Ordering::Greater => last = middle,
-                    std::cmp::Ordering::Equal => {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if found {
-                run_unit(operation, || selected.values_mut().push(primitive))?;
-            }
-        }
-    }
-    let mut output = ScratchVec::new(operation, keys, targets.len())?;
-    for pair in sorted.values().windows(2) {
-        if run_unit(operation, || pair[0] == pair[1])? {
-            return Err(PreparationCause::DuplicateTarget);
-        }
-    }
-    for &primitive in selected.values() {
+) -> Result<PreparedSelection, PreparationCause> {
+    let selected = SelectedPrimitives::resolve(scene, targets, operation, keys)?;
+    #[cfg(test)]
+    selection_tests::validation_started();
+    let mut output: Option<ScratchVec<PreparedPrimitive>> = None;
+    for (index, &primitive) in selected.as_slice().iter().enumerate() {
         let target = run_unit(operation, || primitive.id())?;
         let (topology, corners, faces, indices, sizes, mut attributes) =
             run_unit(operation, || {
@@ -131,11 +171,13 @@ pub(super) fn prepare(
             return Err(PreparationCause::UnsupportedTopology(topology));
         }
         if faces == 0 {
-            run_unit(operation, || {
-                output
-                    .values_mut()
-                    .push(PreparedPrimitive::unchanged(target))
-            })?;
+            if let Some(output) = &mut output {
+                run_unit(operation, || {
+                    output
+                        .values_mut()
+                        .push(PreparedPrimitive::unchanged(target))
+                })?;
+            }
             continue;
         }
         let (mut positions, mut selected_normal, mut selected_uv, mut smoothing) =
@@ -238,11 +280,13 @@ pub(super) fn prepare(
             })
         };
         if origins.is_none() && !generate_normal && !generate_tangent && !remove_tangents {
-            run_unit(operation, || {
-                output
-                    .values_mut()
-                    .push(PreparedPrimitive::unchanged(target))
-            })?;
+            if let Some(output) = &mut output {
+                run_unit(operation, || {
+                    output
+                        .values_mut()
+                        .push(PreparedPrimitive::unchanged(target))
+                })?;
+            }
             continue;
         }
         let count = origins
@@ -397,9 +441,35 @@ pub(super) fn prepare(
             uv_set: tangent_options.map_or(0, |t| t.uv_set),
             uv_domain: tangent_options.map_or(AttributeDomain::Vertex, |t| t.uv_domain),
         };
+        let output = match &mut output {
+            Some(output) => output,
+            empty => {
+                #[cfg(test)]
+                super::cleanup_tests::before_prepared_output(
+                    operation, keys, &prepared, &selected,
+                )?;
+                let mut output = ScratchVec::new(operation, keys, targets.len())?;
+                for previous in &selected.as_slice()[..index] {
+                    let target = run_unit(operation, || previous.id())?;
+                    run_unit(operation, || {
+                        output
+                            .values_mut()
+                            .push(PreparedPrimitive::unchanged(target))
+                    })?;
+                    #[cfg(test)]
+                    super::cleanup_tests::prepared_prefix_ready(
+                        operation, keys, &prepared, &output,
+                    )?;
+                }
+                empty.insert(output)
+            }
+        };
         run_unit(operation, || output.values_mut().push(prepared))?;
     }
-    Ok(output)
+    Ok(match output {
+        Some(output) => PreparedSelection::Prepared(output),
+        None => PreparedSelection::Unchanged,
+    })
 }
 
 fn floating(a: AttributeRef<'_>) -> bool {
@@ -417,12 +487,12 @@ fn is_wide(a: AttributeRef<'_>) -> bool {
         AttributeData::DenseF64 { .. } | AttributeData::SparseF64 { .. }
     )
 }
-fn sort_targets(
-    values: &mut [PrimitiveId],
+fn sort_selected(
+    values: &mut [PrimitiveRef<'_>],
     operation: &mut ActiveRuntime<'_>,
 ) -> Result<(), PreparationCause> {
     fn sift(
-        values: &mut [PrimitiveId],
+        values: &mut [PrimitiveRef<'_>],
         mut root: usize,
         end: usize,
         operation: &mut ActiveRuntime<'_>,
@@ -432,16 +502,44 @@ fn sort_targets(
             .and_then(|n| n.checked_add(1))
             .filter(|&n| n < end)
         {
-            let child =
-                if left + 1 < end && run_unit(operation, || values[left] < values[left + 1])? {
-                    left + 1
-                } else {
-                    left
-                };
-            if !run_unit(operation, || values[root] < values[child])? {
+            let child = if left + 1 < end && {
+                #[cfg(test)]
+                before_leaf(operation, Leaf::Comparison, values);
+                let comparison = run_unit(operation, || {
+                    #[cfg(test)]
+                    entered_leaf();
+                    values[left].id() < values[left + 1].id()
+                });
+                #[cfg(test)]
+                returned_leaf(operation, values, comparison.is_ok());
+                comparison?
+            } {
+                left + 1
+            } else {
+                left
+            };
+            #[cfg(test)]
+            before_leaf(operation, Leaf::Comparison, values);
+            let comparison = run_unit(operation, || {
+                #[cfg(test)]
+                entered_leaf();
+                values[root].id() < values[child].id()
+            });
+            #[cfg(test)]
+            returned_leaf(operation, values, comparison.is_ok());
+            if !comparison? {
                 break;
             }
-            run_unit(operation, || values.swap(root, child))?;
+            #[cfg(test)]
+            before_leaf(operation, Leaf::Swap, values);
+            let swapped = run_unit(operation, || {
+                #[cfg(test)]
+                entered_leaf();
+                values.swap(root, child)
+            });
+            #[cfg(test)]
+            returned_leaf(operation, values, swapped.is_ok());
+            swapped?;
             root = child;
         }
         Ok(())
@@ -450,7 +548,16 @@ fn sort_targets(
         sift(values, root, values.len(), operation)?;
     }
     for end in (1..values.len()).rev() {
-        run_unit(operation, || values.swap(0, end))?;
+        #[cfg(test)]
+        before_leaf(operation, Leaf::Swap, values);
+        let swapped = run_unit(operation, || {
+            #[cfg(test)]
+            entered_leaf();
+            values.swap(0, end)
+        });
+        #[cfg(test)]
+        returned_leaf(operation, values, swapped.is_ok());
+        swapped?;
         sift(values, 0, end, operation)?;
     }
     Ok(())

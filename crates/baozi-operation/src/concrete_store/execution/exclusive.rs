@@ -1,17 +1,22 @@
 //! Exclusive numeric execution and host-owned action/parser frames over one invocation.
 
+use super::super::ordinary::StoreOperationLoan;
 use super::*;
-use crate::ledger::{ParserChannel, ParserFrame, WorkFrame, WorkLane, WorkLayout, WorkView};
+use crate::ledger::{
+    ParserChannel, ParserFrame, ParserReadRow, WorkFrame, WorkLane, WorkLayout, WorkView,
+};
 use crate::retained::{
     AdmittedShareWork, ExclusiveOperationParts, PreparationFailureCode, StoreExecutionState,
     checked_action_debt, record_terminal_cause_with_precedence,
 };
 use std::cell::Cell;
+use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 mod actions;
 pub use actions::StoreActionExecution;
+pub(in crate::concrete_store) use actions::execute_store_action_parts;
 mod copy_units;
 mod services;
 pub use services::{StoreChildAdmission, StoreInvocationServices};
@@ -543,7 +548,14 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         self.checkpoint()?;
         self.parts
             .progress
-            .report_progress(&mut self.parts.ordinary.poll, phase, unit, completed, total)
+            .report_progress(
+                &mut self.parts.ordinary.poll,
+                &mut self.parts.ordinary.storage,
+                phase,
+                unit,
+                completed,
+                total,
+            )
             .map_err(|cause| {
                 record(
                     self.parts.ordinary.failure,
@@ -714,7 +726,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
             self.parts.ordinary.failure,
             self.parts
                 .work
-                .tighten_policy(&self.parts.ordinary.storage, dimension, policy),
+                .tighten_policy(&mut self.parts.ordinary.storage, dimension, policy),
         )
     }
 
@@ -813,7 +825,7 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation
         let boundary = self.boundary;
         let share_layout = self.share_layout;
         let result = crate::retained::reserve_exclusive_backing(
-            &self.parts.ordinary.storage,
+            &mut self.parts.ordinary.storage,
             self.parts.account,
             phase,
             dimension,
@@ -1172,6 +1184,96 @@ impl<const N: usize> Drop for ParserActionHost<'_, '_, N> {
     }
 }
 
+/// A short loan of one actual parser row and remainder, with no storage or callback runner.
+/// The enclosing host retains the frame and its armed unwind guard.
+pub struct StoreParserReadRow<'read> {
+    row: ParserReadRow<'read, StoreDimensionKey>,
+    failure: &'read Cell<Option<PreparationFailureCode>>,
+    debt: Option<&'read Cell<u16>>,
+    stopped: bool,
+}
+
+impl StoreParserReadRow<'_> {
+    /// Bounds unit-width reads by the actual numerical row and current control headroom.
+    /// The result reserves no work; a returned physical prefix must still be completed.
+    #[inline]
+    pub fn read_span_bound(&self, maximum: u64) -> u64 {
+        if self.stopped {
+            return 0;
+        }
+        let cadence = crate::MAX_GEOMETRY_ACTIONS_BETWEEN_POLLS as u64;
+        let maximum = maximum.min(cadence);
+        let maximum = self.debt.map_or(maximum, |debt| {
+            maximum.min(cadence.saturating_sub(u64::from(debt.get())))
+        });
+        self.row.successful_prefix_bound(maximum)
+    }
+
+    /// Returns false before a direct-mode checkpoint is due. End this loan and checkpoint
+    /// through the parser host before reading another unit; loan entry never resets debt.
+    #[inline]
+    pub fn ready_for_read(&mut self) -> Result<bool, StoreInvocationError> {
+        if self.stopped {
+            return Err(StoreRuntimeError::FallbackOnly.into());
+        }
+        match self.debt.map(|debt| checked_action_debt(debt.get(), 1)) {
+            None => Ok(true),
+            Some(Ok(next)) => Ok(next.is_some()),
+            Some(Err(())) => Err(self.reject_cost()),
+        }
+    }
+
+    /// Commits one literal returned read before any later policy, write or control action.
+    /// Numeric failure leaves row/remainder unchanged and stops every later call in this loan.
+    #[inline]
+    pub fn complete_read(&mut self, amount: u64) -> Result<(), StoreInvocationError> {
+        self.complete_read_with_cost(amount, 1)
+    }
+
+    /// Immediately completes normally returned reads of one work unit each.
+    /// Their literal count is also their bounded action cost, including in a batch.
+    #[inline]
+    pub fn complete_read_units(&mut self, units: NonZeroU64) -> Result<(), StoreInvocationError> {
+        self.complete_read_with_cost(units.get(), units.get())
+    }
+
+    #[inline]
+    fn complete_read_with_cost(
+        &mut self,
+        amount: u64,
+        cost: u64,
+    ) -> Result<(), StoreInvocationError> {
+        if self.stopped {
+            return Err(StoreRuntimeError::FallbackOnly.into());
+        }
+        let Ok(cost) = u16::try_from(cost) else {
+            return Err(self.reject_cost());
+        };
+        let next_debt = match checked_action_debt(self.debt.map_or(0, Cell::get), cost) {
+            Ok(Some(next)) => next,
+            Ok(None) | Err(()) => return Err(self.reject_cost()),
+        };
+        if let Err(cause) = self.row.complete(amount) {
+            self.stopped = true;
+            record(self.failure, PreparationFailureCode::ledger());
+            return Err(StoreRuntimeError::Ledger(cause).into());
+        }
+        if let Some(debt) = self.debt {
+            debt.set(next_debt);
+        }
+        Ok(())
+    }
+
+    fn reject_cost(&mut self) -> StoreInvocationError {
+        self.stopped = true;
+        record(
+            self.failure,
+            PreparationFailureCode::product_graph(INVALID_COST),
+        );
+        StoreRuntimeError::FallbackOnly.into()
+    }
+}
+
 /// A borrowed parser view. The host keeps the actual frame even if this borrow is forgotten.
 /// Only a parent has `child`; a child can perform prefixes and storage, then returns its borrow.
 ///
@@ -1387,19 +1489,9 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         let value = match action(storage) {
             Ok(value) => value,
             Err(cause) => {
-                StoreExecutionState::stop(prefix.execution_state, StoreExecutionState::KnownError);
                 prefix.armed = false;
                 drop(prefix);
-                let owned = materialize(self, cause);
-                if self.host.frame.active {
-                    let _ = ledger(
-                        self.host.context.parts.ordinary.failure,
-                        self.host
-                            .frame
-                            .resolve(&mut self.host.context.parts.work.work),
-                    );
-                }
-                return Err(owned);
+                return Err(self.materialize_error(cause, materialize));
             }
         };
         let result = prefix.complete(completed(&value));
@@ -1413,6 +1505,24 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
             return Err(project(cause));
         }
         Ok(value)
+    }
+
+    fn materialize_error<P, E>(
+        &mut self,
+        cause: P,
+        materialize: impl FnOnce(&mut Self, P) -> E,
+    ) -> E {
+        self.host.context.stop_known_error();
+        let owned = materialize(self, cause);
+        if self.host.frame.active {
+            let _ = ledger(
+                self.host.context.parts.ordinary.failure,
+                self.host
+                    .frame
+                    .resolve(&mut self.host.context.parts.work.work),
+            );
+        }
+        owned
     }
 
     /// A live loan excludes reentry of this parser role.
@@ -1476,6 +1586,108 @@ impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, const N: usize,
         count: usize,
     ) -> Result<crate::retained::RetainedStorage<Vec<u8>>, StoreInvocationError> {
         self.host.context.allocate_bytes(phase, dimension, count)
+    }
+}
+
+impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit>
+    StoreInvocationParser<'_, '_, 'op, O, PP, U, 1, true>
+{
+    /// Lends the actual singleton row to a closed first-party read loop. Each read completes
+    /// immediately; a healthy return keeps the admitted frame open for the next region.
+    /// The loop must return before a due checkpoint; the host owns control and settlement.
+    ///
+    /// An owned result can leave the region; the borrowed row cannot:
+    ///
+    /// ```
+    /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+    /// use baozi_operation::__retained_store_integration::activation::{
+    ///     StoreInvocationError, StoreInvocationParser,
+    /// };
+    /// fn ready<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+    ///     child: &mut StoreInvocationParser<'_, '_, '_, O, P, U, 1, true>,
+    /// ) -> Result<bool, StoreInvocationError> {
+    ///     child.with_read_row(&mut |row| row.ready_for_read(), |cause| cause, |_, cause| cause)
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
+    /// use baozi_operation::__retained_store_integration::activation::{
+    ///     StoreInvocationError, StoreInvocationParser,
+    /// };
+    /// fn escape<O: OperationOwner, P: ProgressPhase, U: ProgressUnit>(
+    ///     child: &mut StoreInvocationParser<'_, '_, '_, O, P, U, 1, true>,
+    /// ) {
+    ///     let _escaped = child.with_read_row(
+    ///         &mut |row| Ok::<_, StoreInvocationError>(row),
+    ///         |cause| cause, |_, cause| cause,
+    ///     );
+    /// }
+    /// ```
+    pub fn with_read_row<T, P, E>(
+        &mut self,
+        body: &mut impl FnMut(&mut StoreParserReadRow<'_>) -> Result<T, P>,
+        project: impl FnOnce(StoreInvocationError) -> E,
+        materialize: impl FnOnce(&mut Self, P) -> E,
+    ) -> Result<T, E> {
+        if let Err(cause) = self.host.context.running() {
+            return Err(project(cause));
+        }
+        let failure = self.host.context.parts.ordinary.failure;
+        let debt = self
+            .host
+            .context
+            .boundary
+            .is_none()
+            .then_some(self.host.context.parts.ordinary.debt);
+        let mut scope = ParserActionHost {
+            work: &mut self.host.context.parts.work.work,
+            frame: &mut self.host.frame,
+            layout: self.host.layout,
+            failure,
+            execution_state: self.host.context.parts.ordinary.execution_state,
+            boundary: self.host.context.boundary,
+            armed: true,
+        };
+        let (result, stopped) = {
+            let row = match scope.frame.borrow_read_row(&scope.layout, scope.work) {
+                Ok(row) => row,
+                Err(cause) => {
+                    record(failure, PreparationFailureCode::ledger());
+                    let _ = scope.frame.resolve(scope.work);
+                    scope.armed = false;
+                    return Err(project(StoreRuntimeError::Ledger(cause).into()));
+                }
+            };
+            let mut reads = StoreParserReadRow {
+                row,
+                failure,
+                debt,
+                stopped: false,
+            };
+            let result = body(&mut reads);
+            (result, reads.stopped)
+        };
+        scope.armed = false;
+        drop(scope);
+        if stopped && result.is_ok() {
+            let _ = ledger(
+                failure,
+                self.host
+                    .frame
+                    .resolve(&mut self.host.context.parts.work.work),
+            );
+            let cause = project(StoreRuntimeError::FallbackOnly.into());
+            drop(result);
+            return Err(cause);
+        }
+        match result {
+            Ok(value) => {
+                self.host.context.running().map_err(project)?;
+                Ok(value)
+            }
+            Err(cause) => Err(self.materialize_error(cause, materialize)),
+        }
     }
 }
 
@@ -1623,8 +1835,22 @@ impl<'inv, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L>
         &'op mut self,
         boundary: Option<&'op StoreImporterBoundary>,
     ) -> Result<StoreInvocation<'op, O, PP, U>, StoreRuntimeError> {
-        let parts = self.raw.exclusive_parts().map_err(map_execution_error)?;
+        let parts = self
+            .raw
+            .loan_mut()
+            .exclusive_parts()
+            .map_err(map_execution_error)?;
         bind_invocation_context(parts, &self.domain, boundary)
+    }
+}
+
+impl<O: OperationOwner, PP: ProgressPhase, U: ProgressUnit, L> StoreOperationLoan<'_, O, PP, U, L> {
+    pub(in crate::concrete_store) fn invocation_context<'op>(
+        &'op mut self,
+        boundary: Option<&'op StoreImporterBoundary>,
+    ) -> Result<StoreInvocation<'op, O, PP, U>, StoreRuntimeError> {
+        let parts = self.raw.exclusive_parts().map_err(map_execution_error)?;
+        bind_invocation_context(parts, self.domain, boundary)
     }
 }
 
@@ -1669,6 +1895,22 @@ fn bind_invocation_context<'op, O: OperationOwner, PP: ProgressPhase, U: Progres
         brand: PhantomData,
         local: PhantomData,
     })
+}
+
+pub(in crate::concrete_store) fn execute_store_parts<'op, O, PP, U, R, E>(
+    parts: ExclusiveOperationParts<'op, O, StorePhaseKey, PP, U, StoreDimensionKey>,
+    domain: &'op StoreKeyDomain,
+    body: impl for<'region> FnOnce(&mut StoreInvocation<'region, O, PP, U>) -> Result<R, E>,
+) -> Result<R, E>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    E: From<StoreInvocationError>,
+{
+    let context =
+        bind_invocation_context(parts, domain, None).map_err(StoreInvocationError::from)?;
+    execute_invocation_region(context, RegionPolicy::Exclusive, body)
 }
 
 fn execute_invocation_region<

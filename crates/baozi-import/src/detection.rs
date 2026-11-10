@@ -228,7 +228,7 @@ impl<'loan, 'op> DetectionScope<'loan, 'op> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{ImportLedgerPhase, ImportOperationControl};
+    use crate::ledger::{ImportLedgerPhase, ImportOperationControl, import_ledger_limits};
     use crate::limits::ResourceLimits;
     use crate::metered_storage::AccountedVec;
     use crate::store::{
@@ -255,8 +255,10 @@ mod tests {
         let account = factory
             .try_create_account(PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX).unwrap())
             .unwrap();
-        let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits).unwrap();
-        let bootstrap = try_import_store_bootstrap(&limits, requirements).unwrap();
+        let import_limits = import_ledger_limits(&limits).expect("test import limits are valid");
+        let requirements =
+            ImportStoreBootstrapRequirements::for_node_scene(&import_limits).unwrap();
+        let bootstrap = try_import_store_bootstrap(import_limits, requirements).unwrap();
         ImportStoreSessionOwner::try_start_in_body(parts, control, &account, bootstrap).unwrap()
     }
 

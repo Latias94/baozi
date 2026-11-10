@@ -13,6 +13,16 @@ pub struct StoreChildAdmission<'loan, 'op, O, PP, U> {
 }
 
 impl<'op, O: OperationOwner, PP: ProgressPhase, U: ProgressUnit> StoreInvocation<'op, O, PP, U> {
+    pub(in crate::concrete_store) fn observation_live_bytes(
+        &self,
+        observation: crate::ledger::LedgerStorageObservation<'op, StorePhaseKey, StoreDimensionKey>,
+    ) -> u64 {
+        self.parts
+            .ordinary
+            .storage
+            .observation_live_bytes(observation)
+    }
+
     /// Borrows shared release evidence without lending any numeric work authority.
     pub fn storage_observation(
         &self,

@@ -801,7 +801,7 @@ mod tests {
     use crate::descriptor::{CapabilityStatus, FormatCapability, FormatEncoding};
     use crate::error::ScopeAbortCause;
     use crate::format::{DetectionFaultCode, ReadConfidence};
-    use crate::ledger::{ImportDimension, ImportOperationControl};
+    use crate::ledger::{ImportDimension, ImportOperationControl, import_ledger_limits};
     use crate::limits::ResourceLimits;
     use crate::options::{
         FormatOptionEnvelope, FormatOptionSchemaId, FormatOptionSchemaKey, NoFormatOptions,
@@ -1062,9 +1062,10 @@ mod tests {
         parts: ImportStoreBodyParts<'inv>,
     ) -> ImportStoreSessionOwner<'inv> {
         let limits = ResourceLimits::default();
-        let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits)
+        let import_limits = import_ledger_limits(&limits).expect("test import limits are valid");
+        let requirements = ImportStoreBootstrapRequirements::for_node_scene(&import_limits)
             .expect("the detection test retained-store requirements must be valid");
-        let bootstrap = try_import_store_bootstrap(&limits, requirements)
+        let bootstrap = try_import_store_bootstrap(import_limits, requirements)
             .expect("the detection test retained-store bootstrap must be valid");
         let factory = PhysicalStorageAccountFactory::try_new(
             PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)

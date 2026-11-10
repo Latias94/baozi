@@ -12,7 +12,7 @@ use super::{
     RetainedWriterError,
 };
 use crate::OperationOwner;
-use crate::ledger::{AttributionReservationBatch, CanonicalOutput, Ledger};
+use crate::ledger::{AttributionReservationBatch, CanonicalOutput, LedgerReadView};
 #[cfg(test)]
 use std::any::TypeId;
 use std::fmt;
@@ -60,7 +60,7 @@ where
     P: Copy + Ord,
     D: Copy + Ord,
 {
-    pub(in crate::retained) ledger: &'a Ledger<O, P, D>,
+    pub(in crate::retained) ledger: LedgerReadView<'a, O, P, D>,
     pub(in crate::retained) account: &'a PhysicalStorageAccount,
     pub(in crate::retained) table: &'a RetainedTableAllocation<Block>,
     pub(in crate::retained) batch: &'a AttributionReservationBatch<O, P, D, CanonicalOutput>,

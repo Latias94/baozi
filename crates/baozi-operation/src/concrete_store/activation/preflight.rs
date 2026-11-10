@@ -1,5 +1,15 @@
 use super::*;
 
+mod driver;
+use driver::{ScopedDriverTransition, run_scoped_driver};
+mod owner;
+use owner::{ScopedOwnerTransition, drop_pending_decision};
+mod finite;
+pub use finite::{
+    FiniteActivatedSession, FiniteCanonicalActivationOutcome, FiniteNeverActivatedSession,
+    FiniteRejectedSession, FiniteSessionOutcomeOwner,
+};
+
 #[cfg(test)]
 mod tests;
 
@@ -27,17 +37,81 @@ fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntime
     NonZeroU64::new(units).ok_or(StoreRuntimeError::Plan(StorePlanError::EmptyPayload))
 }
 
-fn contain_dormant_activation<O, PP, U, L>(
-    dormant: ScopedDormantActivation<'_, O, PP, U, L>,
-) -> StoreActivationContainment
+impl<O, PP, U, L> StoreOperationLoan<'_, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    match dormant.into_operation() {
-        Ok(operation) => contain_operation(operation),
-        Err(containment) => containment,
+    pub(in crate::concrete_store) fn qualify_failure_validation_work(
+        &mut self,
+        ordinary_work_dimension: StoreDimensionKey,
+        max_evidence_members: usize,
+        validation_work_limit: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .preflight_failure_validation_work()
+            .map_err(|cause| map_writer_error(&cause))?;
+        if self.raw.is_terminal_only() {
+            return Err(StoreRuntimeError::FallbackOnly);
+        }
+        if !self.domain.owns_dimension(ordinary_work_dimension) {
+            return Err(StoreRuntimeError::ForeignDimensionDomain {
+                dimension: ordinary_work_dimension,
+            });
+        }
+        self.producer_host().poll()?;
+        self.raw
+            .qualify_failure_validation_work(
+                ordinary_work_dimension,
+                max_evidence_members,
+                validation_work_limit,
+            )
+            .map_err(|cause| map_writer_error(&cause))
+    }
+
+    fn preflight_session(
+        &self,
+        policy: &CanonicalActivationSessionPolicy,
+        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+        failure_requirements: CanonicalFailureRequirements,
+    ) -> Result<(BoundScopedFailureRequest, FailureEvidenceWorkBudget), StoreRuntimeError> {
+        let (canonical_phase, canonical_dimensions) =
+            policy.canonical_writer.keys_for_publication_validation();
+        let outcome_evidence_writer = policy
+            .outcome_evidence_writer
+            .bind(outcome_evidence_writer_limits);
+        let (evidence_phase, evidence_dimensions) =
+            outcome_evidence_writer.keys_for_publication_validation();
+        self.validate_writer_keys(canonical_phase, canonical_dimensions)?;
+        self.validate_writer_keys(evidence_phase, evidence_dimensions)?;
+        self.validate_activation_phase(policy.validation_phase)?;
+        self.validate_activation_dimensions([
+            policy.materialization_work_dimension,
+            policy.materialization_scratch_dimension,
+            policy.validation_work_dimension,
+            policy.validation_scratch_dimension,
+            policy.canonical_destination_dimension,
+            policy.outcome_evidence_destination_dimension,
+        ])?;
+        if let Some(dimension) = policy.semantic_bytes_dimension {
+            self.validate_activation_dimensions([dimension])?;
+        }
+        let failure = policy
+            .bind_scoped_failure(outcome_evidence_writer_limits, failure_requirements)
+            .map_err(StoreRuntimeError::Plan)?;
+        let (max_evidence_members, construction_work_limit, validation_work_limit) = self
+            .raw
+            .failure_terminal_work_limits()
+            .ok_or(StoreRuntimeError::ConstructionInvariantUnverified)?;
+        Ok((
+            failure,
+            FailureEvidenceWorkBudget::new(FailureEvidenceWorkEnvelope {
+                max_evidence_members,
+                construction_work_limit,
+                validation_work_limit,
+            }),
+        ))
     }
 }
 
@@ -59,78 +133,36 @@ where
         max_evidence_members: usize,
         validation_work_limit: u64,
     ) -> Result<(), StoreRuntimeError> {
-        self.raw
-            .preflight_failure_validation_work()
-            .map_err(|cause| map_writer_error(&cause))?;
-        if self.raw.is_terminal_only() {
-            return Err(StoreRuntimeError::FallbackOnly);
-        }
-        self.validate_dimension_key(ordinary_work_dimension)?;
-        self.producer_host().poll()?;
-        self.raw
+        StoreOperationLoan::<O, PP, U, L>::from_raw(self.raw.loan_mut().reborrow(), &self.domain)
             .qualify_failure_validation_work(
                 ordinary_work_dimension,
                 max_evidence_members,
                 validation_work_limit,
             )
-            .map_err(|cause| map_writer_error(&cause))
     }
 
     /// Moves the operation into the session-lifetime outcome owner before canonical activation.
     pub fn into_session_outcome_owner(
-        self,
+        mut self,
         policy: CanonicalActivationSessionPolicy,
         outcome_evidence_writer_limits: RetainedStoreBatchLimits,
         failure_requirements: CanonicalFailureRequirements,
     ) -> Result<RetainedStoreSessionOutcomeOwner<'inv, O, PP, U, L>, StoreActivationContainment>
     {
-        let (canonical_phase, canonical_dimensions) =
-            policy.canonical_writer.keys_for_publication_validation();
-        let outcome_evidence_writer = policy
-            .outcome_evidence_writer
-            .bind(outcome_evidence_writer_limits);
-        let (evidence_phase, evidence_dimensions) =
-            outcome_evidence_writer.keys_for_publication_validation();
-        let roles_are_valid = self
-            .validate_writer_keys(canonical_phase, canonical_dimensions)
-            .and_then(|()| self.validate_writer_keys(evidence_phase, evidence_dimensions))
-            .and_then(|()| self.validate_activation_phase(policy.validation_phase))
-            .and_then(|()| {
-                self.validate_activation_dimensions([
-                    policy.materialization_work_dimension,
-                    policy.materialization_scratch_dimension,
-                    policy.validation_work_dimension,
-                    policy.validation_scratch_dimension,
-                    policy.canonical_destination_dimension,
-                    policy.outcome_evidence_destination_dimension,
-                ])
-            })
-            .and_then(|()| {
-                policy.semantic_bytes_dimension.map_or(Ok(()), |dimension| {
-                    self.validate_activation_dimensions([dimension])
-                })
-            })
-            .is_ok();
-        if !roles_are_valid {
-            return Err(contain_operation(self));
-        }
-        let failure = match policy
-            .bind_scoped_failure(outcome_evidence_writer_limits, failure_requirements)
-        {
-            Ok(failure) => failure,
+        let admission = StoreOperationLoan::<O, PP, U, L>::from_raw(
+            self.raw.loan_mut().reborrow(),
+            &self.domain,
+        )
+        .preflight_session(
+            &policy,
+            outcome_evidence_writer_limits,
+            failure_requirements,
+        );
+        let (failure, failure_work) = match admission {
+            Ok(admission) => admission,
             Err(_) => return Err(contain_operation(self)),
         };
-        let Some((max_evidence_members, construction_work_limit, validation_work_limit)) =
-            self.raw.failure_terminal_work_limits()
-        else {
-            return Err(contain_operation(self));
-        };
-        let failure_work = FailureEvidenceWorkEnvelope {
-            max_evidence_members,
-            construction_work_limit,
-            validation_work_limit,
-        };
-        let containment_anchor = self.raw.planning_containment_anchor();
+        let containment_anchor = self.raw.loan().planning_containment_anchor();
         Ok(RetainedStoreSessionOutcomeOwner {
             dormant: ScopedDormantActivation {
                 operation: Some(self),
@@ -139,7 +171,7 @@ where
             },
             policy,
             scoped_failure: failure,
-            failure_work: FailureEvidenceWorkBudget::new(failure_work),
+            failure_work,
         })
     }
 }
@@ -199,12 +231,13 @@ where
         self.dormant
             .operation()
             .raw
+            .loan()
             .check_execution_running()
             .map_err(crate::concrete_store::execution::map_execution_error)
     }
 
     pub fn settle_importer_return(&self) {
-        self.dormant.operation().raw.settle_importer_return();
+        self.dormant.operation().raw.loan().settle_importer_return();
     }
 
     /// Borrows producer work and accounting before canonical activation begins.
@@ -230,8 +263,8 @@ where
     }
 
     /// Marks one qualified session phase complete without exposing the raw operation.
-    pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
-        self.dormant.operation().try_complete_phase(phase)
+    pub fn try_complete_phase(&mut self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        self.dormant.operation_mut().try_complete_phase(phase)
     }
 
     /// Resolves a session that never received a canonical activation request.
@@ -274,8 +307,8 @@ where
         self,
         output: CanonicalOutputSlot<'inv, T>,
         activation: CanonicalActivationSlots<'inv, E>,
-        transaction: impl for<'scope> FnMut(
-            CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        transaction: impl for<'op, 'scope> FnMut(
+            CanonicalPlanning<'inv, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         ) -> CanonicalScopedDisposition<'scope>,
     ) -> Result<
         CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
@@ -293,8 +326,8 @@ where
         self,
         output: Option<CanonicalOutputSlot<'inv, T>>,
         activation: CanonicalActivationSlots<'inv, E>,
-        transaction: impl for<'scope> FnMut(
-            CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        transaction: impl for<'op, 'scope> FnMut(
+            CanonicalPlanning<'inv, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         ) -> CanonicalScopedDisposition<'scope>,
     ) -> Result<
         CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
@@ -328,18 +361,18 @@ where
     clippy::type_complexity,
     reason = "the scoped driver keeps every linear owner inline across the complete activation transaction"
 )]
-fn run_scoped_activation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
-    dormant: ScopedDormantActivation<'inv, O, PP, U, L>,
+fn run_scoped_activation<'host, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
+    dormant: ScopedDormantActivation<'host, O, PP, U, L>,
     roles: BoundActivationRoles,
     scoped_failure: BoundScopedFailureRequest,
     failure_work: FailureEvidenceWorkBudget,
-    output: Option<CanonicalOutputSlot<'inv, T>>,
-    activation: CanonicalActivationSlots<'inv, E>,
-    transaction: impl for<'scope> FnMut(
-        CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    output: Option<CanonicalOutputSlot<'host, T>>,
+    activation: CanonicalActivationSlots<'host, E>,
+    transaction: impl for<'op, 'scope> FnMut(
+        CanonicalPlanning<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     ) -> CanonicalScopedDisposition<'scope>,
 ) -> Result<
-    CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    CanonicalActivationOutcome<'host, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     StoreActivationContainment,
 >
 where
@@ -347,382 +380,57 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let planning_baseline = dormant.operation().raw.planning_baseline();
+    let planning_baseline = dormant.operation().raw.loan().planning_baseline();
+    let identity = dormant.operation().raw.loan().invocation_identity();
     let output_is_valid = output
         .as_ref()
-        .is_none_or(|slot| slot.is_vacant_for(dormant.operation().raw.invocation_identity()))
-        && activation.is_vacant_for(dormant.operation().raw.invocation_identity());
+        .is_none_or(|slot| slot.is_vacant_for(identity))
+        && activation.is_vacant_for(identity);
     let prior_failure = dormant.operation().activation_terminal_cause();
-    let containment_anchor = dormant.containment_anchor.share();
-    let mut transaction = ManuallyDrop::new(Some(transaction));
-    let receipt_brand = ScopedReceiptBrand { _private: 0 };
-    let mut driver = ScopedActivationDriver {
-        output,
-        never: Some(activation.never),
-        rejection: Some(activation.rejection),
-        state: ScopedActivationState::Dormant(dormant),
-        containment_anchor,
-        roles: Some(roles),
-        failure: Some(scoped_failure),
-        planning_baseline,
-        failure_work,
-        first_fault: None,
-        semantic_state: ScopedSemanticState::NotStarted,
+    let transaction = ManuallyDrop::new(Some(transaction));
+    let mut owner = match ScopedOwnerTransition::new(dormant, scoped_failure, failure_work) {
+        Ok(owner) => owner,
+        Err(cause) => {
+            let _ = drop_optional_callback(transaction);
+            return Err(cause);
+        }
     };
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        if !output_is_valid {
-            return false;
-        }
-        // A selected terminal cannot lend ordinary execution. Preserve its exact code and
-        // resolve the dormant owner before any semantic callback, as activation opening does.
-        if let Some(failure_code) = prior_failure {
-            if let ScopedActivationState::Dormant(dormant) = &mut driver.state {
-                // Observe late control without replacing the already selected terminal code.
-                dormant.operation_mut().raw.poll_terminal_control();
-            }
-            driver.install_never_activated_failure(
-                StoreRuntimeError::SuccessOutcomeRejected,
-                failure_code,
-            );
-            return true;
-        }
-        let transaction = transaction
-            .as_mut()
-            .expect("the scoped activation transaction remains owned until controlled drop");
-        let receipt = transaction(CanonicalPlanning {
-            driver: &mut driver,
-            receipt_brand: &receipt_brand,
-        });
-        std::ptr::eq(receipt.brand, &receipt_brand)
-    }));
-    let transaction_drop_failed = drop_optional_callback(transaction).is_err();
-    match result {
-        Ok(true) if !transaction_drop_failed => driver.finish(),
-        Ok(_) => Err(driver.contain_current()),
-        Err(payload) => {
-            discard_untrusted_panic_payload(payload);
-            Err(driver.contain_current())
-        }
-    }
-}
-
-fn contain_scoped_pending<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
-    pending: ScopedPendingActivation<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-) -> StoreActivationContainment
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    match pending {
-        ScopedPendingActivation::Activated(activated) => {
-            let ActivatedCanonicalStoreSession {
-                canonical_root: _,
-                owner,
-                failure_work: _,
-                validation_phase: _,
-                validation_work_dimension: _,
-                validation_scratch_dimension: _,
-                canonical_destination_dimension: _,
-                outcome_evidence_destination_dimension: _,
-                validation_work: _,
-            } = activated;
-            let (output, assembly) = owner.into_parts();
-            let _ = drop_scoped_value(output);
-            StoreActivationContainment {
-                cause: assembly.contain_activation_fault(),
-            }
-        }
-        ScopedPendingActivation::Rejected(rejected) => {
-            let RejectedCanonicalStoreSession { owner } = rejected;
-            let UnrootedFailureEvidence {
-                owner,
-                domain: _,
-                failure_code: _,
-                failure_work: _,
-                outcome_evidence_destination_dimension: _,
-            } = owner;
-            let (cause, raw) = owner.into_parts();
-            let _ = drop_scoped_value(cause);
-            StoreActivationContainment {
-                cause: raw.contain_activation_fault(),
-            }
-        }
-        ScopedPendingActivation::NeverActivated(never) => {
-            let NeverActivatedStoreSession {
-                owner,
-                failure_code: _,
-                outcome_evidence_plan: _,
-                failure_work: _,
-                outcome_evidence_destination_dimension: _,
-            } = never;
-            let (cause, authority) = owner.into_parts();
-            let _ = drop_scoped_value(cause);
-            match authority {
-                NeverActivatedAuthority::Operation(operation)
-                | NeverActivatedAuthority::FallbackOnly(operation) => contain_operation(operation),
-            }
-        }
-    }
-}
-
-impl<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn receipt<'scope>(brand: &'scope ScopedReceiptBrand) -> CanonicalScopedDisposition<'scope> {
-        CanonicalScopedDisposition {
-            brand,
-            invariant: PhantomData,
-        }
-    }
-
-    fn poll_final_planning_control(&mut self) {
-        let ScopedActivationDriver {
-            state, first_fault, ..
-        } = self;
-        let result = match state {
-            ScopedActivationState::Dormant(dormant) => {
-                dormant.operation_mut().control_checkpoint().poll()
-            }
-            ScopedActivationState::Transitioning
-            | ScopedActivationState::Pending(_)
-            | ScopedActivationState::Contained(_)
-            | ScopedActivationState::Finished => {
-                Err(StoreRuntimeError::ConstructionInvariantUnverified)
-            }
-        };
-        let _ = preserve_first_fault(first_fault, result);
-    }
-
-    fn planning_is_quiescent(&self, operation: &RetainedStoreOperation<'inv, O, PP, U, L>) -> bool {
-        !matches!(self.semantic_state, ScopedSemanticState::Active)
-            && operation
-                .raw
-                .planning_matches_baseline(self.planning_baseline)
-    }
-
-    fn assembly_is_quiescent(
-        &self,
-        assembly: &RetainedStorePublicationAssembly<'inv, O, PP, U, L>,
-        publication_storage_baseline: RetainedPlanningBaseline,
-    ) -> bool {
-        !matches!(self.semantic_state, ScopedSemanticState::Active)
-            && assembly
-                .raw
-                .planning_matches_baseline(publication_storage_baseline)
-    }
-
-    fn install_pending(
-        &mut self,
-        pending: ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-    ) {
-        self.state = ScopedActivationState::Pending(pending);
-        self.roles.take();
-    }
-
-    fn contain_current(&mut self) -> StoreActivationContainment {
-        self.roles.take();
-        self.failure.take();
-        let state = std::mem::replace(&mut self.state, ScopedActivationState::Transitioning);
-        let containment = match state {
-            ScopedActivationState::Dormant(dormant) => contain_dormant_activation(dormant),
-            ScopedActivationState::Transitioning => StoreActivationContainment {
-                cause: self.containment_anchor.contain(),
+    let valid = {
+        let driver = ScopedActivationDriver {
+            output,
+            never: Some(activation.never),
+            rejection: Some(activation.rejection),
+            state: ScopedActivationState::Dormant {
+                operation: StoreOperationLoan::from_raw(
+                    owner
+                        .raw
+                        .as_mut()
+                        .expect("the original operation remains present")
+                        .loan_mut()
+                        .reborrow(),
+                    owner
+                        .domain
+                        .as_ref()
+                        .expect("the original domain remains present"),
+                ),
+                publication_state: &mut owner.publication_state,
             },
-            ScopedActivationState::Pending(pending) => contain_scoped_pending(pending),
-            ScopedActivationState::Contained(containment) => containment,
-            ScopedActivationState::Finished => StoreActivationContainment {
-                cause: self.containment_anchor.contain(),
-            },
+            lineage: &mut owner.lineage,
+            opened: &mut owner.opened,
+            pending: &mut owner.pending,
+            roles: Some(roles),
+            failure: Some(&owner.failure),
+            planning_baseline,
+            first_fault: None,
+            semantic_state: ScopedSemanticState::NotStarted,
         };
-        self.state = ScopedActivationState::Contained(containment);
-        containment
-    }
-
-    #[allow(
-        clippy::type_complexity,
-        reason = "the scoped driver returns the complete inline linear terminal owner without allocation"
-    )]
-    fn finish(
-        &mut self,
-    ) -> Result<
-        CanonicalActivationOutcome<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-        StoreActivationContainment,
-    > {
-        let state = std::mem::replace(&mut self.state, ScopedActivationState::Transitioning);
-        match state {
-            ScopedActivationState::Pending(ScopedPendingActivation::Activated(state)) => {
-                self.state = ScopedActivationState::Finished;
-                Ok(CanonicalActivationOutcome::Activated(state))
-            }
-            ScopedActivationState::Pending(ScopedPendingActivation::Rejected(state)) => {
-                self.state = ScopedActivationState::Finished;
-                Ok(CanonicalActivationOutcome::Rejected(state))
-            }
-            ScopedActivationState::Pending(ScopedPendingActivation::NeverActivated(state)) => {
-                self.state = ScopedActivationState::Finished;
-                Ok(CanonicalActivationOutcome::NeverActivated(state))
-            }
-            ScopedActivationState::Contained(containment) => {
-                self.state = ScopedActivationState::Contained(containment);
-                Err(containment)
-            }
-            ScopedActivationState::Dormant(dormant) => {
-                let containment = contain_dormant_activation(dormant);
-                self.state = ScopedActivationState::Contained(containment);
-                Err(containment)
-            }
-            ScopedActivationState::Transitioning => {
-                let containment = StoreActivationContainment {
-                    cause: self.containment_anchor.contain(),
-                };
-                self.state = ScopedActivationState::Contained(containment);
-                Err(containment)
-            }
-            ScopedActivationState::Finished => {
-                let containment = StoreActivationContainment {
-                    cause: self.containment_anchor.contain(),
-                };
-                self.state = ScopedActivationState::Contained(containment);
-                Err(containment)
-            }
-        }
-    }
-
-    fn bind_success(
-        &mut self,
-        activation_request: CanonicalActivationRequest,
-        requirements: CanonicalSuccessRequirements,
-    ) -> Result<BoundScopedSuccessRequest, ()> {
-        if self.failure.is_none() {
-            let _ = preserve_first_fault::<()>(
-                &mut self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-            return Err(());
-        };
-        self.poll_final_planning_control();
-        let semantic_complete = matches!(self.semantic_state, ScopedSemanticState::Complete);
-        if !semantic_complete {
-            let _ = preserve_first_fault::<()>(
-                &mut self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-        }
-        let Some(roles) = self.roles.as_ref() else {
-            let _ = preserve_first_fault::<()>(
-                &mut self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-            return Err(());
-        };
-        let request = match roles.bind_scoped_success(activation_request, requirements) {
-            Ok(request) => request,
-            Err(_) => {
-                let _ = preserve_first_fault::<()>(
-                    &mut self.first_fault,
-                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
-                );
-                return Err(());
-            }
-        };
-        self.roles.take();
-        if !semantic_complete || self.first_fault.is_some() {
-            Err(())
-        } else {
-            Ok(request)
-        }
-    }
-
-    fn install_never_activated_runtime(&mut self, fault: ActivationFirstFault) {
-        let Some(failure_code) = fault.recoverable_code() else {
-            let _ = self.contain_current();
-            return;
-        };
-        self.install_never_activated_failure(fault.cause, failure_code);
-    }
-
-    fn install_never_activated_failure(
-        &mut self,
-        cause: StoreRuntimeError,
-        failure_code: PreparationFailureCode,
-    ) {
-        let state = std::mem::replace(&mut self.state, ScopedActivationState::Transitioning);
-        let ScopedActivationState::Dormant(dormant) = state else {
-            self.state = state;
-            let _ = self.contain_current();
-            return;
-        };
-        if !self.planning_is_quiescent(dormant.operation()) {
-            self.state = ScopedActivationState::Dormant(dormant);
-            let _ = self.contain_current();
-            return;
-        }
-        let Some(failure) = self.failure.take() else {
-            self.state = ScopedActivationState::Dormant(dormant);
-            let _ = self.contain_current();
-            return;
-        };
-        let operation = match dormant.into_operation() {
-            Ok(operation) => operation,
-            Err(containment) => {
-                self.state = ScopedActivationState::Contained(containment);
-                return;
-            }
-        };
-        let slot = self
-            .never
-            .take()
-            .expect("never-activation installs its cause once");
-        let pending = NeverActivatedStoreSession::runtime(
-            operation,
-            slot,
-            &failure,
-            self.failure_work,
-            cause,
-            failure_code,
-            false,
-        );
-        self.install_never_activated(pending);
-    }
-
-    fn install_never_activated(
-        &mut self,
-        pending: Result<
-            NeverActivatedStoreSession<'inv, O, PP, U, E, L>,
-            StoreActivationContainment,
-        >,
-    ) {
-        match pending {
-            Ok(pending) => self.install_pending(ScopedPendingActivation::NeverActivated(pending)),
-            Err(containment) => self.state = ScopedActivationState::Contained(containment),
-        }
-    }
+        run_scoped_driver(driver, output_is_valid, prior_failure, transaction)
+    };
+    owner.finish(valid)
 }
 
-impl<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
-    for ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn drop(&mut self) {
-        if !matches!(
-            self.state,
-            ScopedActivationState::Contained(_) | ScopedActivationState::Finished
-        ) {
-            let _ = self.contain_current();
-        }
-    }
-}
-
-impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    CanonicalPlanning<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+    CanonicalPlanning<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -774,7 +482,7 @@ where
         };
         let (phase, work_dimension, scratch_dimension) = roles.authoring_keys();
         let operation = match state {
-            ScopedActivationState::Dormant(dormant) => dormant.operation_mut(),
+            ScopedActivationState::Dormant { operation, .. } => operation,
             _ => {
                 *semantic_state = ScopedSemanticState::Rejected;
                 return Err(reject_semantic_entry(
@@ -887,7 +595,8 @@ where
         description: D,
         completion: CanonicalSemanticCompletion<'scope>,
     ) -> CanonicalActivationSeal<
-        'inv,
+        'host,
+        'op,
         'scope,
         O,
         PP,
@@ -946,50 +655,12 @@ where
                 || fault.contract_seen
                 || fault.recoverable_code().is_none()
             {
-                let _ = self.driver.contain_current();
+                self.driver.contain_current();
             } else {
                 self.driver.install_never_activated_runtime(fault);
             }
         } else {
-            let state =
-                std::mem::replace(&mut self.driver.state, ScopedActivationState::Transitioning);
-            if let ScopedActivationState::Dormant(dormant) = state {
-                if !self.driver.planning_is_quiescent(dormant.operation()) {
-                    self.driver.state = ScopedActivationState::Dormant(dormant);
-                    let _ = drop_verified_rejection(rejection);
-                    let _ = self.driver.contain_current();
-                } else if let Some(failure) = self.driver.failure.take() {
-                    match dormant.into_operation() {
-                        Ok(operation) => {
-                            let slot = self
-                                .driver
-                                .never
-                                .take()
-                                .expect("requested never-activation installs its cause once");
-                            let pending = NeverActivatedStoreSession::requested(
-                                operation,
-                                slot,
-                                &failure,
-                                self.driver.failure_work,
-                                rejection,
-                            );
-                            self.driver.install_never_activated(pending);
-                        }
-                        Err(containment) => {
-                            let _ = drop_verified_rejection(rejection);
-                            self.driver.state = ScopedActivationState::Contained(containment);
-                        }
-                    }
-                } else {
-                    self.driver.state = ScopedActivationState::Dormant(dormant);
-                    let _ = drop_verified_rejection(rejection);
-                    let _ = self.driver.contain_current();
-                }
-            } else {
-                self.driver.state = state;
-                let _ = drop_verified_rejection(rejection);
-                let _ = self.driver.contain_current();
-            }
+            self.driver.install_never_requested(rejection);
         }
         ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(
             self.receipt_brand,
@@ -1048,29 +719,21 @@ impl<P, M> Drop for ScopedActivationInputs<P, M> {
     clippy::large_enum_variant,
     reason = "the transition keeps the operation or assembly owner inline to prevent ownerless unwind without allocation"
 )]
-enum ScopedTransitionOwner<'inv, O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    Operation(RetainedStoreOperation<'inv, O, PP, U, L>),
-    Assembly(RetainedStorePublicationAssembly<'inv, O, PP, U, L>),
-}
-
-struct ScopedOwnerTransition<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    driver:
-        &'driver mut ScopedActivationDriver<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-    owner: Option<ScopedTransitionOwner<'inv, O, PP, U, L>>,
-}
-
-impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
-    CanonicalActivationSealFailure<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+impl<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+    CanonicalActivationSealFailure<
+        'host,
+        'op,
+        'scope,
+        O,
+        PP,
+        U,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+        L,
+        P,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1088,15 +751,15 @@ where
             .take()
             .expect("an unsealed activation owns its scoped activation driver");
         if plan_drop_failed {
-            let _ = driver.contain_current();
+            driver.contain_current();
         } else if let Some(fault) = driver.first_fault.take() {
             if fault.contract_seen || fault.recoverable_code().is_none() {
-                let _ = driver.contain_current();
+                driver.contain_current();
             } else {
                 driver.install_never_activated_runtime(fault);
             }
         } else {
-            let _ = driver.contain_current();
+            driver.contain_current();
         }
         ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(
             receipt_brand,
@@ -1104,9 +767,10 @@ where
     }
 }
 
-impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
+impl<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
     for CanonicalActivationSealFailure<
-        'inv,
+        'host,
+        'op,
         'scope,
         O,
         PP,
@@ -1140,405 +804,8 @@ where
     }
 }
 
-impl<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    ScopedOwnerTransition<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn begin(
-        driver: &'driver mut ScopedActivationDriver<
-            'inv,
-            O,
-            PP,
-            U,
-            T,
-            E,
-            CanonicalKind,
-            CanonicalTag,
-            L,
-        >,
-    ) -> Self {
-        let state = std::mem::replace(&mut driver.state, ScopedActivationState::Transitioning);
-        let ScopedActivationState::Dormant(dormant) = state else {
-            driver.state = state;
-            let _ = driver.contain_current();
-            return Self {
-                driver,
-                owner: None,
-            };
-        };
-        let owner = match dormant.into_operation() {
-            Ok(operation) => Some(ScopedTransitionOwner::Operation(operation)),
-            Err(containment) => {
-                driver.state = ScopedActivationState::Contained(containment);
-                None
-            }
-        };
-        Self { driver, owner }
-    }
-
-    fn take_operation(&mut self) -> Option<RetainedStoreOperation<'inv, O, PP, U, L>> {
-        match self.owner.take() {
-            Some(ScopedTransitionOwner::Operation(operation)) => Some(operation),
-            Some(owner @ ScopedTransitionOwner::Assembly(_)) => {
-                self.owner = Some(owner);
-                None
-            }
-            None => None,
-        }
-    }
-
-    fn put_operation(&mut self, operation: RetainedStoreOperation<'inv, O, PP, U, L>) {
-        self.owner = Some(ScopedTransitionOwner::Operation(operation));
-    }
-
-    fn operation_is_quiescent(&self) -> bool {
-        match self.owner.as_ref() {
-            Some(ScopedTransitionOwner::Operation(operation)) => {
-                self.driver.planning_is_quiescent(operation)
-            }
-            Some(ScopedTransitionOwner::Assembly(_)) | None => false,
-        }
-    }
-
-    fn prepare_activation(
-        &mut self,
-        request: &BoundScopedSuccessRequest,
-        _outcome_evidence_destination_dimension: StoreDimensionKey,
-    ) -> bool {
-        let Some(ScopedTransitionOwner::Operation(operation)) = self.owner.as_mut() else {
-            let _ = preserve_first_fault::<()>(
-                &mut self.driver.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-            return false;
-        };
-
-        let original_baseline = self.driver.planning_baseline;
-        let prepared = (|| {
-            if request.semantic_bytes != 0
-                && let Some(dimension) = request.semantic_bytes_dimension
-            {
-                operation
-                    .producer_host()
-                    .charge_observed_batch([(dimension, request.semantic_bytes)])?;
-            }
-            let before = operation.raw.planning_baseline();
-            operation.rebind_activation_canonical_assembly(request.canonical_plan)?;
-            original_baseline
-                .checked_apply_rebind_delta(before, operation.raw.planning_baseline())
-                .ok_or(StoreRuntimeError::ConstructionInvariantUnverified)
-        })();
-        match prepared {
-            Ok(baseline) => self.driver.planning_baseline = baseline,
-            Err(cause) => {
-                let _ = preserve_first_fault::<()>(&mut self.driver.first_fault, Err(cause));
-            }
-        }
-        self.driver.first_fault.is_none()
-    }
-
-    fn put_assembly(&mut self, assembly: RetainedStorePublicationAssembly<'inv, O, PP, U, L>) {
-        self.owner = Some(ScopedTransitionOwner::Assembly(assembly));
-    }
-
-    fn assembly_mut(&mut self) -> Option<&mut RetainedStorePublicationAssembly<'inv, O, PP, U, L>> {
-        match self.owner.as_mut() {
-            Some(ScopedTransitionOwner::Assembly(assembly)) => Some(assembly),
-            _ => None,
-        }
-    }
-
-    fn assembly_is_quiescent(
-        &self,
-        publication_storage_baseline: RetainedPlanningBaseline,
-    ) -> bool {
-        match self.owner.as_ref() {
-            Some(ScopedTransitionOwner::Assembly(assembly)) => self
-                .driver
-                .assembly_is_quiescent(assembly, publication_storage_baseline),
-            Some(ScopedTransitionOwner::Operation(_)) | None => false,
-        }
-    }
-
-    fn take_assembly(&mut self) -> Option<RetainedStorePublicationAssembly<'inv, O, PP, U, L>> {
-        match self.owner.take() {
-            Some(ScopedTransitionOwner::Assembly(assembly)) => Some(assembly),
-            Some(owner @ ScopedTransitionOwner::Operation(_)) => {
-                self.owner = Some(owner);
-                None
-            }
-            None => None,
-        }
-    }
-
-    fn install(
-        mut self,
-        pending: ScopedPendingActivation<'inv, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-    ) {
-        self.owner.take();
-        self.driver.install_pending(pending);
-    }
-
-    fn contain(mut self) {
-        self.contain_in_place();
-    }
-
-    fn contain_in_place(&mut self) {
-        let containment = match self.owner.take() {
-            Some(ScopedTransitionOwner::Operation(operation)) => contain_operation(operation),
-            Some(ScopedTransitionOwner::Assembly(assembly)) => StoreActivationContainment {
-                cause: assembly.contain_activation_fault(),
-            },
-            None => self.driver.contain_current(),
-        };
-        self.driver.state = ScopedActivationState::Contained(containment);
-    }
-    /// Opens tables while the transition continues to own every success and failure branch.
-    fn open_publication<P, M>(
-        &mut self,
-        request: &BoundScopedSuccessRequest,
-        failure: &BoundScopedFailureRequest,
-        inputs: &mut ScopedActivationInputs<P, M>,
-    ) -> bool {
-        let publication = RetainedStorePublicationPlan::success(
-            request.canonical_plan,
-            failure.outcome_evidence_plan,
-        );
-        let Some(operation) = self.take_operation() else {
-            let _ = inputs.drop_remaining();
-            return false;
-        };
-        match super::try_open_activation(operation, publication) {
-            Ok(assembly) => {
-                self.put_assembly(assembly);
-                true
-            }
-            Err(ActivationOpenFailure::DeferredContainment { operation }) => {
-                self.put_operation(operation);
-                let _ = inputs.drop_remaining();
-                self.contain_in_place();
-                false
-            }
-            Err(ActivationOpenFailure::Recoverable {
-                operation,
-                cause,
-                failure_code,
-                fallback_only,
-            }) => {
-                self.put_operation(operation);
-                if inputs.drop_remaining().is_err() || !self.operation_is_quiescent() {
-                    self.contain_in_place();
-                } else {
-                    let operation = self
-                        .take_operation()
-                        .expect("recoverable activation retains its operation owner");
-                    let slot = self
-                        .driver
-                        .never
-                        .take()
-                        .expect("recoverable open installs its cause once");
-                    let pending = NeverActivatedStoreSession::runtime(
-                        operation,
-                        slot,
-                        failure,
-                        self.driver.failure_work,
-                        cause,
-                        failure_code,
-                        fallback_only,
-                    );
-                    self.driver.install_never_activated(pending);
-                }
-                false
-            }
-        }
-    }
-
-    /// Resolves the private materialization after its caller-owned inputs have been destroyed.
-    /// Keeping terminal-owner transitions here avoids retaining their large temporary slots
-    /// across the materializer and publication-table open calls on a normal host stack.
-    fn finish_materialization(
-        mut self,
-        request: BoundScopedSuccessRequest,
-        failure: BoundScopedFailureRequest,
-        materialized: CanonicalMaterializationState<T, E, CanonicalKind, CanonicalTag>,
-    ) {
-        let failure_work = self.driver.failure_work;
-        let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
-        let BoundScopedSuccessRequest {
-            validation_phase,
-            validation_work_dimension,
-            validation_scratch_dimension,
-            canonical_destination_dimension,
-            validation_work,
-            expected_materialized_blocks,
-            ..
-        } = request;
-        let planning_baseline = self.driver.planning_baseline;
-        let publication_storage_baseline = self
-            .assembly_mut()
-            .and_then(|assembly| assembly.raw.publication_storage_baseline(planning_baseline));
-        let Some(publication_storage_baseline) = publication_storage_baseline else {
-            let _ = drop_materialization(materialized);
-            self.contain();
-            return;
-        };
-
-        if !self.assembly_is_quiescent(publication_storage_baseline) {
-            let _ = drop_materialization(materialized);
-            self.contain();
-            return;
-        }
-
-        if self
-            .assembly_mut()
-            .expect("materialization retains its assembly")
-            .is_fallback_only()
-        {
-            let _ = drop_materialization(materialized);
-            self.contain();
-            return;
-        }
-
-        let first_fault = self.driver.first_fault.take();
-        match (first_fault, materialized) {
-            (Some(fault), CanonicalMaterializationState::Activated { root: _, output }) => {
-                let _ = drop_scoped_value(output);
-                let _fault = fault;
-                self.contain();
-            }
-            (Some(fault), CanonicalMaterializationState::Rejected(rejection)) => {
-                if fault.contract_seen {
-                    let _ = drop_verified_rejection(rejection);
-                    self.contain();
-                } else if let Some(failure_code) = fault.recoverable_code() {
-                    if drop_verified_rejection(rejection).is_err() {
-                        self.contain();
-                    } else {
-                        let assembly = self
-                            .take_assembly()
-                            .expect("runtime rejection retains its assembly");
-                        match finish_rejected_session(
-                            assembly,
-                            self.driver.rejection.take().expect(
-                                "runtime materialization rejection installs its cause once",
-                            ),
-                            failure_work,
-                            outcome_evidence_destination_dimension,
-                            StoreCanonicalRejection::Runtime(fault.cause),
-                            failure_code,
-                        ) {
-                            Ok(rejected) => {
-                                self.install(ScopedPendingActivation::Rejected(rejected));
-                            }
-                            Err(containment) => {
-                                self.driver.state = ScopedActivationState::Contained(containment);
-                            }
-                        }
-                    }
-                } else {
-                    let _ = drop_verified_rejection(rejection);
-                    self.contain();
-                }
-            }
-            (None, CanonicalMaterializationState::Activated { root, output }) => {
-                if self
-                    .assembly_mut()
-                    .expect("activated materialization retains its assembly")
-                    .canonical_len()
-                    != expected_materialized_blocks
-                {
-                    let _ = drop_scoped_value(output);
-                    self.contain();
-                } else {
-                    let assembly = self
-                        .take_assembly()
-                        .expect("activated materialization consumes its assembly once");
-                    let Some(slot) = self.driver.output.take() else {
-                        let _ = drop_scoped_value(output);
-                        self.owner = Some(ScopedTransitionOwner::Assembly(assembly));
-                        self.contain();
-                        return;
-                    };
-                    let output = match slot.place(output) {
-                        Ok(output) => output,
-                        Err(output) => {
-                            let _ = drop_scoped_value(output);
-                            self.owner = Some(ScopedTransitionOwner::Assembly(assembly));
-                            self.contain();
-                            return;
-                        }
-                    };
-                    self.install(ScopedPendingActivation::Activated(
-                        ActivatedCanonicalStoreSession {
-                            canonical_root: root,
-                            owner: PayloadOwner::new(output, assembly),
-                            failure_work,
-                            validation_phase,
-                            validation_work_dimension,
-                            validation_scratch_dimension,
-                            canonical_destination_dimension,
-                            outcome_evidence_destination_dimension,
-                            validation_work,
-                        },
-                    ));
-                }
-            }
-            (None, CanonicalMaterializationState::Rejected(rejection)) => {
-                let assembly = self
-                    .take_assembly()
-                    .expect("requested rejection consumes its assembly once");
-                match finish_rejected_session(
-                    assembly,
-                    self.driver
-                        .rejection
-                        .take()
-                        .expect("requested materialization rejection installs its cause once"),
-                    failure_work,
-                    outcome_evidence_destination_dimension,
-                    StoreCanonicalRejection::Requested(rejection.cause),
-                    rejection.failure_code,
-                ) {
-                    Ok(rejected) => {
-                        self.install(ScopedPendingActivation::Rejected(rejected));
-                    }
-                    Err(containment) => {
-                        self.driver.state = ScopedActivationState::Contained(containment);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
-    for ScopedOwnerTransition<'inv, 'driver, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn drop(&mut self) {
-        let containment = match self.owner.take() {
-            Some(ScopedTransitionOwner::Operation(operation)) => Some(contain_operation(operation)),
-            Some(ScopedTransitionOwner::Assembly(assembly)) => Some(StoreActivationContainment {
-                cause: assembly.contain_activation_fault(),
-            }),
-            None if matches!(&self.driver.state, ScopedActivationState::Transitioning) => {
-                Some(self.driver.contain_current())
-            }
-            None => None,
-        };
-        if let Some(containment) = containment {
-            self.driver.state = ScopedActivationState::Contained(containment);
-        }
-    }
-}
-
-impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
-    CanonicalActivationPermit<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+impl<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+    CanonicalActivationPermit<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1552,8 +819,8 @@ where
     )]
     pub fn activate(
         mut self,
-        materialize: impl for<'lane> FnMut(
-            CanonicalLane<'inv, 'lane, O, PP, U, L>,
+        materialize: impl for<'loan, 'lane> FnMut(
+            CanonicalLane<'loan, 'lane, O, PP, U, L>,
             &P,
         ) -> CanonicalMaterialization<
             'lane,
@@ -1572,94 +839,37 @@ where
         let driver = self
             .driver
             .take()
-            .expect("an activation permit owns its scoped activation driver");
+            .expect("the permit retains its short activation driver");
         let request = self
             .request
             .take()
-            .expect("an activation permit owns its bound activation request");
-        let mut transition = ScopedOwnerTransition::begin(driver);
-        // Rebinding immediately after the transition makes every later unwind drop the complete
-        // plan, its reservations, and the materializer before final ownership-graph containment.
+            .expect("the permit owns its bound activation request");
+        let transition = ScopedDriverTransition { driver };
+        // Inputs unwind before the transition contains its still-installed physical fields.
         let mut inputs = inputs;
-        let failure_work = transition.driver.failure_work;
-        let failure = transition
-            .driver
-            .failure
-            .take()
-            .expect("sealed activation consumes the failure shape once");
-        let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
-
-        if !transition.prepare_activation(&request, outcome_evidence_destination_dimension) {
-            if inputs.drop_remaining().is_err() || !transition.operation_is_quiescent() {
-                transition.contain();
-            } else if let Some(fault) = transition.driver.first_fault.take() {
-                if fault.contract_seen {
-                    transition.contain();
-                } else if let Some(failure_code) = fault.recoverable_code() {
-                    let operation = transition
-                        .take_operation()
-                        .expect("pre-activation failure retains its operation owner");
-                    let slot = transition
-                        .driver
-                        .never
-                        .take()
-                        .expect("pre-activation failure installs its cause once");
-                    match NeverActivatedStoreSession::runtime(
-                        operation,
-                        slot,
-                        &failure,
-                        failure_work,
-                        fault.cause,
-                        failure_code,
-                        false,
-                    ) {
-                        Ok(pending) => {
-                            transition.install(ScopedPendingActivation::NeverActivated(pending))
-                        }
-                        Err(containment) => {
-                            transition.driver.state = ScopedActivationState::Contained(containment)
-                        }
-                    }
-                } else {
-                    transition.contain();
-                }
-            } else {
-                transition.contain();
-            }
-            return ScopedActivationDriver::<
-                O,
-                PP,
-                U,
-                T,
-                E,
-                CanonicalKind,
-                CanonicalTag,
-                L,
-            >::receipt(receipt_brand);
+        let driver = &mut *transition.driver;
+        if !driver.prepare_activation(&request) {
+            driver.finish_pre_activation_failure(&mut inputs);
+            return ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(receipt_brand);
         }
-
-        if !transition.open_publication(&request, &failure, &mut inputs) {
-            return ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(
-                receipt_brand,
-            );
+        if !driver.open_publication(&request, &mut inputs) {
+            return ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(receipt_brand);
         }
         let (materialization_phase, _) = request.canonical_plan.keys_for_publication_validation();
-        let materialization_work_dimension = request.materialization_work_dimension;
-        let materialization_scratch_dimension = request.materialization_scratch_dimension;
-
         let materialized = catch_unwind(AssertUnwindSafe(|| {
-            let ScopedOwnerTransition { driver, owner } = &mut transition;
-            let assembly = match owner.as_mut() {
-                Some(ScopedTransitionOwner::Assembly(assembly)) => assembly,
-                _ => panic!("materialization requires one transition-owned assembly"),
+            let ScopedActivationDriver {
+                state, first_fault, ..
+            } = &mut *driver;
+            let ScopedActivationState::Opened(ordinary) = state else {
+                panic!("materialization requires the original opened ordinary permission");
             };
             let lane = CanonicalLane {
-                assembly,
-                first_fault: &mut driver.first_fault,
+                assembly: ordinary,
+                first_fault,
                 pending_rejection: false,
                 materialization_phase,
-                materialization_work_dimension,
-                materialization_scratch_dimension,
+                materialization_work_dimension: request.materialization_work_dimension,
+                materialization_scratch_dimension: request.materialization_scratch_dimension,
             };
             let (plan, materialize) = inputs.plan_and_materializer_mut();
             materialize(lane, plan).into_state()
@@ -1669,43 +879,37 @@ where
             Ok(materialized) if !inputs_drop_failed => materialized,
             Ok(materialized) => {
                 let _ = drop_materialization(materialized);
-                transition.contain();
-                return ScopedActivationDriver::<
-                    O,
-                    PP,
-                    U,
-                    T,
-                    E,
-                    CanonicalKind,
-                    CanonicalTag,
-                    L,
-                >::receipt(receipt_brand);
+                driver.contain_current();
+                return ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(receipt_brand);
             }
             Err(payload) => {
                 discard_untrusted_panic_payload(payload);
-                transition.contain();
-                return ScopedActivationDriver::<
-                    O,
-                    PP,
-                    U,
-                    T,
-                    E,
-                    CanonicalKind,
-                    CanonicalTag,
-                    L,
-                >::receipt(receipt_brand);
+                driver.contain_current();
+                return ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(receipt_brand);
             }
         };
-
-        transition.finish_materialization(request, failure, materialized);
+        driver.finish_materialization(request, materialized);
         ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(
             receipt_brand,
         )
     }
 }
 
-impl<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
-    for CanonicalActivationPermit<'inv, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+impl<'host, 'op, 'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
+    for CanonicalActivationPermit<
+        'host,
+        'op,
+        'scope,
+        O,
+        PP,
+        U,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+        L,
+        P,
+    >
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -2120,7 +1324,7 @@ where
     U: ProgressUnit,
 {
     pub fn len(&self) -> usize {
-        self.assembly.canonical_len()
+        self.assembly.raw.loan().canonical_len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2132,7 +1336,7 @@ where
         &self,
         dimension: StoreDimensionKey,
     ) -> Option<crate::DimensionSnapshot> {
-        self.assembly.raw.test_dimension_evidence(dimension)
+        self.assembly.raw.loan().test_dimension_evidence(dimension)
     }
 
     pub fn control_checkpoint<'borrow>(

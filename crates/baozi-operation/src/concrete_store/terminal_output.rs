@@ -19,6 +19,9 @@ use crate::retained::{
     PublishedFallbackOutput, PublishedLedgerEvidence, PublishedOutcomeEvidenceOutput,
     PublishedRichFailureOutput, RetainedLookupMember, TerminalEvidenceCause,
 };
+
+pub(super) mod finite;
+
 pub(super) type RawPreparedStore = PreparedRetainedPublication<
     StoredBlock,
     StoredBlock,
@@ -784,7 +787,23 @@ where
 /// semantic and ordinal queries remain valid after the producer or plugin-facing owner is gone.
 pub struct StoreLedgerEvidence {
     storage: StoreLedgerEvidenceStorage,
-    domain: StoreKeyDomain,
+    domain: StoreLedgerDomain,
+}
+
+enum StoreLedgerDomain {
+    Ordinary(StoreKeyDomain),
+    Quarantined(std::mem::ManuallyDrop<StoreKeyDomain>),
+}
+
+impl std::ops::Deref for StoreLedgerDomain {
+    type Target = StoreKeyDomain;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Ordinary(domain) => domain,
+            Self::Quarantined(domain) => domain,
+        }
+    }
 }
 
 enum StoreLedgerEvidenceStorage {
@@ -802,7 +821,7 @@ impl StoreLedgerEvidence {
     ) -> Self {
         Self {
             storage: StoreLedgerEvidenceStorage::Retained(raw),
-            domain,
+            domain: StoreLedgerDomain::Ordinary(domain),
         }
     }
 
@@ -810,7 +829,15 @@ impl StoreLedgerEvidence {
         snapshot: crate::LedgerSnapshot<StorePhaseKey, StoreDimensionKey>,
         terminal_cause: StoreTerminalCause,
         domain: StoreKeyDomain,
+        contained: bool,
     ) -> Self {
+        // The actual invocation residue determines the original domain's disposition.
+        // Semantic failure alone does not require retaining a clean domain.
+        let domain = if contained {
+            StoreLedgerDomain::Quarantined(std::mem::ManuallyDrop::new(domain))
+        } else {
+            StoreLedgerDomain::Ordinary(domain)
+        };
         Self {
             storage: StoreLedgerEvidenceStorage::Unattached {
                 snapshot,
@@ -843,8 +870,8 @@ impl StoreLedgerEvidence {
                     current_live_bytes: raw.current_live_bytes(),
                     peak_live_bytes: raw.peak_live_bytes(),
                     active_reservations: raw.active_reservations(),
-                    current_evidence_bytes: raw.current_evidence_bytes(),
-                    peak_evidence_bytes: raw.peak_evidence_bytes(),
+                    current_administrative_bytes: raw.current_administrative_bytes(),
+                    peak_administrative_bytes: raw.peak_administrative_bytes(),
                 }
             }
             StoreLedgerEvidenceStorage::Unattached {
@@ -861,8 +888,8 @@ impl StoreLedgerEvidence {
                 current_live_bytes: snapshot.current_live_bytes(),
                 peak_live_bytes: snapshot.peak_live_bytes(),
                 active_reservations: snapshot.active_reservations(),
-                current_evidence_bytes: snapshot.current_evidence_bytes(),
-                peak_evidence_bytes: snapshot.peak_evidence_bytes(),
+                current_administrative_bytes: snapshot.current_administrative_bytes(),
+                peak_administrative_bytes: snapshot.peak_administrative_bytes(),
             },
         }
     }
@@ -961,8 +988,8 @@ pub struct StoreLedgerEvidenceHeader {
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
-    current_evidence_bytes: u64,
-    peak_evidence_bytes: u64,
+    current_administrative_bytes: u64,
+    peak_administrative_bytes: u64,
 }
 
 impl StoreLedgerEvidenceHeader {
@@ -1007,13 +1034,13 @@ impl StoreLedgerEvidenceHeader {
     }
 
     /// Returns ledger evidence bytes remaining at terminal freeze.
-    pub const fn current_evidence_bytes(self) -> u64 {
-        self.current_evidence_bytes
+    pub const fn current_administrative_bytes(self) -> u64 {
+        self.current_administrative_bytes
     }
 
     /// Returns the ledger evidence byte high-water mark.
-    pub const fn peak_evidence_bytes(self) -> u64 {
-        self.peak_evidence_bytes
+    pub const fn peak_administrative_bytes(self) -> u64 {
+        self.peak_administrative_bytes
     }
 }
 
@@ -1198,4 +1225,129 @@ fn published_root_invariant(expected: &str) -> ! {
 
 fn unreachable_store_state() -> ! {
     panic!("concrete retained store reached an impossible private typestate")
+}
+
+#[cfg(test)]
+mod unattached_domain_tests {
+    use super::*;
+    use crate::concrete_store::tests::{
+        TestOwner, TestProgress, TestUnit, test_account, test_factory, test_operation_plan,
+    };
+    use crate::concrete_store::{RetainedStoreOperation, StoreInvocationRoot};
+    use crate::ledger::ParserChannel;
+    use crate::{FinalProgress, OperationControl};
+
+    #[test]
+    fn unattached_domain_disposition_follows_actual_residue_through_evidence_destruction() {
+        // A requested failure with clean counters retires normally. Both a live token
+        // and an unresolved zero-counter frame require the original domain to remain.
+        for residue in 0..3 {
+            let factory = test_factory();
+            let account = test_account(&factory);
+            let before = account.snapshot();
+            let (ledger, start, keys) = test_operation_plan(u64::MAX, u64::MAX, u64::MAX, 1);
+            let mut root = StoreInvocationRoot::<TestOwner, TestProgress, TestUnit>::new();
+            let mut binding = RetainedStoreOperation::bind(
+                &mut root,
+                OperationControl::default(),
+                ledger,
+                &account,
+                start,
+            )
+            .unwrap();
+            let reservation = {
+                let mut parts = binding
+                    .raw
+                    .exclusive_parts()
+                    .unwrap_or_else(|_| panic!("actual prework"));
+                let work = parts.work.bind([keys.work_dimension]).unwrap();
+                if residue == 2 {
+                    let frame = work
+                        .begin_parser(&mut parts.work.work, [0], [None], ParserChannel::Child)
+                        .unwrap();
+                    assert_eq!(frame.remaining, [0]);
+                    assert!(frame.active);
+                } else {
+                    parts.work.charge_observed(work, [2]).unwrap();
+                }
+                (residue == 1).then(|| {
+                    parts
+                        .ordinary
+                        .storage
+                        .reserve(keys.phase, keys.dimension, 7)
+                        .unwrap()
+                })
+            };
+            let pending = binding
+                .defer_unattached(Some(PreparationFailureCode::domain(41)))
+                .unwrap();
+            let evidence = root
+                .prepare_deferred_unattached(
+                    pending,
+                    FinalProgress::new(TestProgress::Build, TestUnit::Items, 1),
+                )
+                .unwrap();
+            assert!(root.domain.is_none());
+            assert_eq!(root.raw.must_retain_domain(), residue != 0);
+            assert_eq!(
+                matches!(evidence.domain, StoreLedgerDomain::Quarantined(_)),
+                residue != 0
+            );
+            assert!(evidence.domain.owns_dimension(keys.dimension));
+            if let StoreLedgerDomain::Quarantined(domain) = &evidence.domain {
+                let retained: &std::mem::ManuallyDrop<StoreKeyDomain> = domain;
+                assert!(retained.owns_dimension(keys.dimension));
+            }
+            let header = evidence.header();
+            let StoreTerminalCause::Failure(cause) = header.terminal_cause() else {
+                panic!("the original request cannot become success");
+            };
+            assert_eq!(
+                cause.class(),
+                if residue == 0 {
+                    StorePreparationFailureClass::Requested
+                } else {
+                    StorePreparationFailureClass::Ledger
+                }
+            );
+            if residue == 0 {
+                assert_eq!(cause.code(), 41);
+            }
+            let expected_live = if residue == 1 { 7 } else { 0 };
+            assert_eq!(header.current_live_bytes(), expected_live);
+            assert_eq!(header.active_reservations(), u64::from(residue == 1));
+            assert_eq!(
+                evidence
+                    .dimension(keys.dimension)
+                    .unwrap()
+                    .current_live_bytes(),
+                expected_live
+            );
+            let work = evidence.dimension(keys.work_dimension).unwrap();
+            let expected_work = if residue == 2 { 0 } else { 2 };
+            assert_eq!(
+                (work.attempted(), work.consumed()),
+                (expected_work, expected_work)
+            );
+            drop(reservation);
+            assert_eq!(evidence.header().current_live_bytes(), expected_live);
+            let after = account.snapshot();
+            assert_eq!(after.poisoned(), residue != 0);
+            assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+            assert_eq!(
+                after.live_retained_allocations(),
+                before.live_retained_allocations()
+            );
+            if residue == 1 {
+                drop(root);
+                assert!(evidence.domain.owns_dimension(keys.dimension));
+                assert_eq!(evidence.header().current_live_bytes(), expected_live);
+                drop(evidence);
+            } else {
+                drop(evidence);
+                drop(root);
+            }
+            assert_eq!(account.snapshot(), after);
+        }
+    }
 }

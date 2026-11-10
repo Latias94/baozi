@@ -288,6 +288,7 @@ fn sequence_bytes_and_utf8_batches_publish_opaque_ranges() {
         SequenceBatchItem::new(sequence_values[1]).expect("second sequence item"),
     ];
     let sequence_range = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&sequence_items).expect("sequence batch"),
             BatchTag,
@@ -302,6 +303,7 @@ fn sequence_bytes_and_utf8_batches_publish_opaque_ranges() {
         BytesBatchItem::new(byte_values[1]).expect("second bytes item"),
     ];
     let bytes_range = assembly
+        .ordinary()
         .try_retain_canonical_bytes_batch(
             BytesBatchPlan::new(&byte_items).expect("bytes batch"),
             BatchTag,
@@ -313,6 +315,7 @@ fn sequence_bytes_and_utf8_batches_publish_opaque_ranges() {
         Utf8BatchItem::new("beta").expect("second utf8 item"),
     ];
     let utf8_range = assembly
+        .ordinary()
         .try_retain_canonical_utf8_batch(
             Utf8BatchPlan::new(&utf8_items).expect("utf8 batch"),
             BatchTag,
@@ -334,6 +337,7 @@ fn sequence_bytes_and_utf8_batches_publish_opaque_ranges() {
     assert!(utf8_range.get(2).is_none());
 
     let evidence_root = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             EvidenceTag,
@@ -432,12 +436,14 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
         SequenceBatchItem::new(&first_values[2]).expect("third item"),
     ];
     let first_range = first
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&first_items).expect("first batch"),
             BatchTag,
         )
         .expect("first retained batch");
     let first_evidence = first
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("first evidence plan"),
             EvidenceTag,
@@ -478,12 +484,14 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
     let second_value = [9_u8];
     let second_items = [SequenceBatchItem::new(&second_value).expect("second publication item")];
     let second_range = second
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&second_items).expect("second batch"),
             BatchTag,
         )
         .expect("second retained batch");
     let second_evidence = second
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("second evidence plan"),
             EvidenceTag,
@@ -538,8 +546,8 @@ fn batch_preflight_rejection_is_zero_mutation_and_the_assembly_remains_retryable
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 1))
         .expect("preflight batch assembly");
-    let ledger = assembly.raw.test_ledger_probe();
-    let before_canonical = assembly.canonical_len();
+    let ledger = assembly.raw.loan().test_ledger_probe();
+    let before_canonical = assembly.ordinary().canonical_len();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     let before_physical = account.snapshot();
@@ -550,6 +558,7 @@ fn batch_preflight_rejection_is_zero_mutation_and_the_assembly_remains_retryable
     ];
 
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&oversized).expect("oversized batch plan"),
             BatchTag,
@@ -560,7 +569,7 @@ fn batch_preflight_rejection_is_zero_mutation_and_the_assembly_remains_retryable
         error,
         StoreBatchRuntimeError::Preflight(StoreRuntimeError::SlotLimit { .. })
     ));
-    assert_eq!(assembly.canonical_len(), before_canonical);
+    assert_eq!(assembly.ordinary().canonical_len(), before_canonical);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     assert_eq!(account.snapshot(), before_physical);
@@ -568,13 +577,14 @@ fn batch_preflight_rejection_is_zero_mutation_and_the_assembly_remains_retryable
     let retry_value = [9_u8];
     let retry = [SequenceBatchItem::new(&retry_value).expect("retry item")];
     let range = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&retry).expect("retry batch plan"),
             BatchTag,
         )
         .expect("preflight rejection must leave the assembly writable");
     assert_eq!(range.len(), 1);
-    assert_eq!(assembly.canonical_len(), 1);
+    assert_eq!(assembly.ordinary().canonical_len(), 1);
 
     let fallback = assembly
         .prepare_minimal_fallback()
@@ -597,11 +607,11 @@ fn aggregate_operation_headroom_rejection_is_zero_mutation_and_retryable() {
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("aggregate-headroom batch assembly");
-    let ledger = assembly.raw.test_ledger_probe();
-    let before_canonical = assembly.canonical_len();
+    let ledger = assembly.raw.loan().test_ledger_probe();
+    let before_canonical = assembly.ordinary().canonical_len();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
-    let before_attributed = assembly.raw.test_canonical_attributed_bytes();
+    let before_attributed = assembly.raw.loan().test_canonical_attributed_bytes();
     let before_physical = account.snapshot();
 
     let first = vec![1_u8; 600_000];
@@ -611,6 +621,7 @@ fn aggregate_operation_headroom_rejection_is_zero_mutation_and_retryable() {
         BytesBatchItem::new(&second).expect("second aggregate item"),
     ];
     let error = assembly
+        .ordinary()
         .try_retain_canonical_bytes_batch(
             BytesBatchPlan::new(&oversized).expect("aggregate batch plan"),
             BatchTag,
@@ -624,11 +635,11 @@ fn aggregate_operation_headroom_rejection_is_zero_mutation_and_retryable() {
             ..
         }))
     ));
-    assert_eq!(assembly.canonical_len(), before_canonical);
+    assert_eq!(assembly.ordinary().canonical_len(), before_canonical);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     assert_eq!(
-        assembly.raw.test_canonical_attributed_bytes(),
+        assembly.raw.loan().test_canonical_attributed_bytes(),
         before_attributed
     );
     assert_eq!(account.snapshot(), before_physical);
@@ -636,6 +647,7 @@ fn aggregate_operation_headroom_rejection_is_zero_mutation_and_retryable() {
     let retry_value = [9_u8; 8];
     let retry = [BytesBatchItem::new(&retry_value).expect("headroom retry item")];
     let range = assembly
+        .ordinary()
         .try_retain_canonical_bytes_batch(
             BytesBatchPlan::new(&retry).expect("headroom retry plan"),
             BatchTag,
@@ -666,17 +678,18 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("work-headroom batch assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_work = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.dimension)
         .expect("work evidence before batch");
     assert_eq!(before_work.attempted(), 14);
     assert_eq!(before_work.consumed(), 14);
-    let before_canonical = assembly.canonical_len();
+    let before_canonical = assembly.ordinary().canonical_len();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
-    let before_attributed = assembly.raw.test_canonical_attributed_bytes();
+    let before_attributed = assembly.raw.loan().test_canonical_attributed_bytes();
     let before_physical = account.snapshot();
 
     let values = [[1_u8], [2_u8]];
@@ -685,6 +698,7 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
         SequenceBatchItem::new(&values[1]).expect("second work item"),
     ];
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&items).expect("work batch plan"),
             BatchTag,
@@ -700,22 +714,24 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
             ..
         }))
     ));
-    assert_eq!(assembly.canonical_len(), before_canonical);
+    assert_eq!(assembly.ordinary().canonical_len(), before_canonical);
     assert_eq!(ledger.active_reservations(), before_active);
     assert_eq!(ledger.current_live_bytes(), before_live);
     assert_eq!(
-        assembly.raw.test_canonical_attributed_bytes(),
+        assembly.raw.loan().test_canonical_attributed_bytes(),
         before_attributed
     );
     assert_eq!(account.snapshot(), before_physical);
     let after_rejection = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.dimension)
         .expect("work evidence after rejection");
     assert_eq!(after_rejection, before_work);
 
     let retry = [SequenceBatchItem::new(&values[0]).expect("work retry item")];
     let range = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&retry).expect("work retry plan"),
             BatchTag,
@@ -724,6 +740,7 @@ fn aggregate_share_work_rejection_is_zero_mutation_and_retryable() {
     assert_eq!(range.len(), 1);
     let exact = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.dimension)
         .expect("work evidence at exact limit");
     assert_eq!(exact.attempted(), WORK_LIMIT);
@@ -752,9 +769,10 @@ fn aggregate_share_work_exact_fit_charges_only_executed_items() {
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 2))
         .expect("exact-fit batch assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.dimension)
         .expect("work evidence before exact-fit batch");
     assert_eq!(before.attempted(), 14);
@@ -766,6 +784,7 @@ fn aggregate_share_work_exact_fit_charges_only_executed_items() {
         SequenceBatchItem::new(&values[1]).expect("second exact-fit item"),
     ];
     let range = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&items).expect("exact-fit batch plan"),
             BatchTag,
@@ -775,6 +794,7 @@ fn aggregate_share_work_exact_fit_charges_only_executed_items() {
     assert_eq!(range.len(), 2);
     let exact = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.dimension)
         .expect("work evidence after exact-fit batch");
     assert_eq!(exact.attempted(), WORK_LIMIT);
@@ -800,13 +820,14 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 3))
         .expect("failing batch assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_attributions = ledger.active_reservations();
     let before_ledger_bytes = ledger.current_live_bytes();
-    let before_attributed_bytes = assembly.raw.test_canonical_attributed_bytes();
+    let before_attributed_bytes = assembly.raw.loan().test_canonical_attributed_bytes();
     let before_physical = account.snapshot();
     let before_work = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.dimension)
         .expect("work evidence before failing batch");
     let item_values = [[1_u8], [2_u8], [3_u8]];
@@ -817,6 +838,7 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
     ];
     test_fail_batch_build_at(1);
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&items).expect("failing batch plan"),
             BatchTag,
@@ -830,11 +852,11 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
             cause: StoreRuntimeError::Build(cause),
         } if cause.class() == crate::StoreBuildFailureClass::IncompleteWrite
     ));
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert_eq!(ledger.active_reservations(), before_attributions);
     assert_eq!(ledger.current_live_bytes(), before_ledger_bytes);
     assert_eq!(
-        assembly.raw.test_canonical_attributed_bytes(),
+        assembly.raw.loan().test_canonical_attributed_bytes(),
         before_attributed_bytes
     );
     let after_physical = account.snapshot();
@@ -877,6 +899,7 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
     );
     let after_work = assembly
         .raw
+        .loan()
         .test_dimension_evidence(keys.dimension)
         .expect("work evidence after failing batch");
     assert_eq!(after_work.attempted() - before_work.attempted(), 4);
@@ -885,6 +908,7 @@ fn mid_batch_failure_rolls_back_the_prefix_and_leaves_the_assembly_writable() {
     let retry_value = [7_u8];
     let retry_items = [BytesBatchItem::new(&retry_value).expect("retry bytes item")];
     let range = assembly
+        .ordinary()
         .try_retain_canonical_bytes_batch(
             BytesBatchPlan::new(&retry_items).expect("retry bytes batch"),
             BatchTag,
@@ -912,7 +936,7 @@ fn unverified_prefix_rollback_enters_containment_and_preserves_live_attribution(
     let mut assembly = operation
         .try_publication_assembly(publication_plan(keys, 3))
         .expect("rollback-containment batch assembly");
-    let ledger = assembly.raw.test_ledger_probe();
+    let ledger = assembly.raw.loan().test_ledger_probe();
     let before_active = ledger.active_reservations();
     let before_live = ledger.current_live_bytes();
     let values = [[1_u8], [2_u8], [3_u8]];
@@ -925,6 +949,7 @@ fn unverified_prefix_rollback_enters_containment_and_preserves_live_attribution(
     test_fail_batch_build_at(2);
     test_panic_final_owner_drop_after(1);
     let error = assembly
+        .ordinary()
         .try_retain_canonical_sequence_batch(
             SequenceBatchPlan::new(&items).expect("rollback-containment plan"),
             BatchTag,
@@ -941,7 +966,7 @@ fn unverified_prefix_rollback_enters_containment_and_preserves_live_attribution(
         ),
         "unexpected batch containment error: {error:?}"
     );
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert!(ledger.active_reservations() > before_active);
     assert!(ledger.current_live_bytes() > before_live);
     assert!(account.snapshot().poisoned());
@@ -968,6 +993,7 @@ fn mid_batch_panic_uses_single_block_containment_and_never_returns_a_range() {
 
     test_panic_batch_build_at(1);
     let error = assembly
+        .ordinary()
         .try_retain_canonical_utf8_batch(
             Utf8BatchPlan::new(&items).expect("panicking batch plan"),
             BatchTag,
@@ -981,10 +1007,10 @@ fn mid_batch_panic_uses_single_block_containment_and_never_returns_a_range() {
             cause: StoreRuntimeError::BuilderPanicked,
         }
     ));
-    assert_eq!(assembly.canonical_len(), 0);
+    assert_eq!(assembly.ordinary().canonical_len(), 0);
     assert!(account.snapshot().poisoned());
     assert!(matches!(
-        assembly.try_retain_canonical_utf8_batch(
+        assembly.ordinary().try_retain_canonical_utf8_batch(
             Utf8BatchPlan::new(&[Utf8BatchItem::new("retry").expect("retry utf8 item")])
                 .expect("retry utf8 batch"),
             BatchTag,

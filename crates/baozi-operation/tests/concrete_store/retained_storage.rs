@@ -42,11 +42,13 @@ fn many_retained_outputs_do_not_consume_per_allocation_terminal_slots() {
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .unwrap();
     let canonical = assembly
+        .ordinary()
         .try_retain_canonical_bytes(BytesPlan::new(1).unwrap(), BytesTag, |writer| {
             writer.write_bytes(&[7])
         })
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_bytes(BytesPlan::new(1).unwrap(), EvidenceBytesTag, |writer| {
             writer.write_bytes(&[9])
         })
@@ -86,6 +88,7 @@ fn rich_failure_keeps_real_output_storage_charged_until_its_owner_drops() {
         .try_publication_assembly(rich_failure_plan(keys, 1))
         .unwrap();
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_bytes(BytesPlan::new(1).unwrap(), EvidenceBytesTag, |writer| {
             writer.write_bytes(&[3])
         })

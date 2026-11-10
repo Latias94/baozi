@@ -5,11 +5,11 @@
 
 use baozi_core::__scene_integration::integration::SceneVectorValues;
 use baozi_core::{AttributeData, AttributeDomain, ValidatedScene};
-use baozi_operation::__retained_store_integration::activation::CanonicalOperationPublication;
-use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
+use baozi_operation::__retained_store_integration::activation::FiniteCanonicalOperationPublication;
+use baozi_operation::__retained_store_integration::authority::PreparedFiniteStoreEvidenceOnlyOutcome;
 use baozi_operation::{
-    CancellationOrigin, ControlCause, CounterClass, DimensionPolicy, LedgerCause,
-    StoreLedgerEvidence, StorePreparationFailureClass, StoreRuntimeError, StoreTerminalCause,
+    CancellationOrigin, ControlCause, CounterClass, DimensionPolicy, FiniteStoreFacts, LedgerCause,
+    StorePreparationFailureClass, StoreRuntimeError, StoreTerminalCause,
 };
 
 use super::{Arc, AtomicUsize, Ordering, StopAtPoll, common};
@@ -17,29 +17,38 @@ use crate::PostProcessControl;
 use crate::normals::{NormalMode, input, kernel};
 use crate::operation::runtime;
 
-// Four startup account owners each complete one clone and one typed handle.
-const ENTRY_WORK: u64 = 8;
+// Finite startup keeps fallback storage, its lease, and the original terminal account:
+// three owners each complete one clone and one typed handle. The terminal account replaces
+// the dynamic evidence account and lease, and finish moves it without another share.
+// Later prefixes and limits drop by two; scratch, kernel, and polling boundaries are unchanged.
+const ENTRY_WORK: u64 = 6;
 
 fn with_operation<T>(
     scene: &ValidatedScene,
     control: PostProcessControl,
     mut body: impl for<'inv> FnMut(&mut runtime::EditOperation<'inv>, runtime::RuntimeKeys) -> T,
-) -> (CanonicalOperationPublication, T) {
+) -> (FiniteCanonicalOperationPublication, T) {
     runtime::with_test_operation(scene, control, move |operation, keys| {
-        let initial = operation
-            .producer_host()
-            .dimension_state(keys.work)
-            .unwrap();
-        assert_eq!(
-            (initial.attempted(), initial.consumed()),
-            (ENTRY_WORK, ENTRY_WORK)
-        );
         assert!(!operation.physical_storage_snapshot().poisoned());
         body(operation, keys)
     })
 }
 
-fn live_storage(operation: &runtime::EditOperation) -> (u64, u64, bool) {
+fn with_execution<R, E: From<StoreRuntimeError>>(
+    operation: &mut runtime::EditOperation<'_>,
+    keys: runtime::RuntimeKeys,
+    body: impl FnOnce(&mut runtime::ActiveRuntime<'_>) -> Result<R, E>,
+) -> Result<R, E> {
+    runtime::with_execution(operation, keys, |active| {
+        assert_eq!(
+            active.work_counters(keys.work).unwrap(),
+            (ENTRY_WORK, ENTRY_WORK, 0)
+        );
+        body(active)
+    })
+}
+
+fn live_storage(operation: &mut runtime::EditOperation) -> (u64, u64, bool) {
     let physical = operation.physical_storage_snapshot();
     (
         physical.live_retained_bytes(),
@@ -49,38 +58,40 @@ fn live_storage(operation: &runtime::EditOperation) -> (u64, u64, bool) {
 }
 
 fn finish(
-    operation: CanonicalOperationPublication,
+    operation: FiniteCanonicalOperationPublication,
     keys: runtime::RuntimeKeys,
     failure: Option<StorePreparationFailureClass>,
     attempted: u64,
     consumed: u64,
 ) {
-    let CanonicalOperationPublication::Unchanged(prepared) = operation else {
+    let FiniteCanonicalOperationPublication::EvidenceOnly(prepared) = operation else {
         panic!("resolved normal work must retain its unchanged request");
     };
-    let evidence: StoreLedgerEvidence = match (prepared, failure) {
-        (PreparedStoreEvidenceOnlyOutcome::Success(success), None) => {
-            success.handoff().ledger_evidence
+    let (facts, _terminal_account): (FiniteStoreFacts, _) = match (prepared, failure) {
+        (PreparedFiniteStoreEvidenceOnlyOutcome::Success(success), None) => {
+            let handoff = success.handoff();
+            (handoff.facts, handoff.terminal_account)
         }
-        (PreparedStoreEvidenceOnlyOutcome::MinimalFallback(fallback), Some(_)) => {
-            fallback.handoff().ledger_evidence
+        (PreparedFiniteStoreEvidenceOnlyOutcome::MinimalFallback(fallback), Some(_)) => {
+            let handoff = fallback.handoff();
+            (handoff.facts, handoff.terminal_account)
         }
         _ => panic!("an ignored normal execution failure must prevent success"),
     };
-    match (evidence.header().terminal_cause(), failure) {
+    match (facts.header().terminal_cause(), failure) {
         (StoreTerminalCause::Success, None) => {}
         (StoreTerminalCause::Failure(cause), Some(expected)) => assert_eq!(cause.class(), expected),
         _ => panic!("normal execution must keep the selected terminal cause"),
     }
-    let work = evidence.dimension(keys.work).unwrap();
+    let work = facts.dimension(keys.work).unwrap();
     assert_eq!((work.attempted(), work.consumed()), (attempted, consumed));
-    assert_eq!(evidence.header().current_live_bytes(), 0);
-    assert_eq!(evidence.header().active_reservations(), 0);
-    let scratch = evidence.dimension(keys.scratch).unwrap();
+    assert_eq!(facts.header().current_live_bytes(), 0);
+    assert_eq!(facts.header().active_reservations(), 0);
+    let scratch = facts.dimension(keys.scratch).unwrap();
     assert_eq!(scratch.current_live_bytes(), 0);
     assert_eq!(scratch.pending_publication(), 0);
     assert_eq!(scratch.committed_canonical_output(), 0);
-    let canonical = evidence.dimension(keys.canonical).unwrap();
+    let canonical = facts.dimension(keys.canonical).unwrap();
     assert_eq!(canonical.pending_publication(), 0);
     assert_eq!(canonical.committed_canonical_output(), 0);
 }
@@ -122,7 +133,7 @@ fn assert_budget_rejection(
 }
 
 fn restrict_work(
-    operation: &mut runtime::EditOperation,
+    active: &mut runtime::ActiveRuntime<'_>,
     keys: runtime::RuntimeKeys,
     class: CounterClass,
     allowed: u64,
@@ -132,8 +143,7 @@ fn restrict_work(
     } else {
         runtime::MAX_WORK
     };
-    operation
-        .producer_host()
+    active
         .tighten_dimension_policy(keys.work, DimensionPolicy::counter(attempted, allowed, 0))
         .unwrap();
 }
@@ -145,8 +155,8 @@ fn projected_flat_cancellation_keeps_periodic_and_final_short_region_prefixes() 
     // Twenty-one faces fit 252 credits; the next face polls before its reads.
     const FACES: usize = 66;
     const CORNERS: u64 = 198;
-    const BEFORE_FACES: u64 = 20; // startup8 + share2 + init7 + validation3
-    const COMPLETE: u64 = 284; // BEFORE_FACES + 66*4 semantic actions
+    const BEFORE_FACES: u64 = 18; // startup6 + share2 + init7 + validation3
+    const COMPLETE: u64 = 282; // BEFORE_FACES + 66*4 semantic actions
     let mut obj = b"v 0 0 0\nv 1 0 0\nv 0 1 0\n".to_vec();
     for _ in 0..FACES {
         obj.extend_from_slice(b"f 1 2 3\n");
@@ -168,11 +178,11 @@ fn projected_flat_cancellation_keeps_periodic_and_final_short_region_prefixes() 
     for (stop, completed) in [
         (0, ENTRY_WORK),
         (1, ENTRY_WORK),
-        (2, 17),
+        (2, 15),
         (3, BEFORE_FACES),
-        (4, 104),
-        (5, 188),
-        (6, 272),
+        (4, 102),
+        (5, 186),
+        (6, 270),
         (7, COMPLETE),
         (8, COMPLETE),
         (usize::MAX, COMPLETE),
@@ -189,7 +199,7 @@ fn projected_flat_cancellation_keeps_periodic_and_final_short_region_prefixes() 
                 polls.store(0, Ordering::Relaxed);
                 let physical = live_storage(operation);
                 let mut returned_output = false;
-                let result = runtime::with_execution(operation, keys, |active| {
+                let result = with_execution(operation, keys, |active| {
                     let generated = input::generate(
                         input::NormalInput::projected(
                             positions,
@@ -247,11 +257,11 @@ fn projected_smooth_cancellation_keeps_ordering_and_final_short_prefixes() {
     const FACES: usize = 90;
     const CORNERS: u64 = 3 * FACES as u64;
     // 9 output +9 order/tail +3 cache chunks, three shares, three Position validations,
-    // and90 face evaluations: 8+6+21+3+90=128 before ordering.
-    const BEFORE_ORDER: u64 = 128;
+    // and90 face evaluations: 6+6+21+3+90=126 before ordering.
+    const BEFORE_ORDER: u64 = 126;
     // Ordering adds3 group +1 reset +9 histogram +1 prefix +9 scatter chunks =23 actions.
     // 272 candidate visits, 270 outputs, 3 starts and3 finishes:548 actions.
-    const COMPLETE: u64 = 699;
+    const COMPLETE: u64 = 697;
     let mut obj = b"v 0 0 0\nv 1 0 0\nv 0 1 0\ns 1\n".to_vec();
     for _ in 0..FACES {
         obj.extend_from_slice(b"f 1 2 3\n");
@@ -268,9 +278,9 @@ fn projected_smooth_cancellation_keeps_ordering_and_final_short_prefixes() {
     // another eight fit before poll13; poll14 begins accumulation.
     for (stop, completed) in [
         (11, BEFORE_ORDER),
-        (12, 136),
-        (13, 144),
-        (14, 151),
+        (12, 134),
+        (13, 142),
+        (14, 149),
         (19, COMPLETE),
         (20, COMPLETE),
         (usize::MAX, COMPLETE),
@@ -287,7 +297,7 @@ fn projected_smooth_cancellation_keeps_ordering_and_final_short_prefixes() {
                 polls.store(0, Ordering::Relaxed);
                 let physical = live_storage(operation);
                 let mut returned_output = false;
-                let result = runtime::with_execution(operation, keys, |active| {
+                let result = with_execution(operation, keys, |active| {
                     let generated = input::generate(
                         input::NormalInput::projected(
                             positions,
@@ -344,32 +354,30 @@ fn enlarged_order_admission_rejects_without_retrying_the_general_algorithm() {
         8 * std::mem::size_of::<[f32; 3]>() as u64 + 8 * std::mem::size_of::<usize>() as u64;
     let (operation, (keys, completed)) =
         with_operation(&scene, PostProcessControl::default(), |operation, keys| {
-            operation
-                .producer_host()
-                .tighten_dimension_policy(
-                    keys.scratch,
-                    DimensionPolicy::reservable_bytes(0, 0, 0, limit),
-                )
-                .unwrap();
             let physical = live_storage(operation);
             let mut returned_output = false;
-            let result: Result<(), input::InputError> =
-                runtime::with_execution(operation, keys, |active| {
-                    input::generate(
-                        input::NormalInput::projected(
-                            positions,
-                            Some(&ids),
-                            None,
-                            6,
-                            NormalMode::Smooth,
-                            false,
-                        ),
-                        active,
-                        keys,
-                    )?;
-                    returned_output = true;
-                    Ok(())
-                });
+            let result: Result<(), input::InputError> = with_execution(operation, keys, |active| {
+                active
+                    .tighten_dimension_policy(
+                        keys.scratch,
+                        DimensionPolicy::reservable_bytes(0, 0, 0, limit),
+                    )
+                    .unwrap();
+                input::generate(
+                    input::NormalInput::projected(
+                        positions,
+                        Some(&ids),
+                        None,
+                        6,
+                        NormalMode::Smooth,
+                        false,
+                    ),
+                    active,
+                    keys,
+                )?;
+                returned_output = true;
+                Ok(())
+            });
             assert!(
                 !returned_output,
                 "storage rejection must not retry the general workspace"
@@ -391,7 +399,7 @@ fn enlarged_order_admission_rejects_without_retrying_the_general_algorithm() {
             assert!(value > limit);
             assert_eq!(live_storage(operation), physical);
             // Only output storage's two share units and its one six-row chunk completed.
-            let completed = 11;
+            let completed = 9;
             (keys, completed)
         });
     finish(
@@ -412,31 +420,31 @@ fn projected_dense_action_denial_keeps_sort_and_output_prefixes() {
     let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
     let positions = primitive.positions().unwrap();
     let generation = scene.generation();
-    // Flat: startup8+share2+one output chunk=11; validation12..14, face15, output16..18.
-    // Smooth: startup/share/init=17; validation18..20, face21, ordering22..25;
-    // first bucket output30, next35, final39. A hard group instead uses one proof,
+    // Flat: startup6+share2+one output chunk=9; validation10..12, face13, output14..16.
+    // Smooth: startup/share/init=15; validation16..18, face19, ordering20..23;
+    // first bucket output28, next33, final37. A hard group instead uses one proof,
     // one identity chunk, and bounded heap levels/extractions before the same candidate protocol.
     let hard_groups = [0_u32];
     for (mode, groups, allowed, complete) in [
-        (NormalMode::Flat, None, 10, 18), // Denied initialization.
-        (NormalMode::Flat, None, 11, 18), // Denied first logical Position.
-        (NormalMode::Flat, None, 14, 18), // Denied face before any face tuple.
-        (NormalMode::Flat, None, 15, 18), // Denied first output.
-        (NormalMode::Flat, None, 16, 18),
-        (NormalMode::Flat, None, 17, 18),
-        (NormalMode::Flat, None, 18, 18),
-        (NormalMode::Smooth, None, 21, 39), // Denied reset chunk.
-        (NormalMode::Smooth, None, 22, 39), // Denied histogram chunk.
-        (NormalMode::Smooth, None, 23, 39), // Denied prefix chunk.
-        (NormalMode::Smooth, None, 24, 39), // Denied scatter chunk.
-        (NormalMode::Smooth, None, 29, 39), // Denied first bucket output.
-        (NormalMode::Smooth, None, 38, 39),
-        (NormalMode::Smooth, None, 39, 39),
-        (NormalMode::Smooth, Some(hard_groups.as_slice()), 21, 41),
-        (NormalMode::Smooth, Some(hard_groups.as_slice()), 22, 41),
-        (NormalMode::Smooth, Some(hard_groups.as_slice()), 23, 41),
-        (NormalMode::Smooth, Some(hard_groups.as_slice()), 40, 41),
-        (NormalMode::Smooth, Some(hard_groups.as_slice()), 41, 41),
+        (NormalMode::Flat, None, 8, 16),  // Denied initialization.
+        (NormalMode::Flat, None, 9, 16),  // Denied first logical Position.
+        (NormalMode::Flat, None, 12, 16), // Denied face before any face tuple.
+        (NormalMode::Flat, None, 13, 16), // Denied first output.
+        (NormalMode::Flat, None, 14, 16),
+        (NormalMode::Flat, None, 15, 16),
+        (NormalMode::Flat, None, 16, 16),
+        (NormalMode::Smooth, None, 19, 37), // Denied reset chunk.
+        (NormalMode::Smooth, None, 20, 37), // Denied histogram chunk.
+        (NormalMode::Smooth, None, 21, 37), // Denied prefix chunk.
+        (NormalMode::Smooth, None, 22, 37), // Denied scatter chunk.
+        (NormalMode::Smooth, None, 27, 37), // Denied first bucket output.
+        (NormalMode::Smooth, None, 36, 37),
+        (NormalMode::Smooth, None, 37, 37),
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 19, 39),
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 20, 39),
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 21, 39),
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 38, 39),
+        (NormalMode::Smooth, Some(hard_groups.as_slice()), 39, 39),
     ] {
         for class in [CounterClass::Attempted, CounterClass::Consumed] {
             let polls = Arc::new(AtomicUsize::new(0));
@@ -449,10 +457,10 @@ fn projected_dense_action_denial_keeps_sort_and_output_prefixes() {
                 }),
                 |operation, keys| {
                     polls.store(0, Ordering::Relaxed);
-                    restrict_work(operation, keys, class, allowed);
                     let physical = live_storage(operation);
                     let mut returned_output = false;
-                    let result = runtime::with_execution(operation, keys, |active| {
+                    let result = with_execution(operation, keys, |active| {
+                        restrict_work(active, keys, class, allowed);
                         let generated = input::generate(
                             input::NormalInput::projected(
                                 positions,
@@ -517,11 +525,11 @@ fn real_runtime_kernel_output_rejection_preserves_the_written_prefix() {
             with_operation(&scene, PostProcessControl::default(), |operation, keys| {
                 let physical = live_storage(operation);
                 let allowed = ENTRY_WORK + 4 + written;
-                if written < 3 {
-                    restrict_work(operation, keys, CounterClass::Attempted, allowed);
-                }
                 let mut output = [[73.0; 3]; 3];
-                let result = runtime::with_execution(operation, keys, |active| {
+                let result = with_execution(operation, keys, |active| {
+                    if written < 3 {
+                        restrict_work(active, keys, CounterClass::Attempted, allowed);
+                    }
                     kernel::generate_into(
                         kernel::Input {
                             positions: primitive.positions().unwrap(),
@@ -680,8 +688,8 @@ fn projected_sparse_action_denial_keeps_logical_read_face_and_output_prefixes() 
     assert!(!kernel::PositionSource::is_f64(&positions));
     let generation = scene.generation();
     // Sparse comparisons are pure internal reads. The semantic sequence equals the dense
-    // triangle: startup8+share2+init1, three logical validations, face1, three outputs.
-    for allowed in [10, 11, 12, 13, 14, 15, 16, 17, 18] {
+    // triangle: startup6+share2+init1, three logical validations, face1, three outputs.
+    for allowed in [8, 9, 10, 11, 12, 13, 14, 15, 16] {
         for class in [CounterClass::Attempted, CounterClass::Consumed] {
             let polls = Arc::new(AtomicUsize::new(0));
             let (operation, (keys, failure)) = with_operation(
@@ -693,10 +701,10 @@ fn projected_sparse_action_denial_keeps_logical_read_face_and_output_prefixes() 
                 }),
                 |operation, keys| {
                     polls.store(0, Ordering::Relaxed);
-                    restrict_work(operation, keys, class, allowed);
                     let physical = live_storage(operation);
                     let mut returned_output = false;
-                    let result = runtime::with_execution(operation, keys, |active| {
+                    let result = with_execution(operation, keys, |active| {
+                        restrict_work(active, keys, class, allowed);
                         let generated = input::generate(
                             input::NormalInput::projected(
                                 positions,
@@ -716,8 +724,8 @@ fn projected_sparse_action_denial_keeps_logical_read_face_and_output_prefixes() 
                         returned_output = true;
                         Ok::<_, input::InputError>(())
                     });
-                    assert_eq!(returned_output, allowed == 18);
-                    let failure = if allowed == 18 {
+                    assert_eq!(returned_output, allowed == 16);
+                    let failure = if allowed == 16 {
                         result.unwrap();
                         None
                     } else {

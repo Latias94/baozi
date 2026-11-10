@@ -370,6 +370,12 @@ fn parse_mtl<'op, 'session>(
     library: &mut MaterialLibrary<'session>,
 ) -> ParseResult<()> {
     let mut current = None;
+    let mut tokens = MtlTokenBuffer {
+        values: children
+            .services()?
+            .metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
+        comment_start: None,
+    };
     let mut scan_scratch = parser::TokenScanScratch::new();
 
     let record_work = children.bind_group([ImportWorkClass::Records])?;
@@ -384,7 +390,13 @@ fn parse_mtl<'op, 'session>(
         let raw_line = children.child(&record_work, [1], |work| {
             work.run([1], || Ok::<_, ParseFailure>(decoded_line.text()))
         })?;
-        let tokens = tokenize_mtl(children, token_work, &mut scan_scratch, &decoded_line)?;
+        tokenize_mtl(
+            children,
+            token_work,
+            &mut scan_scratch,
+            &decoded_line,
+            &mut tokens,
+        )?;
         let exec = &mut children.services()?;
         let keyword = tokens.first().map(|token| token.text);
         let allowed_value = match keyword {
@@ -580,6 +592,7 @@ fn parse_mtl<'op, 'session>(
         }
     }
 
+    drop(tokens);
     flush_material(&mut children.services()?, library, current)
 }
 
@@ -649,39 +662,36 @@ fn insert_metadata<'session>(
 }
 
 #[derive(Clone, Copy)]
-struct MtlToken<'line> {
-    text: &'line str,
+struct MtlToken<'input> {
+    text: &'input str,
     start: usize,
     end: usize,
     column: u32,
 }
 
-struct MtlTokenBuffer<'session, 'line> {
-    values: MeteredVec<'session, MtlToken<'line>>,
+struct MtlTokenBuffer<'session, 'input> {
+    values: MeteredVec<'session, MtlToken<'input>>,
     comment_start: Option<usize>,
 }
 
-impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
-    type Target = [MtlToken<'line>];
+impl<'input> std::ops::Deref for MtlTokenBuffer<'_, 'input> {
+    type Target = [MtlToken<'input>];
 
     fn deref(&self) -> &Self::Target {
         self.values.as_slice()
     }
 }
 
-fn tokenize_mtl<'op, 'session, 'line>(
+fn tokenize_mtl<'op, 'session, 'input>(
     children: &mut ParseChildren<'_, 'op, 'session>,
     token_work: &parser::TokenWorkLayouts<'op>,
     scan_scratch: &mut parser::TokenScanScratch,
-    decoded_line: &'line TextInputLine<'_, '_>,
-) -> ParseResult<MtlTokenBuffer<'session, 'line>> {
+    decoded_line: &TextInputLine<'input, '_>,
+    tokens: &mut MtlTokenBuffer<'session, 'input>,
+) -> ParseResult<()> {
+    tokens.values.truncate(0);
+    tokens.comment_start = None;
     let line = decoded_line.text();
-    let mut tokens = MtlTokenBuffer {
-        values: children
-            .services()?
-            .metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
-        comment_start: None,
-    };
     tokens.comment_start = parser::scan_token_ranges(
         children,
         &token_work.scan,
@@ -715,7 +725,7 @@ fn tokenize_mtl<'op, 'session, 'line>(
             })
         },
     )?;
-    Ok(tokens)
+    Ok(())
 }
 
 fn parse_color(

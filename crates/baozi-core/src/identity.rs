@@ -463,6 +463,19 @@ macro_rules! define_owner_qualified_identity {
 
 define_owner_qualified_identity!(
     /// A generation- and logical-mesh-qualified handle to a primitive.
+    ///
+    /// For handles that successfully resolve in the same current
+    /// [`ValidatedScene`](crate::ValidatedScene), [`Ord`] follows forward
+    /// [`ValidatedScene::meshes`](crate::ValidatedScene::meshes) order, then forward
+    /// [`LogicalMeshRef::primitives`](crate::LogicalMeshRef::primitives) order
+    /// within each mesh. References obtained through repeated placements of the
+    /// same primitive have equal handles.
+    ///
+    /// This ordering does not validate a handle. Outside that same-Scene scope,
+    /// including stale or foreign handles, `Ord` remains a lawful total order
+    /// but has no canonical source-order meaning. The guarantee does not
+    /// describe original file indices, physical storage order, persistent
+    /// identity, or correspondence across edits or generations.
     PrimitiveLocalIndex,
     PrimitiveId,
     Primitive

@@ -1,8 +1,17 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "test hooks retain the original inline runtime failure without allocating another owner"
+)]
+
 use super::*;
+use crate::operation::runtime::{ActiveRuntime, RuntimeKeys};
 use crate::operation::{PostProcessProgressPhase, PostProcessProgressUnit};
 use baozi_core::__scene_integration::integration::SceneVectorValues;
 use baozi_core::{AttributeData, AttributeDomain};
-use baozi_operation::{ProgressDecision, ProgressEvent, StoreTerminalCause};
+use baozi_operation::{
+    CapacityPlan, CounterClass, DimensionPolicy, LedgerCause, ProgressDecision, ProgressEvent,
+    StoreRuntimeError, StoreTerminalCause,
+};
 use std::cell::RefCell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +40,20 @@ pub(crate) enum Event {
     },
     Preparing(Branch),
     Frozen(StoreTerminalCause),
+    BeforePreparedOutput,
+    PreparedPrefixReady(usize),
+    PreparationReturned(bool),
+    PreparationCancellationObserved,
+    FinalProgressCancelled,
+    ObserverDropped,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frontier {
+    OutputStorage,
+    BackfillAppend,
+    PreparationReturn,
+    FinalProgress,
 }
 
 struct Buffer {
@@ -46,6 +69,14 @@ struct Trace {
     corner_origins: Vec<u32>,
     face_offsets: Vec<u32>,
     normal_bits: Vec<u64>,
+    frontier: Option<Frontier>,
+    keys: Option<RuntimeKeys>,
+    work_before: Option<(u64, u64, u64)>,
+    work_after_tightening: Option<(u64, u64, u64)>,
+    live_capacity_bytes: u64,
+    output_reservation_bytes: u64,
+    pending_target: Option<PrimitiveId>,
+    prefix_targets: Vec<PrimitiveId>,
 }
 
 thread_local! {
@@ -54,10 +85,146 @@ thread_local! {
 
 // Record only scalar facts about the real owners. No callback or substitute owner runs here.
 pub(crate) fn record(event: Event) {
+    input::selection_tests::record_cleanup(event);
     TRACE.with_borrow_mut(|trace| {
         if let Some(trace) = trace {
             trace.events.push(event);
         }
+    });
+}
+
+pub(super) fn before_prepared_output(
+    operation: &mut ActiveRuntime<'_>,
+    keys: RuntimeKeys,
+    prepared: &input::PreparedPrimitive,
+    selected: &input::SelectedPrimitives<'_>,
+) -> Result<(), StoreRuntimeError> {
+    TRACE.with_borrow_mut(|trace| {
+        let Some(trace) = trace.as_mut().filter(|trace| trace.frontier.is_some()) else {
+            return Ok(());
+        };
+        assert!(trace.buffers.is_empty());
+        trace.events.clear();
+        trace.events.push(Event::BeforePreparedOutput);
+        trace.keys = Some(keys);
+        trace.pending_target = Some(prepared.target);
+        if let Some(values) = selected.scratch_values() {
+            trace.buffers.push(Buffer {
+                name: "selected",
+                address: values.as_ptr() as usize,
+                len: values.len(),
+            });
+        }
+        assert!(prepared.normals.is_none());
+        assert!(prepared.tangents.is_none());
+        assert!(!prepared.remove_tangents);
+        let origins = prepared.origins.as_ref().expect("pending lowered payload");
+        trace.buffers.push(Buffer {
+            name: "triangles",
+            address: origins.triangles.values().as_ptr() as usize,
+            len: origins.triangles.values().len(),
+        });
+        trace.buffers.push(Buffer {
+            name: "face_offsets",
+            address: origins.face_offsets.values().as_ptr() as usize,
+            len: origins.face_offsets.values().len(),
+        });
+        trace
+            .corner_origins
+            .extend(origins.triangles.values().iter().flatten());
+        trace.face_offsets.extend(origins.face_offsets.values());
+        trace.live_capacity_bytes = u64::try_from(
+            selected.scratch_values().map_or(0, |values| {
+                values.capacity() * size_of::<baozi_core::PrimitiveRef<'_>>()
+            }) + origins.triangles.values().capacity() * size_of::<[u32; 3]>()
+                + origins.face_offsets.values().capacity() * size_of::<u32>(),
+        )
+        .unwrap();
+        trace.output_reservation_bytes =
+            CapacityPlan::for_type::<input::PreparedPrimitive>(0, 0, selected.as_slice().len())
+                .unwrap()
+                .envelope_delta_bytes()
+                .unwrap();
+        if trace.frontier == Some(Frontier::OutputStorage) {
+            trace.work_before = Some(operation.work_counters(keys.work)?);
+            operation
+                .tighten_dimension_policy(
+                    keys.scratch,
+                    DimensionPolicy::reservable_bytes(0, 0, 0, trace.live_capacity_bytes),
+                )
+                .expect("the actual currently live capacities must fit before output admission");
+            trace.work_after_tightening = Some(operation.work_counters(keys.work)?);
+            assert_eq!(trace.work_before, trace.work_after_tightening);
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn prepared_prefix_ready(
+    operation: &mut ActiveRuntime<'_>,
+    keys: RuntimeKeys,
+    prepared: &input::PreparedPrimitive,
+    output: &ScratchVec<input::PreparedPrimitive>,
+) -> Result<(), StoreRuntimeError> {
+    TRACE.with_borrow_mut(|trace| {
+        let Some(trace) = trace.as_mut().filter(|trace| trace.frontier.is_some()) else {
+            return Ok(());
+        };
+        let prefix = output.values();
+        trace.events.push(Event::PreparedPrefixReady(prefix.len()));
+        assert_eq!(trace.pending_target, Some(prepared.target));
+        for previous in prefix {
+            assert!(previous.origins.is_none());
+            assert!(previous.normals.is_none());
+            assert!(previous.tangents.is_none());
+            assert!(!previous.remove_tangents);
+        }
+        if trace.frontier == Some(Frontier::BackfillAppend) {
+            assert_eq!(prefix.len(), 1, "deny the second physical backfill append");
+            trace.buffers.push(Buffer {
+                name: "prepared",
+                address: prefix.as_ptr() as usize,
+                len: prefix.len(),
+            });
+            trace
+                .prefix_targets
+                .extend(prefix.iter().map(|row| row.target));
+            let before = operation.work_counters(keys.work)?;
+            assert_eq!(before.2, 0);
+            trace.work_before = Some(before);
+            operation
+                .tighten_dimension_policy(
+                    keys.work,
+                    DimensionPolicy::counter(before.0 + 2, before.1 + 1, 0),
+                )
+                .expect("tightening must retain the literal completed prefix");
+            trace.work_after_tightening = Some(operation.work_counters(keys.work)?);
+            assert_eq!(trace.work_after_tightening, Some(before));
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn preparation_returned(prepared: &input::PreparedSelection) {
+    TRACE.with_borrow_mut(|trace| {
+        let Some(trace) = trace.as_mut().filter(|trace| trace.frontier.is_some()) else {
+            return;
+        };
+        let changed = match prepared {
+            input::PreparedSelection::Unchanged => false,
+            input::PreparedSelection::Prepared(output) => {
+                trace.buffers.push(Buffer {
+                    name: "prepared",
+                    address: output.values().as_ptr() as usize,
+                    len: output.values().len(),
+                });
+                trace
+                    .prefix_targets
+                    .extend(output.values().iter().map(|row| row.target));
+                true
+            }
+        };
+        trace.events.push(Event::PreparationReturned(changed));
     });
 }
 
@@ -132,6 +299,12 @@ impl Recording {
         Self
     }
 
+    fn start_at(frontier: Frontier) -> Self {
+        let recording = Self::start();
+        TRACE.with_borrow_mut(|trace| trace.as_mut().unwrap().frontier = Some(frontier));
+        recording
+    }
+
     fn finish(self) -> Trace {
         TRACE.with_borrow_mut(|trace| trace.take().unwrap())
     }
@@ -201,7 +374,8 @@ fn bits(attribute: baozi_core::AttributeRef<'_>) -> Vec<u64> {
             values.iter().map(|v| u64::from(v.to_bits())).collect()
         }
         AttributeData::DenseF64 { values, .. } => values.iter().map(|v| v.to_bits()).collect(),
-        _ => panic!("the fixture uses dense floating fields"),
+        AttributeData::DenseU32 { values, .. } => values.iter().copied().map(u64::from).collect(),
+        _ => panic!("the fixture uses dense floating or unsigned fields"),
     }
 }
 
@@ -433,7 +607,8 @@ fn assert_failure(control: PostProcessControl, branch: Branch, expected: Expecte
         .expect("the real fallback retains its ledger");
     assert_eq!(resources.committed_canonical_bytes(), 0);
     assert_eq!(resources.published_outcome_evidence_bytes(), 0);
-    assert_eq!(resources.published_terminal_evidence_records(), 2);
+    // Finite publication owns one admitted fallback part; facts do not allocate another record.
+    assert_eq!(resources.published_terminal_evidence_records(), 1);
     assert_eq!(resources.current_live_bytes(), 0);
     assert_eq!(resources.active_reservations(), 0);
     trace
@@ -510,4 +685,393 @@ fn changed_selection_drops_real_scratch_before_pending_minimal_fallback_preparat
         !trace.events.contains(&Event::ValidationProgress),
         "evidence failure returns genuine PendingMinimalFallback before central validation"
     );
+}
+
+fn delayed_output_fixture() -> baozi_import::ImportReport {
+    crate::test_fixtures::import_obj(
+        b"v -0.0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n\
+          vt -0.0 0.25\nvt 1 0.25\nvt 1 1\nvt 0 1\nvn -0.0 0 1\n\
+          o prefix-first\nf 1/1/1 2/2/1 3/3/1\n\
+          o prefix-second\nf 1/1/1 3/3/1 4/4/1\n\
+          o pending-quad\nf 1/1/1 2/2/1 3/3/1 4/4/1\n\
+          o unselected\nf 2/2/1 3/3/1 4/4/1\n",
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PrimitiveSnapshot {
+    target: PrimitiveId,
+    topology: baozi_core::TopologyKind,
+    indices: Vec<u32>,
+    face_sizes: Option<Vec<u32>>,
+    attribute_layout: Vec<String>,
+    attribute_bits: Vec<Vec<u64>>,
+}
+
+fn primitive_snapshots(scene: &ValidatedScene) -> Vec<PrimitiveSnapshot> {
+    scene
+        .meshes()
+        .flat_map(|mesh| mesh.primitives())
+        .map(|primitive| PrimitiveSnapshot {
+            target: primitive.id(),
+            topology: primitive.topology(),
+            indices: primitive.indices().unwrap().to_vec(),
+            face_sizes: primitive.polygon_face_sizes().map(<[u32]>::to_vec),
+            attribute_layout: primitive
+                .attributes()
+                .map(|attribute| {
+                    format!(
+                        "{:?}/{:?}/{}",
+                        attribute.semantic(),
+                        attribute.domain(),
+                        attribute.lanes()
+                    )
+                })
+                .collect(),
+            attribute_bits: primitive.attributes().map(bits).collect(),
+        })
+        .collect()
+}
+
+fn unattached_failure_after_source_drop(
+    failure: PostProcessRunFailure,
+    import: baozi_import::ImportEvidence,
+    original: &[PrimitiveSnapshot],
+    expect_staging: bool,
+) -> PreparationFailure {
+    assert_eq!(
+        failure.input().generation(),
+        original[0].target.generation()
+    );
+    assert!(import.matches_scene(failure.input()));
+    assert_eq!(primitive_snapshots(failure.input()), original);
+    let (scene, error) = failure.into_parts();
+    drop(scene);
+    drop(import);
+    let PostProcessRunError::Preparation { failure } = error else {
+        panic!("typed preparation failure");
+    };
+    assert!(matches!(&failure.owner, FailureOwner::None));
+    let resources = failure.resources().expect("the original unattached ledger");
+    assert_eq!(resources.current_live_bytes(), 0);
+    assert_eq!(resources.active_reservations(), 0);
+    assert_eq!(resources.committed_canonical_bytes(), 0);
+    assert_eq!(resources.published_outcome_evidence_bytes(), 0);
+    assert_eq!(resources.published_terminal_evidence_records(), 0);
+    assert_eq!(resources.peak_staging_bytes() > 0, expect_staging);
+    failure
+}
+
+impl Trace {
+    fn assert_unattached(&self) {
+        assert!(!self.events.iter().any(|event| matches!(
+            event,
+            Event::Planned
+                | Event::Materializing
+                | Event::BuildingEvidence
+                | Event::Validating
+                | Event::ValidationProgress
+                | Event::PublicationProgress
+                | Event::PreparedEditDropped
+                | Event::Preparing(_)
+        )));
+        assert!(
+            !self
+                .buffers
+                .iter()
+                .any(|buffer| buffer.name == "replacements")
+        );
+    }
+
+    fn assert_unchanged_selection_dropped(&self, selection_len: usize) {
+        let returned = self.at(Event::PreparationReturned(false));
+        let drops: Vec<_> = self
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                Event::ScratchDropped {
+                    address,
+                    len,
+                    capacity,
+                } => {
+                    assert!(
+                        index < returned,
+                        "selection cleanup precedes producer return"
+                    );
+                    assert_eq!(*len, selection_len);
+                    assert!(*capacity >= *len);
+                    Some(*address)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drops.len(),
+            usize::from(selection_len > 1),
+            "only a many-reader selection owns scratch backing"
+        );
+        assert!(self.buffers.is_empty());
+        self.assert_unattached();
+    }
+}
+
+#[test]
+fn first_lowered_payload_drops_when_actual_delayed_output_storage_is_denied() {
+    let (scene, import) = delayed_output_fixture().into_parts();
+    let original = primitive_snapshots(&scene);
+    assert_eq!(original.len(), 4);
+    assert_eq!(original[0].topology, baozi_core::TopologyKind::TriangleList);
+    assert_eq!(original[1].topology, baozi_core::TopologyKind::TriangleList);
+    assert_eq!(original[2].topology, baozi_core::TopologyKind::Polygons);
+    let targets = [original[2].target, original[0].target, original[1].target];
+    let recording = Recording::start_at(Frontier::OutputStorage);
+    let failure = prepare_triangles(
+        scene,
+        &targets,
+        TrianglePreparationOptions::default(),
+        PostProcessControl::default(),
+    )
+    .unwrap_err();
+    let trace = recording.finish();
+    trace.assert_unattached();
+    assert_eq!(trace.pending_target, Some(original[2].target));
+    assert_eq!(trace.buffers.len(), 3);
+    assert_eq!(trace.corner_origins.len(), 6);
+    assert_eq!(trace.face_offsets, [0, 2]);
+    assert!(!trace.events.iter().any(|event| matches!(
+        event,
+        Event::PreparedPrefixReady(_) | Event::PreparationReturned(_)
+    )));
+    for name in ["triangles", "face_offsets"] {
+        assert!(trace.at(Event::BeforePreparedOutput) < trace.dropped(name));
+        assert!(trace.dropped(name) < trace.dropped("selected"));
+    }
+    let failure = unattached_failure_after_source_drop(failure, import, &original, true);
+    let PreparationCause::Runtime(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+        dimension,
+        class,
+        value,
+        limit,
+    })) = failure.cause()
+    else {
+        panic!("the real output storage admission must fail: {failure:?}");
+    };
+    assert_eq!(*dimension, trace.keys.unwrap().scratch);
+    assert_eq!(*class, CounterClass::Live);
+    assert_eq!(*limit, trace.live_capacity_bytes);
+    assert_eq!(*value, *limit + trace.output_reservation_bytes);
+    let before = trace.work_before.unwrap();
+    assert_eq!(before.2, 0);
+    assert_eq!(trace.work_after_tightening, Some(before));
+    let resources = failure.resources().unwrap();
+    assert_eq!(resources.attempted_work_actions(), before.0);
+    assert_eq!(resources.consumed_work_actions(), before.1);
+}
+
+#[test]
+fn denied_second_backfill_append_drops_real_initialized_prefix_and_pending_lowered_payload() {
+    let (scene, import) = delayed_output_fixture().into_parts();
+    let original = primitive_snapshots(&scene);
+    let targets = [original[2].target, original[1].target, original[0].target];
+    let recording = Recording::start_at(Frontier::BackfillAppend);
+    let failure = prepare_triangles(
+        scene,
+        &targets,
+        TrianglePreparationOptions::default(),
+        PostProcessControl::default(),
+    )
+    .unwrap_err();
+    let trace = recording.finish();
+    trace.assert_unattached();
+    assert_eq!(trace.pending_target, Some(original[2].target));
+    assert_eq!(trace.prefix_targets, [original[0].target]);
+    assert_eq!(trace.buffers.len(), 4);
+    assert_eq!(trace.corner_origins.len(), 6);
+    assert_eq!(trace.face_offsets, [0, 2]);
+    assert!(trace.at(Event::BeforePreparedOutput) < trace.at(Event::PreparedPrefixReady(1)));
+    assert!(trace.at(Event::PreparedPrefixReady(1)) < trace.dropped("prepared"));
+    for name in ["triangles", "face_offsets"] {
+        assert!(trace.dropped("prepared") < trace.dropped(name));
+        assert!(trace.dropped(name) < trace.dropped("selected"));
+    }
+    assert!(!trace.events.iter().any(|event| matches!(
+        event,
+        Event::PreparedPrefixReady(2..) | Event::PreparationReturned(_)
+    )));
+    let failure = unattached_failure_after_source_drop(failure, import, &original, true);
+    let PreparationCause::Runtime(StoreRuntimeError::Ledger(LedgerCause::LimitExceeded {
+        dimension,
+        class,
+        value,
+        limit,
+    })) = failure.cause()
+    else {
+        panic!("the second backfill append admission must fail: {failure:?}");
+    };
+    let before = trace.work_before.unwrap();
+    assert_eq!(before.2, 0);
+    assert_eq!(trace.work_after_tightening, Some(before));
+    assert_eq!(*dimension, trace.keys.unwrap().work);
+    assert_eq!(*class, CounterClass::Consumed);
+    assert_eq!((*value, *limit), (before.1 + 2, before.1 + 1));
+    let resources = failure.resources().unwrap();
+    assert_eq!(resources.attempted_work_actions(), before.0 + 2);
+    assert_eq!(resources.consumed_work_actions(), before.1 + 1);
+}
+
+struct CancelAfterPreparation;
+
+impl baozi_operation::CancellationSignal for CancelAfterPreparation {
+    fn is_cancelled(&self) -> bool {
+        TRACE.with_borrow_mut(|trace| {
+            let Some(trace) = trace else { return false };
+            if !trace
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::PreparationReturned(_)))
+            {
+                return false;
+            }
+            trace.events.push(Event::PreparationCancellationObserved);
+            true
+        })
+    }
+}
+
+#[test]
+fn successful_preparation_exit_cancels_both_real_results_before_attachment() {
+    for changed in [false, true] {
+        let (scene, import) = delayed_output_fixture().into_parts();
+        let original = primitive_snapshots(&scene);
+        let count = if changed { 3 } else { 2 };
+        let targets: Vec<_> = original[..count]
+            .iter()
+            .rev()
+            .map(|primitive| primitive.target)
+            .collect();
+        let recording = Recording::start_at(Frontier::PreparationReturn);
+        let failure = prepare_triangles(
+            scene,
+            &targets,
+            TrianglePreparationOptions::default(),
+            PostProcessControl::default().with_cancellation_signal(CancelAfterPreparation),
+        )
+        .unwrap_err();
+        let trace = recording.finish();
+        trace.assert_unattached();
+        let returned = trace.at(Event::PreparationReturned(changed));
+        let cancelled = trace.at(Event::PreparationCancellationObserved);
+        assert!(returned < cancelled);
+        assert_eq!(
+            trace
+                .events
+                .iter()
+                .filter(|event| **event == Event::PreparationCancellationObserved)
+                .count(),
+            1,
+            "known-error terminal cleanup must not poll again"
+        );
+        if changed {
+            assert_eq!(
+                trace.prefix_targets,
+                original[..3]
+                    .iter()
+                    .map(|primitive| primitive.target)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(trace.pending_target, Some(original[2].target));
+            assert_eq!(trace.corner_origins.len(), 6);
+            assert_eq!(trace.face_offsets, [0, 2]);
+            assert!(trace.dropped("selected") < returned);
+            for name in ["triangles", "face_offsets"] {
+                assert!(cancelled < trace.dropped(name));
+                assert!(trace.dropped(name) < trace.dropped("prepared"));
+            }
+        } else {
+            trace.assert_unchanged_selection_dropped(count);
+        }
+        let failure = unattached_failure_after_source_drop(failure, import, &original, true);
+        assert!(matches!(
+            failure.cause(),
+            PreparationCause::Control(crate::PostProcessControlCause::Cancelled {
+                origin: crate::PostProcessCancellationOrigin::Signal,
+            })
+        ));
+    }
+}
+
+struct CancelFinalProgress {
+    selection_len: usize,
+}
+
+impl baozi_operation::ProgressObserver<PostProcessProgressPhase, PostProcessProgressUnit>
+    for CancelFinalProgress
+{
+    fn observe(
+        &mut self,
+        event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>,
+    ) -> ProgressDecision {
+        assert_eq!(event.phase(), PostProcessProgressPhase::Publication);
+        assert_eq!(event.unit(), PostProcessProgressUnit::Scene);
+        assert_eq!((event.completed(), event.total()), (1, Some(1)));
+        TRACE.with_borrow(|trace| {
+            let trace = trace.as_ref().expect("explicit final-progress recording");
+            assert!(trace.frontier == Some(Frontier::FinalProgress));
+            trace.assert_unchanged_selection_dropped(self.selection_len);
+        });
+        record(Event::FinalProgressCancelled);
+        ProgressDecision::Cancel
+    }
+}
+
+impl Drop for CancelFinalProgress {
+    fn drop(&mut self) {
+        record(Event::ObserverDropped);
+    }
+}
+
+#[test]
+fn unattached_final_observer_cancels_after_selection_cleanup_and_keeps_owned_final_control() {
+    for selection_len in [0, 1, 2] {
+        let (scene, import) = delayed_output_fixture().into_parts();
+        let original = primitive_snapshots(&scene);
+        let targets = [original[1].target, original[0].target];
+        let recording = Recording::start_at(Frontier::FinalProgress);
+        let failure = prepare_triangles(
+            scene,
+            &targets[..selection_len],
+            TrianglePreparationOptions::default(),
+            PostProcessControl::default()
+                .with_progress_observer(CancelFinalProgress { selection_len }),
+        )
+        .unwrap_err();
+        let trace = recording.finish();
+        trace.assert_unchanged_selection_dropped(selection_len);
+        assert!(
+            trace.at(Event::PreparationReturned(false)) < trace.at(Event::FinalProgressCancelled)
+        );
+        assert!(trace.at(Event::FinalProgressCancelled) < trace.at(Event::ObserverDropped));
+        assert_eq!(
+            trace
+                .events
+                .iter()
+                .filter(|event| **event == Event::ObserverDropped)
+                .count(),
+            1
+        );
+        let failure =
+            unattached_failure_after_source_drop(failure, import, &original, selection_len > 1);
+        assert!(matches!(failure.cause(), PreparationCause::FinalControl));
+        let resources = failure.resources().unwrap();
+        if selection_len == 0 {
+            assert_eq!(resources.consumed_work_actions(), 0);
+        } else {
+            assert!(resources.consumed_work_actions() > 0);
+        }
+        assert_eq!(
+            resources.attempted_work_actions(),
+            resources.consumed_work_actions()
+        );
+    }
 }

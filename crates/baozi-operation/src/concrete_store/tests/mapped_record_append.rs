@@ -87,6 +87,7 @@ fn publish_mapped_prefix_source(account: &PhysicalStorageAccount) -> MappedPrefi
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("source publication assembly");
     let sequence = assembly
+        .ordinary()
         .try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("source sequence plan"),
             TestTag,
@@ -94,6 +95,7 @@ fn publish_mapped_prefix_source(account: &PhysicalStorageAccount) -> MappedPrefi
         )
         .expect("source sequence");
     let bytes = assembly
+        .ordinary()
         .try_retain_canonical_bytes(
             BytesPlan::new(2).expect("source bytes plan"),
             TestTag,
@@ -101,6 +103,7 @@ fn publish_mapped_prefix_source(account: &PhysicalStorageAccount) -> MappedPrefi
         )
         .expect("source bytes");
     let root = assembly
+        .ordinary()
         .try_retain_canonical_records(
             RecordPlan::new(2, 2).expect("source record plan"),
             TestRootTag,
@@ -117,6 +120,7 @@ fn publish_mapped_prefix_source(account: &PhysicalStorageAccount) -> MappedPrefi
         )
         .expect("source records");
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("source evidence plan"),
             TestTag,
@@ -186,15 +190,19 @@ fn mapped_prefix_retargets_historical_references_and_appends_exact_row() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("mapped-prefix assembly");
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let sequence = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let bytes = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let root = assembly
+        .ordinary()
         .try_rewrite_canonical_records_with_mapped_prefix_controlled(
             &source.canonical,
             source.canonical.root_ref(),
@@ -214,6 +222,7 @@ fn mapped_prefix_retargets_historical_references_and_appends_exact_row() {
         )
         .expect("mapped-prefix records");
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             TestTag,
@@ -274,18 +283,22 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("shape-rejection assembly");
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let _sequence = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let _bytes = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert_eq!(
         assembly
+            .ordinary()
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
                 &source.canonical,
                 source.canonical.root_ref(),
@@ -298,11 +311,12 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
             .expect_err("wrong source shape must reject"),
         StoreRuntimeError::Build(StoreBuildError::capacity_envelope_violated())
     );
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_live_storage_unchanged(before, account.snapshot());
 
     assert_eq!(
         assembly
+            .ordinary()
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
                 &source.canonical,
                 source.canonical.root_ref(),
@@ -315,11 +329,12 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
             .expect_err("destination field mismatch must reject"),
         StoreRuntimeError::Build(StoreBuildError::invalid_record_width())
     );
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_live_storage_unchanged(before, account.snapshot());
 
     assert_eq!(
         assembly
+            .ordinary()
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
                 &source.canonical,
                 source.canonical.root_ref(),
@@ -332,7 +347,7 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
             .expect_err("undersized destination must reject"),
         StoreRuntimeError::Build(StoreBuildError::capacity_exceeded())
     );
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_live_storage_unchanged(before, account.snapshot());
 
     drop(
@@ -362,18 +377,22 @@ fn mapped_prefix_build_failure_rolls_back_and_leaves_source_rewritable() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("build-failure assembly");
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let sequence = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let bytes = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert_eq!(
         assembly
+            .ordinary()
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
                 &source.canonical,
                 source.canonical.root_ref(),
@@ -390,10 +409,11 @@ fn mapped_prefix_build_failure_rolls_back_and_leaves_source_rewritable() {
             .expect_err("invalid appended row must reject"),
         StoreRuntimeError::Build(StoreBuildError::invalid_record_width())
     );
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_live_storage_unchanged(before, account.snapshot());
 
     let root = assembly
+        .ordinary()
         .try_rewrite_canonical_records_with_mapped_prefix_controlled(
             &source.canonical,
             source.canonical.root_ref(),
@@ -412,6 +432,7 @@ fn mapped_prefix_build_failure_rolls_back_and_leaves_source_rewritable() {
         )
         .expect("retry after rolled-back build failure");
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             TestTag,
@@ -462,40 +483,45 @@ fn mapped_prefix_ignored_control_failure_is_sticky_and_fails_closed() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("sticky-control assembly");
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let _sequence = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let _bytes = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert!(matches!(
-        assembly.try_rewrite_canonical_records_with_mapped_prefix_controlled(
-            &source.canonical,
-            source.canonical.root_ref(),
-            RecordPlan::new(2, 2).expect("source plan"),
-            RecordPlan::new(3, 2).expect("destination plan"),
-            keys.work_dimension,
-            TestRootTag,
-            |writer, control| {
-                assert_eq!(writer.rows(), 2);
-                assert!(control.charge_observed(1).is_err());
-                writer.write_row(|row| {
-                    row.write_scalar(17_u32)?;
-                    row.write_scalar(18_u32)
-                })?;
-                Ok(())
-            },
-        ),
+        assembly
+            .ordinary()
+            .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
+                source.canonical.root_ref(),
+                RecordPlan::new(2, 2).expect("source plan"),
+                RecordPlan::new(3, 2).expect("destination plan"),
+                keys.work_dimension,
+                TestRootTag,
+                |writer, control| {
+                    assert_eq!(writer.rows(), 2);
+                    assert!(control.charge_observed(1).is_err());
+                    writer.write_row(|row| {
+                        row.write_scalar(17_u32)?;
+                        row.write_scalar(18_u32)
+                    })?;
+                    Ok(())
+                },
+            ),
         Err(StoreRuntimeError::Ledger(_))
     ));
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_live_storage_unchanged(before, account.snapshot());
     assert!(matches!(
-        assembly.try_retain_canonical_sequence(
+        assembly.ordinary().try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("post-failure plan"),
             TestTag,
             |_writer| panic!("sticky control failure must close successful construction"),
@@ -526,32 +552,37 @@ fn mapped_prefix_work_failure_during_copy_rolls_back_and_fails_closed() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("mid-prefix failure assembly");
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let _sequence = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let _bytes = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert!(matches!(
-        assembly.try_rewrite_canonical_records_with_mapped_prefix_controlled(
-            &source.canonical,
-            source.canonical.root_ref(),
-            RecordPlan::new(2, 2).expect("source plan"),
-            RecordPlan::new(3, 2).expect("destination plan"),
-            keys.work_dimension,
-            TestRootTag,
-            |_writer, _control| panic!("prefix work exhaustion must reject before append"),
-        ),
+        assembly
+            .ordinary()
+            .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
+                source.canonical.root_ref(),
+                RecordPlan::new(2, 2).expect("source plan"),
+                RecordPlan::new(3, 2).expect("destination plan"),
+                keys.work_dimension,
+                TestRootTag,
+                |_writer, _control| panic!("prefix work exhaustion must reject before append"),
+            ),
         Err(StoreRuntimeError::Ledger(_))
     ));
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_live_storage_unchanged(before, account.snapshot());
     assert!(matches!(
-        assembly.try_retain_canonical_sequence(
+        assembly.ordinary().try_retain_canonical_sequence(
             SequencePlan::<u8>::new(1).expect("post-failure plan"),
             TestTag,
             |_writer| panic!("mid-prefix ledger failure must close successful construction"),
@@ -586,15 +617,18 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("recoverable mapped-prefix assembly");
     assembly
+        .ordinary()
         .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let sequence = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let before_missing_mapping = account.snapshot();
 
     assert_eq!(
         assembly
+            .ordinary()
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
                 &source.canonical,
                 source.canonical.root_ref(),
@@ -607,15 +641,17 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
             .expect_err("unmapped historical reference must reject"),
         StoreRuntimeError::Build(StoreBuildError::capacity_envelope_violated())
     );
-    assert_eq!(assembly.canonical_len(), 1);
+    assert_eq!(assembly.ordinary().canonical_len(), 1);
     assert_live_storage_unchanged(before_missing_mapping, account.snapshot());
 
     let bytes = assembly
+        .ordinary()
         .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before_incomplete_append = account.snapshot();
     assert_eq!(
         assembly
+            .ordinary()
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
                 &source.canonical,
                 source.canonical.root_ref(),
@@ -631,10 +667,11 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
             .expect_err("incomplete append must reject"),
         StoreRuntimeError::Build(StoreBuildError::incomplete_write())
     );
-    assert_eq!(assembly.canonical_len(), 2);
+    assert_eq!(assembly.ordinary().canonical_len(), 2);
     assert_live_storage_unchanged(before_incomplete_append, account.snapshot());
 
     let root = assembly
+        .ordinary()
         .try_rewrite_canonical_records_with_mapped_prefix_controlled(
             &source.canonical,
             source.canonical.root_ref(),
@@ -652,6 +689,7 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
         )
         .expect("retry after both recoverable failures");
     let evidence = assembly
+        .ordinary()
         .try_retain_outcome_evidence_sequence(
             SequencePlan::<u8>::new(1).expect("evidence plan"),
             TestTag,

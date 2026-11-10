@@ -12,7 +12,7 @@ type ObservedStartupOwner =
     StartupFallbackOwner<TestOwner, TestPhase, TestDimension, LiveDropObservation>;
 
 fn attribute_observed_allocation(
-    ledger: &Ledger<TestOwner, TestPhase, TestDimension>,
+    ledger: &mut Ledger<TestOwner, TestPhase, TestDimension>,
     account: &PhysicalStorageAccount,
     allocation: RetainedAllocation<LiveDropObservation>,
 ) -> ObservedRetainedPart {
@@ -42,7 +42,7 @@ fn attribute_observed_allocation(
 }
 
 fn startup_owner_with_observed_fallback(
-    ledger: &Ledger<TestOwner, TestPhase, TestDimension>,
+    ledger: &mut Ledger<TestOwner, TestPhase, TestDimension>,
     account: &PhysicalStorageAccount,
     fallback: ObservedRetainedPart,
 ) -> ObservedStartupOwner {
@@ -102,7 +102,7 @@ fn healthy_detached_part_releases_during_unrelated_host_unwind() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 8);
     let (limits, _) = startup_limits_and_plan();
-    let ledger =
+    let mut ledger =
         Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
             .unwrap();
     let probe = ledger.test_probe();
@@ -118,8 +118,8 @@ fn healthy_detached_part_releases_during_unrelated_host_unwind() {
             })
         })
         .unwrap();
-    let part = attribute_observed_allocation(&ledger, &account, allocation);
-    let owner = startup_owner_with_observed_fallback(&ledger, &account, part);
+    let part = attribute_observed_allocation(&mut ledger, &account, allocation);
+    let owner = startup_owner_with_observed_fallback(&mut ledger, &account, part);
     let mut baseline = owner
         .try_into_baseline()
         .unwrap_or_else(|_| panic!("complete startup owner must detach"));
@@ -189,7 +189,7 @@ fn healthy_attributed_retained_part_releases_during_unrelated_host_unwind() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 8);
     let (limits, _) = startup_limits_and_plan();
-    let ledger =
+    let mut ledger =
         Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
             .unwrap();
     let probe = ledger.test_probe();
@@ -205,7 +205,7 @@ fn healthy_attributed_retained_part_releases_during_unrelated_host_unwind() {
             })
         })
         .unwrap();
-    let part = attribute_observed_allocation(&ledger, &account, allocation);
+    let part = attribute_observed_allocation(&mut ledger, &account, allocation);
     let charged = account.snapshot();
     let active = probe.active_reservations();
     let live = probe.current_live_bytes();
@@ -256,7 +256,7 @@ fn healthy_startup_fallback_owner_releases_during_unrelated_host_unwind() {
     let factory = account_factory(1);
     let account = account(&factory, 4_096, 8);
     let (limits, _) = startup_limits_and_plan();
-    let ledger =
+    let mut ledger =
         Ledger::<TestOwner, TestPhase, TestDimension>::try_new(limits, &[TestPhase::Build])
             .unwrap();
     let probe = ledger.test_probe();
@@ -272,8 +272,8 @@ fn healthy_startup_fallback_owner_releases_during_unrelated_host_unwind() {
             })
         })
         .unwrap();
-    let fallback = attribute_observed_allocation(&ledger, &account, allocation);
-    let owner = startup_owner_with_observed_fallback(&ledger, &account, fallback);
+    let fallback = attribute_observed_allocation(&mut ledger, &account, allocation);
+    let owner = startup_owner_with_observed_fallback(&mut ledger, &account, fallback);
     let charged = account.snapshot();
     let active = probe.active_reservations();
     let live = probe.current_live_bytes();
@@ -334,7 +334,11 @@ fn healthy_unprepared_publication_assembly_releases_during_unrelated_host_unwind
         let mut invocation_root: TestInvocationRoot<LiveDropObservation, LiveDropObservation> =
             InvocationRoot::new();
         let operation = test_operation(&mut invocation_root, &factory, 64);
-        let account = operation.account().share_after_test_admission().unwrap();
+        let account = operation
+            .loan()
+            .account()
+            .share_after_test_admission()
+            .unwrap();
         let canonical_charge = account
             .checked_retained_charge::<LiveDropObservation>(empty_plan())
             .unwrap();
@@ -344,9 +348,9 @@ fn healthy_unprepared_publication_assembly_releases_during_unrelated_host_unwind
         let mut assembly: TestPublication<'_, LiveDropObservation, LiveDropObservation> = operation
             .try_publication_assembly(publication_plan(1, 1))
             .unwrap_or_else(|_| panic!("host-unwind publication must open"));
-        let probe = assembly.test_ledger_probe();
+        let probe = assembly.loan().test_ledger_probe();
         let canonical = LiveDropObservation {
-            ledger: assembly.test_ledger_probe(),
+            ledger: assembly.loan().test_ledger_probe(),
             account: account.share_after_test_admission().unwrap(),
             observed_active: &CANONICAL_ACTIVE,
             observed_operation_live: &CANONICAL_LIVE,
@@ -354,12 +358,13 @@ fn healthy_unprepared_publication_assembly_releases_during_unrelated_host_unwind
             observed_physical_allocations: &CANONICAL_ALLOCATIONS,
         };
         let _canonical = assembly
+            .loan_mut()
             .try_retain_canonical(empty_plan(), |emplacer| {
                 Ok(emplacer.place(canonical, CanonicalRootTag))
             })
             .unwrap_or_else(|_| panic!("unprepared canonical root must retain"));
         let evidence = LiveDropObservation {
-            ledger: assembly.test_ledger_probe(),
+            ledger: assembly.loan().test_ledger_probe(),
             account: account.share_after_test_admission().unwrap(),
             observed_active: &EVIDENCE_ACTIVE,
             observed_operation_live: &EVIDENCE_LIVE,
@@ -367,12 +372,13 @@ fn healthy_unprepared_publication_assembly_releases_during_unrelated_host_unwind
             observed_physical_allocations: &EVIDENCE_ALLOCATIONS,
         };
         let _evidence = assembly
+            .loan_mut()
             .try_retain_outcome_evidence(empty_plan(), |emplacer| {
                 Ok(emplacer.place(evidence, EvidenceRootTag))
             })
             .unwrap_or_else(|_| panic!("unprepared evidence root must retain"));
-        assert_eq!(assembly.canonical_len(), 1);
-        assert_eq!(assembly.outcome_evidence_len(), 1);
+        assert_eq!(assembly.loan().canonical_len(), 1);
+        assert_eq!(assembly.loan().outcome_evidence_len(), 1);
         let charged = account.snapshot();
         let active = probe.active_reservations();
         let live = probe.current_live_bytes();

@@ -1,5 +1,9 @@
+use baozi_operation::__retained_store_integration::authority::{
+    FiniteStoreExitCause, FiniteStoreExitError,
+};
 use baozi_operation::{
-    CancellationToken, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
+    CancellationToken, ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
+    StoreKeyDomain,
 };
 use std::fmt;
 use std::time::Instant;
@@ -8,6 +12,62 @@ mod resource;
 pub(crate) mod runtime;
 
 pub use resource::PostProcessResourceEvidence;
+
+/// Owns the original finite invocation error and any retained failure residue.
+///
+/// Its diagnostics borrow the original error, including after the invocation's host
+/// and source have been released. No separate terminal resource snapshot is required.
+/// The original owner can move between threads. It is not shared between threads:
+/// retained invocation state includes local cells and Send-only control extensions.
+#[derive(Debug)]
+pub struct PostProcessInvocationFailure {
+    inner:
+        FiniteStoreExitError<PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit>,
+}
+
+impl PostProcessInvocationFailure {
+    pub(crate) fn new(
+        inner: FiniteStoreExitError<
+            PostProcessOwner,
+            PostProcessProgressPhase,
+            PostProcessProgressUnit,
+        >,
+    ) -> Self {
+        Self { inner }
+    }
+
+    /// Borrows the original invocation's startup, body, or finalization cause.
+    pub const fn cause(&self) -> &FiniteStoreExitCause {
+        self.inner.cause()
+    }
+
+    /// Borrows the original domain, including when startup produced no qualified facts.
+    pub fn domain(&self) -> Option<&StoreKeyDomain> {
+        self.inner.domain()
+    }
+
+    /// Borrows the detailed control cause observed by the original finite freeze, if any.
+    pub const fn original_freeze_control(&self) -> Option<&ControlCause> {
+        self.inner.original_freeze_control()
+    }
+
+    /// Returns whether the original error owns a root or low-level failure residue.
+    pub fn has_residue(&self) -> bool {
+        self.inner.has_residue()
+    }
+}
+
+impl fmt::Display for PostProcessInvocationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.inner, formatter)
+    }
+}
+
+impl std::error::Error for PostProcessInvocationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.inner)
+    }
+}
 
 /// Owner marker for direct post-process operation capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

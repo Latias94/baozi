@@ -256,6 +256,12 @@ impl Format for TextInputImporter {
                                     }
                                 }
                                 assert_eq!(replacement_index, expected.replacements.len());
+                                let borrowed_texts = lines
+                                    .into_iter()
+                                    .map(|line| line.text())
+                                    .collect::<Vec<_>>();
+                                let expected_texts = expected.lines.iter().map(|line| line.text);
+                                assert!(borrowed_texts.into_iter().eq(expected_texts));
                                 authorize_text_obligations(children, recoveries, accepted)
                             },
                         )?

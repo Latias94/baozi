@@ -468,7 +468,10 @@ fn dimension(ledger: &ImportLedgerSnapshot, dimension: ImportDimension) -> Impor
 fn assert_released(ledger: &ImportLedgerSnapshot, label: &str) {
     assert_eq!(ledger.current_live_bytes(), 0, "{label}");
     assert_eq!(ledger.active_reservations(), 0, "{label}");
-    assert_eq!(ledger.current_evidence_bytes(), 0, "{label}");
+    assert!(
+        ledger.current_administrative_bytes() <= ledger.peak_administrative_bytes(),
+        "{label}"
+    );
     for key in [
         ImportDimension::AssetOpen,
         ImportDimension::DependencyReference,

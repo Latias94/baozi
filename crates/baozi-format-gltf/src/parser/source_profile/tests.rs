@@ -1,15 +1,19 @@
 use super::*;
+
+mod directory;
+mod populations;
 use baozi_import::{
     CompiledOptions, DetectionOutcome, DetectionResult, DetectionScope, Format, FormatDescriptor,
-    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportOperationControl,
-    ImportRequest, ImportRequestLayer, ImportTerminalFailureClass, MetadataOwnerRef,
-    MetadataValueRef, NoFormatOptions, OptionCompileError, OptionCompileLimits, ParseContext,
-    Probe, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneSnapshotLimits, ScopeAbortCause,
-    SourceObjectLocatorRef,
+    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
+    ImportOperationControl, ImportRequest, ImportRequestLayer, ImportTerminalFailureClass,
+    LossPolicy, MetadataOwnerRef, MetadataValueRef, NoFormatOptions, OptionCompileError,
+    OptionCompileLimits, ParseContext, Probe, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuildScope, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay,
+    SceneSnapshotLimits, ScopeAbortCause, SourceObjectLocatorRef,
 };
-use baozi_io::AssetPath;
+use baozi_io::{AssetPath, MemoryAssetIo};
 use baozi_operation::{CancellationToken, ControlCause};
+use base64::Engine as _;
 use std::{
     cell::RefCell,
     marker::PhantomData,
@@ -24,14 +28,22 @@ use std::{
 pub(super) enum ComparisonSite {
     Direct,
     ExtrasSort,
-    LinkSort,
-    LinkDedup,
+    RunSort,
+    RunDedup,
+    DirectoryInit,
+    DirectoryRegister,
+    OrdinalTransfer,
 }
 
 struct CompletionProbe {
     site: ComparisonSite,
-    completed: [usize; 4],
+    completed: [usize; 7],
+    directory_covered: usize,
+    directory_queries: usize,
+    directory_query_work: u64,
     cancel_on: Option<(ComparisonSite, usize, CancellationToken)>,
+    panic_on: Option<(ComparisonSite, usize)>,
+    cancel_before_directory_publication: Option<CancellationToken>,
 }
 
 thread_local! {
@@ -48,15 +60,20 @@ impl CompletionGuard {
             assert!(slot.is_none());
             *slot = Some(CompletionProbe {
                 site: ComparisonSite::Direct,
-                completed: [0; 4],
+                completed: [0; 7],
+                directory_covered: 0,
+                directory_queries: 0,
+                directory_query_work: 0,
                 cancel_on,
+                panic_on: None,
+                cancel_before_directory_publication: None,
             });
         });
         Self(PhantomData)
     }
 
-    fn finish(self) -> [usize; 4] {
-        COMPLETION_PROBE.with(|slot| slot.borrow_mut().take().unwrap().completed)
+    fn finish(self) -> CompletionProbe {
+        COMPLETION_PROBE.with(|slot| slot.borrow_mut().take().unwrap())
     }
 }
 
@@ -76,20 +93,78 @@ pub(super) fn comparison_scope(site: ComparisonSite) {
 }
 
 pub(super) fn comparison_completed() {
+    let site = COMPLETION_PROBE.with(|slot| slot.borrow().as_ref().map(|probe| probe.site));
+    if let Some(site) = site {
+        completed_at(site);
+    }
+}
+
+pub(super) fn ordinal_transferred() {
+    completed_at(ComparisonSite::OrdinalTransfer);
+}
+
+pub(super) fn directory_initialized() {
+    completed_at(ComparisonSite::DirectoryInit);
+}
+
+pub(super) fn directory_registered() {
+    completed_at(ComparisonSite::DirectoryRegister);
+}
+
+pub(super) fn before_directory_publication() {
     let token = COMPLETION_PROBE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let probe = slot.as_mut()?;
-        probe.completed[probe.site as usize] += 1;
-        let (site, count, _) = probe.cancel_on.as_ref()?;
-        if *site == probe.site && *count == probe.completed[probe.site as usize] {
-            probe.cancel_on.take().map(|(_, _, token)| token)
-        } else {
-            None
-        }
+        slot.borrow_mut()
+            .as_mut()
+            .and_then(|probe| probe.cancel_before_directory_publication.take())
     });
     if let Some(token) = token {
         token.cancel();
     }
+}
+
+pub(super) fn directory_range_covered() {
+    COMPLETION_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow_mut().as_mut() {
+            probe.directory_covered += 1;
+        }
+    });
+}
+
+pub(super) fn directory_query_completed(query_work: u64) {
+    COMPLETION_PROBE.with(|slot| {
+        if let Some(probe) = slot.borrow_mut().as_mut() {
+            probe.directory_queries += 1;
+            probe.directory_query_work += query_work;
+        }
+    });
+}
+
+fn completed_at(completed_site: ComparisonSite) {
+    let (token, panic) = COMPLETION_PROBE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(probe) = slot.as_mut() else {
+            return (None, false);
+        };
+        probe.completed[completed_site as usize] += 1;
+        let completed = probe.completed[completed_site as usize];
+        let token = if probe
+            .cancel_on
+            .as_ref()
+            .is_some_and(|(site, count, _)| *site == completed_site && *count == completed)
+        {
+            probe.cancel_on.take().map(|(_, _, token)| token)
+        } else {
+            None
+        };
+        (token, probe.panic_on == Some((completed_site, completed)))
+    });
+    if let Some(token) = token {
+        token.cancel();
+    }
+    assert!(
+        !panic,
+        "interrupt directory construction before publication"
+    );
 }
 
 type ComparisonAction = for<'region, 'session> fn(
@@ -143,12 +218,23 @@ impl Format for ComparisonProbe {
 struct Observation {
     failure: ImportFailure,
     physical: usize,
-    completed: [usize; 4],
+    completed: [usize; 7],
+    directory_covered: usize,
+    directory_queries: usize,
+    directory_query_work: u64,
 }
 
 impl Observation {
     fn comparisons(&self) -> u64 {
-        self.completed.iter().sum::<usize>() as u64
+        [
+            ComparisonSite::Direct,
+            ComparisonSite::ExtrasSort,
+            ComparisonSite::RunSort,
+            ComparisonSite::RunDedup,
+        ]
+        .into_iter()
+        .map(|site| self.completed[site as usize] as u64)
+        .sum()
     }
 }
 
@@ -157,6 +243,20 @@ fn run(
     max_work: Option<u64>,
     cancel_on: Option<(ComparisonSite, usize)>,
     primary: &[u8],
+) -> Observation {
+    let mut limits = ResourceLimits::default();
+    if let Some(max_work) = max_work {
+        limits.max_work_units = max_work;
+    }
+    run_with_assets(action, limits, cancel_on, primary, &[])
+}
+
+fn run_with_assets(
+    action: ComparisonAction,
+    limits: ResourceLimits,
+    cancel_on: Option<(ComparisonSite, usize)>,
+    primary: &[u8],
+    assets: &[(&str, &[u8])],
 ) -> Observation {
     let physical = Arc::new(AtomicUsize::new(0));
     let token = CancellationToken::new();
@@ -169,23 +269,30 @@ fn run(
             token: token.clone(),
         })
         .unwrap();
-    let mut limits = ResourceLimits::default();
-    if let Some(max_work) = max_work {
-        limits.max_work_units = max_work;
-    }
     let request = ImportRequest::new().with_caller_layer(ImportRequestLayer::new(
         ImportConfigOverlay::default()
-            .with_resource_limits(ResourceLimitsOverlay::from_limits(limits)),
+            .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
+            .with_loss_policy(
+                LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+            ),
     ));
     let plan = registry
         .freeze(RegistryBuildLimits::default())
         .unwrap()
         .plan(&request, OptionCompileLimits::default())
         .unwrap();
+    let io = MemoryAssetIo::new();
+    let path = AssetPath::new("profile.gltf").unwrap();
+    io.try_insert(path.clone(), Arc::<[u8]>::from(primary))
+        .unwrap();
+    for &(path, bytes) in assets {
+        io.try_insert(AssetPath::new(path).unwrap(), Arc::<[u8]>::from(bytes))
+            .unwrap();
+    }
     let failure = plan
-        .read_bytes(
-            AssetPath::new("profile.gltf").unwrap(),
-            primary,
+        .read_asset(
+            &io,
+            path,
             ImportOperationControl::default().with_cancellation(token),
         )
         .expect_err("the probe stops before submission and retains the real parser ledger")
@@ -194,10 +301,14 @@ fn run(
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(failure.ledger().active_reservations(), 0);
     assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    let population = guard.finish();
     Observation {
         failure,
         physical: physical.load(AtomicOrdering::Relaxed),
-        completed: guard.finish(),
+        completed: population.completed,
+        directory_covered: population.directory_covered,
+        directory_queries: population.directory_queries,
+        directory_query_work: population.directory_query_work,
     }
 }
 
@@ -222,7 +333,7 @@ fn assert_ledger_denial(failure: &ImportFailure) {
         ImportCause::OperationTerminal(terminal) => {
             assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
         }
-        cause => panic!("expected comparison admission failure, got {cause:?}"),
+        cause => panic!("expected work admission failure, got {cause:?}"),
     }
 }
 
@@ -274,34 +385,48 @@ fn panic_baseline() -> u64 {
     consumed
 }
 
-fn profile<'session>(
+fn ordinal_run<'session>(
     ctx: &mut ParseRoot<'_, '_, 'session>,
-    pairs: &[(ProfileOwner, SourceEntityId)],
-) -> ParseResult<SelectedSourceProfile<'session>> {
-    let mut profile = SelectedSourceProfile {
-        entries: ctx.services()?.metered_vec(
-            ImportStorageClass::FormatNormalization,
-            "gltf-selected-source-identities",
-        ),
-        links: ctx.services()?.metered_vec(
-            ImportStorageClass::FormatNormalization,
-            "gltf-selected-source-owner-links",
-        ),
-        extras: ctx.services()?.metered_vec(
-            ImportStorageClass::FormatNormalization,
-            "gltf-selected-source-extras",
-        ),
-    };
-    for &(owner, source) in pairs {
-        profile
-            .links
-            .try_push(&mut ctx.services()?, OwnerSourceLink { owner, source })?;
+    ordinals: &[usize],
+) -> Result<OwnerSourceRun<'session>> {
+    let mut run = OwnerSourceRun::new(ctx)?;
+    for &ordinal in ordinals {
+        run.ordinals
+            .try_push(&mut ctx.services()?, SelectedEntryOrdinal(ordinal))?;
     }
-    Ok(profile)
+    run.owner = (!ordinals.is_empty()).then_some(ProfileOwner::Scene);
+    Ok(run)
 }
 
-fn pairs(links: &[OwnerSourceLink]) -> Vec<(ProfileOwner, SourceEntityId)> {
-    links.iter().map(|link| (link.owner, link.source)).collect()
+fn relation(profile: &SelectedSourceProfile<'_>) -> Vec<(ProfileOwner, SourceEntityId)> {
+    assert!(profile.finished);
+    profile
+        .directory
+        .as_ref()
+        .expect("a finished profile publishes its directory")
+        .ranges
+        .as_slice()
+        .iter()
+        .filter(|&&index| index != usize::MAX)
+        .map(|&index| &profile.owners.as_slice()[index])
+        .flat_map(|range| {
+            profile.ordinals.as_slice()[range.start..range.start + range.length]
+                .iter()
+                .map(move |ordinal| (range.owner, profile.entries()[ordinal.0].entity.id))
+        })
+        .collect()
+}
+
+fn owner_identities(
+    ctx: &mut ParseRoot<'_, '_, '_>,
+    profile: &SelectedSourceProfile<'_>,
+    owner: ProfileOwner,
+) -> Result<Vec<SourceEntityId>> {
+    profile
+        .for_owner(ctx, owner)?
+        .iter()
+        .map(|&ordinal| profile.source(ctx, ordinal).map(|source| source.entity.id))
+        .collect()
 }
 
 fn numeric_comparisons(
@@ -309,7 +434,7 @@ fn numeric_comparisons(
     physical: &AtomicUsize,
     _: &CancellationToken,
 ) -> Result<()> {
-    let _storage = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 16])?;
+    let _storage = ordinal_run(ctx, &[0; 16])?;
     let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
     ctx.child(&group, [0], |ledger_work| {
         let mut work = ProfileComparisonWork::new(ledger_work);
@@ -337,10 +462,10 @@ fn denied_current_comparison_never_runs_and_records_only_the_actual_prefix() {
             (before + allowed + 1, before + allowed)
         );
     }
-    let actual_sort = run(finish_long_links, Some(before + 3), None, b"{}");
+    let actual_sort = run(order_long_run, Some(before + 3), None, b"{}");
     assert_ledger_denial(&actual_sort.failure);
-    assert_eq!(actual_sort.completed[ComparisonSite::LinkSort as usize], 3);
-    assert_eq!(actual_sort.completed[ComparisonSite::LinkDedup as usize], 0);
+    assert_eq!(actual_sort.completed[ComparisonSite::RunSort as usize], 3);
+    assert_eq!(actual_sort.completed[ComparisonSite::RunDedup as usize], 0);
     assert_eq!(counts(&actual_sort.failure), (before + 4, before + 3));
 }
 
@@ -349,7 +474,7 @@ fn known_error_closes_idle_scope_and_unwind_does_not_complete_the_interrupted_co
     let format_before = baseline();
     let ordinary = run(
         |ctx, physical, _| {
-            let _storage = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 16])?;
+            let _storage = ordinal_run(ctx, &[0; 16])?;
             let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
             ctx.child(&group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
@@ -374,7 +499,7 @@ fn known_error_closes_idle_scope_and_unwind_does_not_complete_the_interrupted_co
 
     let interrupted = run(
         |ctx, physical, _| {
-            let _storage = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 16])?;
+            let _storage = ordinal_run(ctx, &[0; 16])?;
             let group = ctx.bind_group([ImportWorkClass::WorkUnits])?;
             ctx.child(&group, [0], |ledger_work| {
                 let mut work = ProfileComparisonWork::new(ledger_work);
@@ -406,9 +531,13 @@ fn known_error_closes_idle_scope_and_unwind_does_not_complete_the_interrupted_co
 }
 
 #[test]
-fn link_order_dedup_capacity_and_comparison_counts_match_the_original_metered_algorithms() {
+fn completed_runs_preserve_the_literal_relation_and_reuse_charged_scratch() {
     let observation = run(
         |ctx, physical, _| {
+            let map = GltfSourceMap::from_primary_for_test(ctx)?;
+            let mut selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
+            let mut ordinary = OwnerSourceRun::new(ctx)?;
+            let suspended = OwnerSourceRun::new(ctx)?;
             let primitive_a = entity(SourceEntityKind::Primitive, Some(0), 1);
             let primitive_b = entity(SourceEntityKind::Primitive, Some(1), 0);
             let buffer = entity(SourceEntityKind::Buffer, None, 2);
@@ -424,108 +553,102 @@ fn link_order_dedup_capacity_and_comparison_counts_match_the_original_metered_al
                 (ProfileOwner::Attribute(0), accessor),
                 (ProfileOwner::Attribute(1), accessor),
             ];
-            let input = [
-                expected[7],
-                expected[6],
-                expected[5],
-                expected[4],
-                expected[3],
-                expected[2],
-                expected[1],
-                expected[0],
-                expected[5],
-                expected[2],
-                expected[7],
-            ];
-            let mut selected = profile(ctx, &input)?;
-            let capacity = selected.links.capacity();
-            selected.finish(ctx)?;
-            assert_eq!(pairs(selected.links.as_slice()), expected);
-            assert_eq!(selected.links.capacity(), capacity);
-
-            // Use the existing container as the control, not a second sorting implementation.
-            let mut control = profile(ctx, &input)?;
-            let mut sort_calls = 0;
-            control
-                .links
-                .try_sort_unstable_by(|left, right| -> Result<_> {
-                    sort_calls += 1;
-                    physical.fetch_add(1, AtomicOrdering::Relaxed);
-                    Ok(left.cmp(right))
-                })?;
-            let mut dedup_calls = 0;
-            let retained = control
-                .links
-                .try_partition_dedup_by(|left, right| -> Result<_> {
-                    dedup_calls += 1;
-                    physical.fetch_add(1, AtomicOrdering::Relaxed);
-                    Ok(left == right)
-                })?;
-            control.links.truncate(retained);
-            assert_eq!(pairs(control.links.as_slice()), expected);
-            COMPLETION_PROBE.with(|slot| {
-                let slot = slot.borrow();
-                let completed = slot.as_ref().unwrap().completed;
-                assert_eq!(completed[ComparisonSite::LinkSort as usize], sort_calls);
-                assert_eq!(completed[ComparisonSite::LinkDedup as usize], dedup_calls);
-            });
+            for (owner, candidates) in [
+                (ProfileOwner::Attribute(1), &[accessor, accessor][..]),
+                (ProfileOwner::Attribute(0), &[accessor, view, buffer, primitive_b, primitive_a, view, primitive_a][..]),
+                (ProfileOwner::SyntheticRoot, &[DOCUMENT][..]),
+                (ProfileOwner::Scene, &[DOCUMENT][..]),
+            ] {
+                for &source in candidates {
+                    selected.link(ctx, &mut ordinary, owner, source)?;
+                }
+                let capacity = ordinary.ordinals.capacity();
+                selected.complete_owner(ctx, &mut ordinary, owner)?;
+                assert_eq!(ordinary.ordinals.capacity(), capacity);
+                assert!(ordinary.ordinals.is_empty());
+                assert_eq!(ordinary.owner, None);
+            }
+            assert!(!selected.finished);
+            assert!(selected.directory.is_none());
+            selected.finish(ctx, &ordinary, &suspended)?;
             assert_eq!(
-                pairs(selected.for_owner(ctx, ProfileOwner::Attribute(0))?),
-                expected[2..7]
+                selected.owners.as_slice().iter().map(|range| range.owner).collect::<Vec<_>>(),
+                [ProfileOwner::Attribute(1), ProfileOwner::Attribute(0), ProfileOwner::SyntheticRoot, ProfileOwner::Scene],
+            );
+            assert_eq!(selected.directory.as_ref().unwrap().ranges.as_slice(), &[3, 2, 1, 0]);
+            assert_eq!(relation(&selected), expected);
+            assert_eq!(selected.link_count(), expected.len());
+            assert_eq!(selected.owners.len(), 4);
+            assert_eq!(
+                owner_identities(ctx, &selected, ProfileOwner::Attribute(0))?,
+                [primitive_a, primitive_b, buffer, view, accessor]
             );
             assert_eq!(
-                pairs(selected.for_owner(ctx, ProfileOwner::Scene)?),
-                expected[..1]
+                owner_identities(ctx, &selected, ProfileOwner::Scene)?,
+                [DOCUMENT]
             );
+            physical.store(1, AtomicOrdering::Relaxed);
             Ok(())
         },
         None,
         None,
-        b"{}",
+        br#"{"meshes":[{"primitives":[{},{}]},{"primitives":[{}]}],"buffers":[{},{},{}],"bufferViews":[{},{}],"accessors":[{},{}]}"#,
     );
     assert!(matches!(
         observation.failure.cause(),
         ImportCause::Format(_)
     ));
-    assert_eq!(observation.comparisons(), observation.physical as u64);
-    // Two unchanged length-eight owner lookups charge ten units each; truncation charges none.
-    let expected = baseline() + observation.comparisons() + 20;
-    assert_eq!(counts(&observation.failure), (expected, expected));
+    assert_eq!(observation.physical, 1);
+    assert_eq!(
+        observation.completed[ComparisonSite::OrdinalTransfer as usize],
+        8
+    );
+    assert!(observation.completed[ComparisonSite::RunSort as usize] > 0);
+    assert_eq!(
+        observation.completed[ComparisonSite::DirectoryInit as usize],
+        4
+    );
+    assert_eq!(
+        observation.completed[ComparisonSite::DirectoryRegister as usize],
+        4
+    );
+    let (attempted, consumed) = counts(&observation.failure);
+    assert_eq!(attempted, consumed);
 }
 
-fn finish_long_links(
+fn order_long_run(
     ctx: &mut ParseRoot<'_, '_, '_>,
     _: &AtomicUsize,
     _: &CancellationToken,
 ) -> Result<()> {
-    let mut selected = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 130])?;
-    let capacity = selected.links.capacity();
-    let result = selected.finish(ctx);
+    let mut run = ordinal_run(ctx, &[0; 130])?;
+    let capacity = run.ordinals.capacity();
+    let result = run.order(ctx);
     assert!(result.is_err());
     assert_eq!(
-        selected.links.len(),
+        run.ordinals.len(),
         130,
         "cancelled dedup must not truncate its suffix"
     );
-    assert_eq!(selected.links.capacity(), capacity);
+    assert_eq!(run.ordinals.capacity(), capacity);
     result
 }
 
-fn finish_short_links(
+fn order_short_run(
     ctx: &mut ParseRoot<'_, '_, '_>,
     _: &AtomicUsize,
     _: &CancellationToken,
 ) -> Result<()> {
-    let mut selected = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT); 2])?;
-    let capacity = selected.links.capacity();
-    let result = selected.finish(ctx);
+    let mut run = ordinal_run(ctx, &[0; 2])?;
+    let capacity = run.ordinals.capacity();
+    let result = run.order(ctx);
     assert!(result.is_err());
     assert_eq!(
-        selected.links.len(),
+        run.ordinals.len(),
         2,
         "scope-exit cancellation precedes truncation"
     );
-    assert_eq!(selected.links.capacity(), capacity);
+    assert_eq!(run.ordinals.capacity(), capacity);
     result
 }
 
@@ -533,15 +656,15 @@ fn finish_short_links(
 fn actual_sort_and_dedup_cancel_within_64_comparisons_and_at_short_scope_exits() {
     let before = non_format_baseline();
     for (action, at_poll) in [
-        (finish_long_links as ComparisonAction, 64),
-        (finish_short_links as ComparisonAction, 1),
+        (order_long_run as ComparisonAction, 64),
+        (order_short_run as ComparisonAction, 1),
     ] {
-        for site in [ComparisonSite::LinkSort, ComparisonSite::LinkDedup] {
+        for site in [ComparisonSite::RunSort, ComparisonSite::RunDedup] {
             let observation = run(action, None, Some((site, 1)), b"{}");
             assert_cancelled(&observation.failure);
             assert_eq!(observation.completed[site as usize], at_poll);
-            if site == ComparisonSite::LinkSort {
-                assert_eq!(observation.completed[ComparisonSite::LinkDedup as usize], 0);
+            if site == ComparisonSite::RunSort {
+                assert_eq!(observation.completed[ComparisonSite::RunDedup as usize], 0);
             }
             let expected = before + observation.comparisons();
             assert_eq!(counts(&observation.failure), (expected, expected));
@@ -550,16 +673,16 @@ fn actual_sort_and_dedup_cancel_within_64_comparisons_and_at_short_scope_exits()
 }
 
 #[test]
-fn empty_singleton_finish_has_no_comparison_work_and_still_observes_entry_cancellation() {
+fn empty_singleton_order_has_no_comparison_work_and_still_observes_entry_cancellation() {
     let before = baseline();
     let observation = run(
         |ctx, _, _| {
-            for input in [&[][..], &[(ProfileOwner::Scene, DOCUMENT)][..]] {
-                let mut selected = profile(ctx, input)?;
-                let capacity = selected.links.capacity();
-                selected.finish(ctx)?;
-                assert_eq!(pairs(selected.links.as_slice()), input);
-                assert_eq!(selected.links.capacity(), capacity);
+            for input in [&[][..], &[0][..]] {
+                let mut run = ordinal_run(ctx, input)?;
+                let capacity = run.ordinals.capacity();
+                run.order(ctx)?;
+                assert_eq!(run.ordinals.len(), input.len());
+                assert_eq!(run.ordinals.capacity(), capacity);
             }
             Ok(())
         },
@@ -579,18 +702,18 @@ fn empty_singleton_finish_has_no_comparison_work_and_still_observes_entry_cancel
         _: &AtomicUsize,
         token: &CancellationToken,
     ) -> Result<()> {
-        let mut selected = profile(ctx, &[])?;
+        let mut run = ordinal_run(ctx, &[])?;
         token.cancel();
-        selected.finish(ctx)
+        run.order(ctx)
     }
     fn cancel_singleton(
         ctx: &mut ParseRoot<'_, '_, '_>,
         _: &AtomicUsize,
         token: &CancellationToken,
     ) -> Result<()> {
-        let mut selected = profile(ctx, &[(ProfileOwner::Scene, DOCUMENT)])?;
+        let mut run = ordinal_run(ctx, &[0])?;
         token.cancel();
-        selected.finish(ctx)
+        run.order(ctx)
     }
     let before = non_format_baseline();
     for action in [cancel_empty as ComparisonAction, cancel_singleton] {
@@ -599,6 +722,1027 @@ fn empty_singleton_finish_has_no_comparison_work_and_still_observes_entry_cancel
         assert_eq!(observation.comparisons(), 0);
         assert_eq!(counts(&observation.failure), (before, before));
     }
+}
+
+#[test]
+fn duplicate_completed_owners_and_unfinished_runs_never_authorize_lookup() {
+    // A rejected parser child closes its execution channel. Each independent fault
+    // needs a fresh import, and its original error must reach the format boundary.
+    for (case, registrations) in [
+        ("unfinished", 0),
+        ("unfinished-lookup", 0),
+        ("duplicate", 2),
+    ] {
+        let primary = serde_json::to_vec(&serde_json::json!({"case": case})).unwrap();
+        let observation = run(
+            |ctx, physical, _| {
+                let case: serde_json::Value = serde_json::from_slice(ctx.primary_bytes()).unwrap();
+                let map = GltfSourceMap::from_primary_for_test(ctx)?;
+                let mut selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
+                let mut ordinary = OwnerSourceRun::new(ctx)?;
+                let mut suspended = OwnerSourceRun::new(ctx)?;
+                selected.link(ctx, &mut suspended, ProfileOwner::Sampler(0), DOCUMENT)?;
+                let error = match case["case"].as_str().unwrap() {
+                    "unfinished" => selected
+                        .finish(ctx, &ordinary, &suspended)
+                        .expect_err("a suspended owner prevents finalization"),
+                    "unfinished-lookup" => {
+                        selected.link(ctx, &mut ordinary, ProfileOwner::Scene, DOCUMENT)?;
+                        selected.complete_owner(ctx, &mut ordinary, ProfileOwner::Scene)?;
+                        selected
+                            .for_owner(ctx, ProfileOwner::Scene)
+                            .expect_err("an unfinished directory never authorizes lookup")
+                    }
+                    "duplicate" => {
+                        selected.complete_owner(ctx, &mut suspended, ProfileOwner::Sampler(0))?;
+                        for _ in 0..2 {
+                            selected.link(ctx, &mut ordinary, ProfileOwner::Scene, DOCUMENT)?;
+                            selected.complete_owner(ctx, &mut ordinary, ProfileOwner::Scene)?;
+                        }
+                        let original_ranges = selected
+                            .owners
+                            .as_slice()
+                            .iter()
+                            .map(|range| (range.owner, range.start, range.length))
+                            .collect::<Vec<_>>();
+                        let original_ordinals = selected.ordinals.as_slice().to_vec();
+                        let error = selected
+                            .finish(ctx, &ordinary, &suspended)
+                            .expect_err("a completed owner may not recur");
+                        assert_eq!(
+                            selected
+                                .owners
+                                .as_slice()
+                                .iter()
+                                .map(|range| (range.owner, range.start, range.length))
+                                .collect::<Vec<_>>(),
+                            original_ranges
+                        );
+                        assert_eq!(selected.ordinals.as_slice(), original_ordinals.as_slice());
+                        error
+                    }
+                    _ => panic!("known owner-rejection fixture"),
+                };
+                assert!(!selected.finished);
+                assert!(selected.directory.is_none());
+                if case["case"] == "duplicate" {
+                    assert_eq!(error.to_string(), "glTF source owner was completed twice");
+                }
+                physical.store(1, AtomicOrdering::Relaxed);
+                Err(error)
+            },
+            None,
+            None,
+            &primary,
+        );
+        assert!(
+            matches!(observation.failure.cause(), ImportCause::Format(_)),
+            "{case}: {:?}",
+            observation.failure.cause(),
+        );
+        assert_eq!(observation.physical, 1, "{case}");
+        assert_eq!(
+            observation.completed[ComparisonSite::DirectoryInit as usize],
+            if case == "duplicate" { 2 } else { 0 },
+            "{case}",
+        );
+        assert_eq!(
+            observation.completed[ComparisonSite::DirectoryRegister as usize],
+            registrations,
+            "{case}",
+        );
+    }
+}
+
+#[test]
+fn invalid_ranges_uncovered_transfers_and_unadmitted_ordinals_are_rejected() {
+    for case in [
+        "empty-range",
+        "gap-range",
+        "oversized-range",
+        "overflow-range",
+        "uncovered-ordinals",
+        "overlapping-ranges",
+        "invalid-transfer",
+        "invalid-source",
+        "invalid-translation",
+        "usize-source-index-overflow",
+        "u32-source-index-overflow",
+    ] {
+        let primary = serde_json::to_vec(&serde_json::json!({
+            "case": case,
+            "nodes": [{}, {}],
+        }))
+        .unwrap();
+        let observation = run(
+            |ctx, physical, _| {
+                let case: serde_json::Value = serde_json::from_slice(ctx.primary_bytes()).unwrap();
+                let case = case["case"].as_str().unwrap();
+                let map = GltfSourceMap::from_primary_for_test(ctx)?;
+                let mut selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
+                let ordinary = OwnerSourceRun::new(ctx)?;
+                let suspended = OwnerSourceRun::new(ctx)?;
+                let error = match case {
+                    "empty-range" | "gap-range" | "oversized-range" | "overflow-range" => {
+                        let (start, length) = match case {
+                            "empty-range" => (0, 0),
+                            "gap-range" => (1, 1),
+                            "oversized-range" => (0, 2),
+                            _ => (usize::MAX, 1),
+                        };
+                        selected
+                            .ordinals
+                            .try_push(&mut ctx.services()?, SelectedEntryOrdinal(0))?;
+                        selected.owners.try_push(
+                            &mut ctx.services()?,
+                            OwnerSourceRange {
+                                owner: ProfileOwner::Scene,
+                                start,
+                                length,
+                            },
+                        )?;
+                        selected
+                            .finish(ctx, &ordinary, &suspended)
+                            .expect_err("invalid retained owner range")
+                    }
+                    "uncovered-ordinals" => {
+                        selected
+                            .ordinals
+                            .try_push(&mut ctx.services()?, SelectedEntryOrdinal(0))?;
+                        selected
+                            .finish(ctx, &ordinary, &suspended)
+                            .expect_err("every retained ordinal belongs to a completed owner")
+                    }
+                    "overlapping-ranges" => {
+                        selected.ordinals.try_extend_from_slice(
+                            &mut ctx.services()?,
+                            &[SelectedEntryOrdinal(0); 2],
+                        )?;
+                        for owner in [ProfileOwner::Scene, ProfileOwner::SyntheticRoot] {
+                            selected.owners.try_push(
+                                &mut ctx.services()?,
+                                OwnerSourceRange {
+                                    owner,
+                                    start: 0,
+                                    length: 1,
+                                },
+                            )?;
+                        }
+                        selected
+                            .finish(ctx, &ordinary, &suspended)
+                            .expect_err("retained owner ranges may not overlap")
+                    }
+                    "invalid-transfer" => {
+                        let mut invalid = ordinal_run(ctx, &[usize::MAX])?;
+                        let error = selected
+                            .complete_owner(ctx, &mut invalid, ProfileOwner::Scene)
+                            .expect_err("only admitted ordinals can transfer");
+                        assert!(selected.ordinals.is_empty());
+                        assert!(selected.owners.is_empty());
+                        error
+                    }
+                    "invalid-source" => selected
+                        .source(ctx, SelectedEntryOrdinal(usize::MAX))
+                        .map(|_| ())
+                        .expect_err("only admitted ordinals resolve to sources"),
+                    "invalid-translation" => selected
+                        .ordinal_source_index(ctx, 1, SelectedEntryOrdinal(usize::MAX))
+                        .expect_err("only admitted ordinals translate"),
+                    "usize-source-index-overflow" | "u32-source-index-overflow" => {
+                        let ordinal = selected
+                            .required_ordinal(ctx, entity(SourceEntityKind::Node, None, 1))?;
+                        let resource_count = if case == "usize-source-index-overflow" {
+                            usize::MAX
+                        } else {
+                            u32::MAX as usize
+                        };
+                        selected
+                            .ordinal_source_index(ctx, resource_count, ordinal)
+                            .expect_err("translated source indices stay representable")
+                    }
+                    _ => panic!("known owner-range rejection fixture"),
+                };
+                assert!(!selected.finished);
+                physical.store(1, AtomicOrdering::Relaxed);
+                Err(error)
+            },
+            None,
+            None,
+            &primary,
+        );
+        assert!(
+            matches!(observation.failure.cause(), ImportCause::Format(_)),
+            "{case}: {:?}",
+            observation.failure.cause(),
+        );
+        assert_eq!(observation.physical, 1, "{case}");
+        assert_eq!(
+            observation.completed[ComparisonSite::OrdinalTransfer as usize],
+            0,
+            "{case}",
+        );
+    }
+}
+
+fn pending_nodes<'session>(
+    ctx: &mut ParseRoot<'_, '_, 'session>,
+) -> Result<(SelectedSourceProfile<'session>, OwnerSourceRun<'session>)> {
+    let map = GltfSourceMap::from_primary_for_test(ctx)?;
+    let selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
+    let mut pending = OwnerSourceRun::new(ctx)?;
+    for source in selected
+        .entries()
+        .iter()
+        .filter(|source| source.entity.id != DOCUMENT)
+    {
+        selected.link(ctx, &mut pending, ProfileOwner::Scene, source.entity.id)?;
+    }
+    Ok((selected, pending))
+}
+
+fn transfer_nodes(
+    ctx: &mut ParseRoot<'_, '_, '_>,
+    _: &AtomicUsize,
+    _: &CancellationToken,
+) -> Result<()> {
+    let (mut selected, mut pending) = pending_nodes(ctx)?;
+    let length = pending.ordinals.len();
+    let capacity = pending.ordinals.capacity();
+    let result = selected.complete_owner(ctx, &mut pending, ProfileOwner::Scene);
+    assert!(result.is_err());
+    assert_eq!(selected.ordinals.len(), length.min(64));
+    assert!(selected.owners.is_empty());
+    assert!(!selected.finished);
+    assert_eq!(pending.ordinals.len(), length);
+    assert_eq!(pending.ordinals.capacity(), capacity);
+    result
+}
+
+#[test]
+fn ordinal_transfer_cancellation_retains_only_its_actual_prefix_without_a_descriptor() {
+    for length in [1, 130] {
+        let primary = serde_json::to_vec(
+            &serde_json::json!({ "nodes": vec![serde_json::json!({}); length] }),
+        )
+        .unwrap();
+        let setup = run(
+            |ctx, _, token| {
+                let _pending = pending_nodes(ctx)?;
+                token.cancel();
+                ctx.poll()?;
+                Ok(())
+            },
+            None,
+            None,
+            &primary,
+        );
+        assert_cancelled(&setup.failure);
+        let observation = run(
+            transfer_nodes,
+            None,
+            Some((ComparisonSite::OrdinalTransfer, 1)),
+            &primary,
+        );
+        assert_cancelled(&observation.failure);
+        let transferred = length.min(64) as u64;
+        assert_eq!(
+            observation.completed[ComparisonSite::OrdinalTransfer as usize] as u64,
+            transferred
+        );
+        let expected = counts(&setup.failure).1 + 2 + observation.comparisons() + transferred;
+        assert_eq!(counts(&observation.failure), (expected, expected));
+        if length > 64 {
+            let limit = counts(&setup.failure).1 + 2 + observation.comparisons() + 3;
+            let denied = run(
+                |ctx, physical, token| {
+                    let (mut selected, mut pending) = pending_nodes(ctx)?;
+                    let error = selected
+                        .complete_owner(ctx, &mut pending, ProfileOwner::Scene)
+                        .expect_err("the next transfer must be denied before it runs");
+                    physical.store(selected.ordinals.len(), AtomicOrdering::Relaxed);
+                    assert!(selected.owners.is_empty());
+                    assert!(!selected.finished);
+                    token.cancel();
+                    assert_eq!(ctx.poll().unwrap_err().to_string(), error.to_string());
+                    Err(error)
+                },
+                Some(limit),
+                None,
+                &primary,
+            );
+            assert_ledger_denial(&denied.failure);
+            assert_eq!(denied.physical, 3);
+            assert_eq!(
+                denied.completed[ComparisonSite::OrdinalTransfer as usize],
+                3
+            );
+            assert_eq!(counts(&denied.failure), (limit + 1, limit));
+        }
+    }
+}
+
+fn wide_reserved_document_run<'session>(
+    ctx: &mut ParseRoot<'_, '_, 'session>,
+) -> Result<(SelectedSourceProfile<'session>, OwnerSourceRun<'session>)> {
+    let map = GltfSourceMap::from_primary_for_test(ctx)?;
+    let selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
+    drop(map);
+    let mut pending = OwnerSourceRun::new(ctx)?;
+    pending
+        .ordinals
+        .try_reserve(&mut ctx.services()?, 16 * 1024)?;
+    selected.link(ctx, &mut pending, ProfileOwner::Scene, DOCUMENT)?;
+    assert_eq!(pending.ordinals.len(), 1);
+    assert!(pending.ordinals.capacity() >= 16 * 1024);
+    assert_eq!(selected.ordinals.capacity(), 0);
+    assert_eq!(selected.owners.capacity(), 0);
+    Ok((selected, pending))
+}
+
+#[test]
+fn directory_storage_denial_follows_ordinal_reservation_before_any_transfer() {
+    let reserved = run(
+        |ctx, physical, token| {
+            let (mut selected, _pending) = wide_reserved_document_run(ctx)?;
+            selected.ordinals.try_reserve(&mut ctx.services()?, 1)?;
+            physical.store(
+                selected.ordinals.capacity() * std::mem::size_of::<SelectedEntryOrdinal>(),
+                AtomicOrdering::Relaxed,
+            );
+            token.cancel();
+            ctx.poll()?;
+            Ok(())
+        },
+        None,
+        None,
+        b"{}",
+    );
+    assert_cancelled(&reserved.failure);
+    assert!(reserved.physical > 0);
+    assert_eq!(
+        reserved.completed[ComparisonSite::OrdinalTransfer as usize],
+        0
+    );
+    let limit = reserved.failure.ledger().peak_live_bytes();
+
+    let completed = run(
+        |ctx, physical, token| {
+            let (mut selected, mut pending) = wide_reserved_document_run(ctx)?;
+            let capacity = pending.ordinals.capacity();
+            selected.complete_owner(ctx, &mut pending, ProfileOwner::Scene)?;
+            assert_eq!(selected.ordinals.as_slice(), &[SelectedEntryOrdinal(0)]);
+            assert_eq!(selected.owners.len(), 1);
+            assert!(!selected.finished);
+            assert!(pending.ordinals.is_empty());
+            assert_eq!(pending.ordinals.capacity(), capacity);
+            physical.store(
+                selected.owners.capacity() * std::mem::size_of::<OwnerSourceRange>(),
+                AtomicOrdering::Relaxed,
+            );
+            token.cancel();
+            ctx.poll()?;
+            Ok(())
+        },
+        None,
+        None,
+        b"{}",
+    );
+    assert_cancelled(&completed.failure);
+    assert_eq!(
+        completed.completed[ComparisonSite::OrdinalTransfer as usize],
+        1
+    );
+    assert!(completed.physical > 0);
+    assert_eq!(
+        completed.failure.ledger().peak_live_bytes(),
+        limit + completed.physical as u64,
+        "the measured frontier adds only the directory's actual retained capacity",
+    );
+
+    let mut limits = ResourceLimits::default();
+    limits.max_live_bytes = limit;
+    let denied = run_with_assets(
+        |ctx, physical, token| {
+            let (mut selected, mut pending) = wide_reserved_document_run(ctx)?;
+            let capacity = pending.ordinals.capacity();
+            let error = selected
+                .complete_owner(ctx, &mut pending, ProfileOwner::Scene)
+                .expect_err("directory storage must be denied after ordinal storage is admitted");
+            assert!(matches!(error, ContentError::Scope(_)));
+            assert!(selected.ordinals.capacity() > 0);
+            assert!(selected.ordinals.is_empty());
+            assert_eq!(selected.owners.capacity(), 0);
+            assert!(selected.owners.is_empty());
+            assert!(!selected.finished);
+            assert_eq!(pending.owner, Some(ProfileOwner::Scene));
+            assert_eq!(pending.ordinals.as_slice(), &[SelectedEntryOrdinal(0)]);
+            assert_eq!(pending.ordinals.capacity(), capacity);
+            physical.store(1, AtomicOrdering::Relaxed);
+            token.cancel();
+            Err(ctx
+                .poll()
+                .expect_err("the first storage denial must remain terminal")
+                .into())
+        },
+        limits,
+        None,
+        b"{}",
+        &[],
+    );
+    assert_eq!(denied.physical, 1);
+    assert_eq!(
+        denied.completed[ComparisonSite::OrdinalTransfer as usize],
+        0
+    );
+    assert_eq!(denied.failure.ledger().peak_live_bytes(), limit);
+    let ImportCause::Scope(abort) = denied.failure.cause() else {
+        panic!("the storage denial must survive the later cancellation poll");
+    };
+    assert!(matches!(
+        abort.cause(),
+        ScopeAbortCause::Ledger(baozi_operation::LedgerCause::LimitExceeded {
+            class: baozi_operation::CounterClass::Live,
+            dimension: ImportDimension::ScratchBytes,
+            value,
+            limit: denied_limit,
+        }) if *denied_limit == limit && *value == limit + completed.physical as u64
+    ));
+}
+
+#[test]
+fn empty_directory_finalization_observes_entry_cancellation() {
+    let observation = run(
+        |ctx, _, token| {
+            let map = GltfSourceMap::from_primary_for_test(ctx)?;
+            let mut selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
+            let ordinary = OwnerSourceRun::new(ctx)?;
+            let suspended = OwnerSourceRun::new(ctx)?;
+            token.cancel();
+            let result = selected.finish(ctx, &ordinary, &suspended);
+            assert!(result.is_err());
+            assert!(!selected.finished);
+            result
+        },
+        None,
+        None,
+        b"{}",
+    );
+    assert_cancelled(&observation.failure);
+    assert_eq!(observation.comparisons(), 0);
+}
+
+fn completed_nodes<'session>(
+    ctx: &mut ParseRoot<'_, '_, 'session>,
+) -> Result<(
+    SelectedSourceProfile<'session>,
+    OwnerSourceRun<'session>,
+    OwnerSourceRun<'session>,
+)> {
+    let map = GltfSourceMap::from_primary_for_test(ctx)?;
+    let mut selected = SelectedSourceProfile::from_source_map(ctx, &map, |_| true)?;
+    let mut ordinary = OwnerSourceRun::new(ctx)?;
+    let suspended = OwnerSourceRun::new(ctx)?;
+    for index in (1..selected.entries.len()).rev() {
+        let source = selected.entries()[index].entity.id;
+        let owner = ProfileOwner::Node(baozi_import::authoring::NodeLocalId::new(
+            source.source_index as u32,
+        ));
+        selected.link(ctx, &mut ordinary, owner, source)?;
+        selected.complete_owner(ctx, &mut ordinary, owner)?;
+    }
+    Ok((selected, ordinary, suspended))
+}
+
+#[test]
+fn directory_initialization_and_registration_observe_bounded_and_short_scope_cancellation() {
+    for length in [2, 130] {
+        let primary = serde_json::to_vec(
+            &serde_json::json!({ "nodes": vec![serde_json::json!({}); length] }),
+        )
+        .unwrap();
+        let setup = run(
+            |ctx, _, token| {
+                let _completed = completed_nodes(ctx)?;
+                token.cancel();
+                ctx.poll()?;
+                Ok(())
+            },
+            None,
+            None,
+            &primary,
+        );
+        assert_cancelled(&setup.failure);
+        for (site, cancel_after) in [
+            (ComparisonSite::DirectoryInit, 1),
+            (ComparisonSite::DirectoryInit, 64),
+            (ComparisonSite::DirectoryInit, 65),
+            (ComparisonSite::DirectoryInit, length),
+            (ComparisonSite::DirectoryRegister, 1),
+            (ComparisonSite::DirectoryRegister, 64),
+            (ComparisonSite::DirectoryRegister, 65),
+            (ComparisonSite::DirectoryRegister, length),
+        ] {
+            if cancel_after > length {
+                continue;
+            }
+            let observation = run(
+                |ctx, _, _| {
+                    let (mut selected, ordinary, suspended) = completed_nodes(ctx)?;
+                    let result = selected.finish(ctx, &ordinary, &suspended);
+                    assert!(result.is_err());
+                    assert!(!selected.finished);
+                    assert!(selected.directory.is_none());
+                    assert_eq!(selected.owners.len(), selected.ordinals.len());
+                    result
+                },
+                None,
+                Some((site, cancel_after)),
+                &primary,
+            );
+            assert_cancelled(&observation.failure);
+            assert_eq!(
+                observation.completed[site as usize],
+                if length == 2 || cancel_after == length {
+                    length
+                } else if cancel_after <= 64 {
+                    64
+                } else {
+                    128
+                }
+            );
+            let initialized = observation.completed[ComparisonSite::DirectoryInit as usize];
+            let registered = observation.completed[ComparisonSite::DirectoryRegister as usize];
+            assert_eq!(observation.directory_covered, length);
+            assert_eq!(observation.comparisons(), 0);
+            if site == ComparisonSite::DirectoryInit {
+                assert_eq!(registered, 0);
+            } else {
+                assert_eq!(initialized, length);
+            }
+            let expected = counts(&setup.failure).1
+                + length as u64
+                + 2
+                + initialized as u64
+                + registered as u64;
+            assert_eq!(counts(&observation.failure), (expected, expected));
+        }
+    }
+}
+
+#[test]
+fn candidate_membership_precedes_accessor_and_view_dependency_dereferences() {
+    let observation = run(
+        |ctx, physical, _| {
+            let surfaces = crate::admission::admit(ctx)?;
+            let document = crate::document::Document::decode(ctx, surfaces)?;
+            for missing in [SourceEntityKind::Accessor, SourceEntityKind::BufferView, SourceEntityKind::Buffer] {
+                let selected = SelectedSourceProfile::from_source_map(ctx, document.source_map(), |id| id.kind != missing)?;
+                let mut pending = OwnerSourceRun::new(ctx)?;
+                let error = link_accessor(ctx, &selected, &mut pending, document.tables(), ProfileOwner::Primitive(0), 0)
+                    .expect_err("every candidate must resolve against the selected inventory");
+                assert_eq!(error.to_string(), "selected glTF owner has no admitted source identity");
+                assert_eq!(pending.ordinals.len(), match missing {
+                    SourceEntityKind::Accessor => 0,
+                    SourceEntityKind::BufferView => 1,
+                    SourceEntityKind::Buffer => 2,
+                    _ => unreachable!(),
+                });
+            }
+            let selected = SelectedSourceProfile::from_source_map(ctx, document.source_map(), |_| true)?;
+            let mut pending = OwnerSourceRun::new(ctx)?;
+            for result in [
+                link_accessor(ctx, &selected, &mut pending, document.tables(), ProfileOwner::Primitive(0), 1),
+                link_view(ctx, &selected, &mut pending, document.tables(), ProfileOwner::Primitive(0), 1),
+            ] {
+                assert_eq!(result.err().unwrap().to_string(), "selected glTF owner has no admitted source identity");
+            }
+            assert!(pending.ordinals.is_empty());
+            physical.store(1, AtomicOrdering::Relaxed);
+            Ok(())
+        },
+        None,
+        None,
+        br#"{"asset":{"version":"2.0"},"buffers":[{"byteLength":12,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAA"}],"bufferViews":[{"buffer":0,"byteLength":12}],"accessors":[{"bufferView":0,"componentType":5126,"count":1,"type":"VEC3"}]}"#,
+    );
+    assert_eq!(observation.physical, 1);
+}
+
+#[test]
+fn shared_primitive_relations_match_source_derived_counts_and_complete_owner_order() {
+    for (count, expected_links) in [(1, 32), (8, 186), (32, 714)] {
+        let mut binary = [
+            0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+        ]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+        for index in [0_u16, 1, 2] {
+            binary.extend_from_slice(&index.to_le_bytes());
+        }
+        let primary = serde_json::to_vec(&serde_json::json!({
+            "asset": {"version": "2.0"}, "scene": 0,
+            "scenes": [{"nodes": [0, 1]}], "nodes": [{"mesh": 0}, {"mesh": 0}],
+            "meshes": [{"primitives": vec![serde_json::json!({"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3}); count]}],
+            "buffers": [{"byteLength": 102, "uri": format!("data:application/octet-stream;base64,{}", base64::engine::general_purpose::STANDARD.encode(binary))}],
+            "bufferViews": [
+                {"buffer": 0, "byteLength": 36}, {"buffer": 0, "byteOffset": 36, "byteLength": 36},
+                {"buffer": 0, "byteOffset": 72, "byteLength": 24}, {"buffer": 0, "byteOffset": 96, "byteLength": 6}
+            ],
+            "accessors": [
+                {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]},
+                {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
+                {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"},
+                {"bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR"}
+            ]
+        })).unwrap();
+        let observation = run(
+            |ctx, physical, _| {
+                use baozi_import::authoring::NodeLocalId;
+                let model =
+                    super::super::read_normalized_gltf(ctx, &crate::GltfImportOptions::default())?;
+                let profile = &model.sources;
+                assert_eq!(model.geometry.logical_meshes.len(), 1);
+                assert_eq!(model.nodes.mesh_instances.len(), 2);
+                let primitives = model.geometry.logical_meshes.as_slice()[0]
+                    .primitives
+                    .as_slice();
+                let mut expected = vec![
+                    (
+                        ProfileOwner::Scene,
+                        entity(SourceEntityKind::Scene, None, 0),
+                    ),
+                    (
+                        ProfileOwner::SyntheticRoot,
+                        entity(SourceEntityKind::Scene, None, 0),
+                    ),
+                    (
+                        ProfileOwner::Node(NodeLocalId::new(0)),
+                        entity(SourceEntityKind::Node, None, 0),
+                    ),
+                    (
+                        ProfileOwner::Node(NodeLocalId::new(1)),
+                        entity(SourceEntityKind::Node, None, 1),
+                    ),
+                    (ProfileOwner::Material(0), DOCUMENT),
+                    (
+                        ProfileOwner::LogicalMesh(0),
+                        entity(SourceEntityKind::Mesh, None, 0),
+                    ),
+                ];
+                for (index, primitive) in primitives.iter().enumerate() {
+                    assert_eq!(primitive.attributes.len(), 3);
+                    let owner = ProfileOwner::Primitive(index as u32);
+                    expected.extend([
+                        (owner, entity(SourceEntityKind::Primitive, Some(0), index)),
+                        (owner, entity(SourceEntityKind::Buffer, None, 0)),
+                        (owner, entity(SourceEntityKind::BufferView, None, 0)),
+                        (owner, entity(SourceEntityKind::BufferView, None, 1)),
+                        (owner, entity(SourceEntityKind::BufferView, None, 2)),
+                        (owner, entity(SourceEntityKind::BufferView, None, 3)),
+                        (owner, entity(SourceEntityKind::Accessor, None, 0)),
+                        (owner, entity(SourceEntityKind::Accessor, None, 1)),
+                        (owner, entity(SourceEntityKind::Accessor, None, 2)),
+                        (owner, entity(SourceEntityKind::Accessor, None, 3)),
+                    ]);
+                }
+                for index in 0..primitives.len() {
+                    for semantic in 0..3 {
+                        let owner = ProfileOwner::Attribute((index * 3 + semantic) as u32);
+                        expected.extend([
+                            (owner, entity(SourceEntityKind::Primitive, Some(0), index)),
+                            (owner, entity(SourceEntityKind::Buffer, None, 0)),
+                            (owner, entity(SourceEntityKind::BufferView, None, semantic)),
+                            (owner, entity(SourceEntityKind::Accessor, None, semantic)),
+                        ]);
+                    }
+                }
+                expected.extend([
+                    (
+                        ProfileOwner::MeshInstance(0),
+                        entity(SourceEntityKind::Node, None, 0),
+                    ),
+                    (
+                        ProfileOwner::MeshInstance(0),
+                        entity(SourceEntityKind::Mesh, None, 0),
+                    ),
+                    (
+                        ProfileOwner::MeshInstance(1),
+                        entity(SourceEntityKind::Node, None, 1),
+                    ),
+                    (
+                        ProfileOwner::MeshInstance(1),
+                        entity(SourceEntityKind::Mesh, None, 0),
+                    ),
+                ]);
+                assert_eq!(relation(profile), expected);
+                let translated = profile
+                    .for_owner(ctx, ProfileOwner::Primitive(0))?
+                    .iter()
+                    .map(|&ordinal| profile.ordinal_source_index(ctx, 1, ordinal))
+                    .collect::<Result<Vec<_>>>()?;
+                let count = primitives.len() as u32;
+                assert_eq!(
+                    translated,
+                    [
+                        5,
+                        count + 5,
+                        count + 6,
+                        count + 7,
+                        count + 8,
+                        count + 9,
+                        count + 10,
+                        count + 11,
+                        count + 12,
+                        count + 13
+                    ]
+                );
+                physical.store(profile.link_count(), AtomicOrdering::Relaxed);
+                Ok(())
+            },
+            None,
+            None,
+            &primary,
+        );
+        assert_eq!(observation.physical, expected_links);
+        assert_eq!(
+            observation.completed[ComparisonSite::OrdinalTransfer as usize],
+            expected_links
+        );
+    }
+}
+
+#[test]
+fn sparse_owner_relations_preserve_embedded_buffer_identities_through_authoring() {
+    let mut binary = vec![0; 36];
+    binary.extend_from_slice(&[1, 2, 0, 0]);
+    for value in [1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        binary.extend_from_slice(&value.to_le_bytes());
+    }
+    let buffer = serde_json::json!({
+        "byteLength": 64,
+        "uri": format!(
+            "data:application/octet-stream;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&binary),
+        ),
+    });
+    let mut registry = RegistryBuilder::new();
+    registry.register(crate::GltfImporter).unwrap();
+    let plan = registry
+        .freeze(RegistryBuildLimits::default())
+        .unwrap()
+        .plan(&ImportRequest::new(), OptionCompileLimits::default())
+        .unwrap();
+    for (buffer_count, expected_sources) in [
+        (1, &[0, 4, 5, 6, 7, 8, 9][..]),
+        (3, &[0, 4, 5, 6, 7, 8, 9, 10, 11][..]),
+    ] {
+        let primary = serde_json::to_vec(&serde_json::json!({
+            "asset": {"version": "2.0"}, "scene": 0,
+            "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+            "buffers": vec![buffer.clone(); buffer_count],
+            "bufferViews": [
+                {"buffer": 0, "byteLength": 36},
+                {"buffer": if buffer_count == 1 { 0 } else { 1 }, "byteOffset": 36, "byteLength": 2},
+                {"buffer": if buffer_count == 1 { 0 } else { 2 }, "byteOffset": 40, "byteLength": 24},
+            ],
+            "accessors": [{
+                "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                "min": [0, 0, 0], "max": [1, 1, 0],
+                "sparse": {
+                    "count": 2,
+                    "indices": {"bufferView": 1, "componentType": 5121},
+                    "values": {"bufferView": 2},
+                },
+            }],
+        }))
+        .unwrap();
+        let observation = run(
+            |ctx, physical, _| {
+                let document: serde_json::Value =
+                    serde_json::from_slice(ctx.services()?.primary_bytes()).unwrap();
+                let declared_buffers = document["buffers"].as_array().unwrap().len();
+                let expected = match declared_buffers {
+                    1 => vec![
+                        entity(SourceEntityKind::Primitive, Some(0), 0),
+                        entity(SourceEntityKind::Buffer, None, 0),
+                        entity(SourceEntityKind::BufferView, None, 0),
+                        entity(SourceEntityKind::BufferView, None, 1),
+                        entity(SourceEntityKind::BufferView, None, 2),
+                        entity(SourceEntityKind::Accessor, None, 0),
+                    ],
+                    3 => vec![
+                        entity(SourceEntityKind::Primitive, Some(0), 0),
+                        entity(SourceEntityKind::Buffer, None, 0),
+                        entity(SourceEntityKind::Buffer, None, 1),
+                        entity(SourceEntityKind::Buffer, None, 2),
+                        entity(SourceEntityKind::BufferView, None, 0),
+                        entity(SourceEntityKind::BufferView, None, 1),
+                        entity(SourceEntityKind::BufferView, None, 2),
+                        entity(SourceEntityKind::Accessor, None, 0),
+                    ],
+                    _ => panic!("the sparse fixture has one or three Buffer declarations"),
+                };
+                let model =
+                    super::super::read_normalized_gltf(ctx, &crate::GltfImportOptions::default())?;
+                assert_eq!(model.buffers.external_resource_count(), 0);
+                assert_eq!(model.geometry.logical_meshes.len(), 1);
+                let primitives = model.geometry.logical_meshes.as_slice()[0]
+                    .primitives
+                    .as_slice();
+                assert_eq!(primitives.len(), 1);
+                assert_eq!(model.geometry.primitive_provenance.as_slice(), &[0]);
+                let attributes = primitives[0].attributes.as_slice();
+                assert_eq!(attributes.len(), 1);
+                assert_eq!(attributes[0].provenance.as_slice(), &[0]);
+                assert_eq!(
+                    attributes[0].values.as_slice(),
+                    &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                );
+                for owner in [ProfileOwner::Primitive(0), ProfileOwner::Attribute(0)] {
+                    assert_eq!(owner_identities(ctx, &model.sources, owner)?, expected);
+                }
+                physical.store(expected.len(), AtomicOrdering::Relaxed);
+                Ok(())
+            },
+            None,
+            None,
+            &primary,
+        );
+        assert_eq!(observation.physical, expected_sources.len() - 1);
+        assert!(matches!(
+            observation.failure.cause(),
+            ImportCause::Format(_)
+        ));
+
+        let report = plan
+            .read_bytes(
+                AssetPath::new("sparse-owner.gltf").unwrap(),
+                &primary,
+                ImportOperationControl::default(),
+            )
+            .unwrap();
+        let scene = report.scene();
+        let mesh = scene.meshes().next().unwrap();
+        let primitive = mesh.primitives().next().unwrap();
+        let position = primitive.positions().unwrap();
+        for owner in [primitive.metadata_owner(), position.metadata_owner()] {
+            let translated = scene
+                .owner_provenance(owner)
+                .unwrap()
+                .map(|node| {
+                    let baozi_core::ProvenanceKindRef::Source(source) = node.kind() else {
+                        panic!("sparse owners retain source leaves");
+                    };
+                    assert_eq!(source.resource().index(), 0);
+                    source.index()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(translated, expected_sources);
+        }
+    }
+}
+
+#[test]
+fn actual_suspended_owners_keep_default_sampler_revisits_and_clip_input_only_declarations() {
+    let geometry = [
+        0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+    ]
+    .into_iter()
+    .flat_map(f32::to_le_bytes)
+    .collect::<Vec<_>>();
+    let input = [0.0_f32, 1.0, 0.0, 3.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let output = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    let primary = serde_json::to_vec(&serde_json::json!({
+        "asset": {"version": "2.0"}, "scene": 0,
+        "scenes": [{"nodes": [2]}, {"nodes": [3]}],
+        "nodes": [{"mesh": 0}, {}, {"children": [0, 1]}, {}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "material": 0}]}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}, "metallicRoughnessTexture": {"index": 1}}, "emissiveTexture": {"index": 2}}],
+        "images": [{"uri": "data:image/png;base64,AA=="}], "samplers": [{}],
+        "textures": [{"source": 0}, {"source": 0, "sampler": 0}, {"source": 0}],
+        "buffers": [
+            {"byteLength": 60, "uri": format!("data:application/octet-stream;base64,{}", base64::engine::general_purpose::STANDARD.encode(geometry))},
+            {"byteLength": 16, "uri": "input.bin"}, {"byteLength": 24, "uri": "output.bin"},
+            {"byteLength": 32, "uri": "ignored.bin"}
+        ],
+        "bufferViews": [
+            {"buffer": 0, "byteLength": 36}, {"buffer": 0, "byteOffset": 36, "byteLength": 24},
+            {"buffer": 1, "byteLength": 8}, {"buffer": 2, "byteLength": 24},
+            {"buffer": 1, "byteOffset": 8, "byteLength": 8},
+            {"buffer": 3, "byteLength": 8}, {"buffer": 3, "byteOffset": 8, "byteLength": 24}
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2"},
+            {"bufferView": 2, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1]},
+            {"bufferView": 3, "componentType": 5126, "count": 2, "type": "VEC3"},
+            {"bufferView": 4, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [3]},
+            {"bufferView": 5, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [9]},
+            {"bufferView": 6, "componentType": 5126, "count": 2, "type": "VEC3"}
+        ],
+        "animations": [
+            {"samplers": [{"input": 4, "output": 3}], "channels": [{"sampler": 0, "target": {"node": 3, "path": "translation"}}]},
+            {"samplers": [{"input": 2, "output": 3}, {"input": 4, "output": 3}, {"input": 5, "output": 6}], "channels": [
+                {"sampler": 2, "target": {"path": "translation"}},
+                {"sampler": 1, "target": {"node": 3, "path": "translation"}},
+                {"sampler": 0, "target": {"node": 0, "path": "translation"}},
+                {"sampler": 0, "target": {"node": 1, "path": "scale"}}
+            ]},
+            {"samplers": [{"input": 2, "output": 3}], "channels": [{"sampler": 0, "target": {"node": 0, "path": "translation"}}]}
+        ]
+    })).unwrap();
+    let observation = run_with_assets(
+        |ctx, physical, _| {
+            let model =
+                super::super::read_normalized_gltf(ctx, &crate::GltfImportOptions::default())?;
+            let profile = &model.sources;
+            for (owner, source_index) in [(0, 2), (1, 0), (2, 1)] {
+                assert_eq!(
+                    owner_identities(
+                        ctx,
+                        profile,
+                        ProfileOwner::Node(baozi_import::authoring::NodeLocalId::new(owner))
+                    )?,
+                    [entity(SourceEntityKind::Node, None, source_index)]
+                );
+            }
+            assert_eq!(
+                owner_identities(ctx, profile, ProfileOwner::Sampler(0))?,
+                [entity(SourceEntityKind::Sampler, None, 0)]
+            );
+            assert_eq!(
+                owner_identities(ctx, profile, ProfileOwner::Sampler(1))?,
+                [
+                    entity(SourceEntityKind::Texture, None, 0),
+                    entity(SourceEntityKind::Texture, None, 2)
+                ]
+            );
+            assert_eq!(
+                owner_identities(ctx, profile, ProfileOwner::AnimationClip(0))?,
+                [
+                    entity(SourceEntityKind::Buffer, None, 1),
+                    entity(SourceEntityKind::BufferView, None, 2),
+                    entity(SourceEntityKind::BufferView, None, 4),
+                    entity(SourceEntityKind::Accessor, None, 2),
+                    entity(SourceEntityKind::Accessor, None, 4),
+                    entity(SourceEntityKind::Animation, None, 1),
+                    entity(SourceEntityKind::AnimationSampler, Some(1), 0),
+                    entity(SourceEntityKind::AnimationSampler, Some(1), 1),
+                ]
+            );
+            assert_eq!(
+                owner_identities(ctx, profile, ProfileOwner::AnimationClip(1))?,
+                [
+                    entity(SourceEntityKind::Buffer, None, 1),
+                    entity(SourceEntityKind::BufferView, None, 2),
+                    entity(SourceEntityKind::Accessor, None, 2),
+                    entity(SourceEntityKind::Animation, None, 2),
+                    entity(SourceEntityKind::AnimationSampler, Some(2), 0),
+                ]
+            );
+            for (canonical, animation, channel) in [(0, 1, 2), (1, 1, 3), (2, 2, 0)] {
+                assert_eq!(
+                    owner_identities(ctx, profile, ProfileOwner::AnimationChannel(canonical))?,
+                    [
+                        entity(SourceEntityKind::Buffer, None, 1),
+                        entity(SourceEntityKind::Buffer, None, 2),
+                        entity(SourceEntityKind::BufferView, None, 2),
+                        entity(SourceEntityKind::BufferView, None, 3),
+                        entity(SourceEntityKind::Accessor, None, 2),
+                        entity(SourceEntityKind::Accessor, None, 3),
+                        entity(SourceEntityKind::AnimationChannel, Some(animation), channel),
+                        entity(SourceEntityKind::AnimationSampler, Some(animation), 0),
+                    ]
+                );
+            }
+            assert_eq!(model.animations.clip_count(), 2);
+            assert_eq!(model.animations.channel_count(), 3);
+            assert_eq!(model.animations.clip_provenance(0), Some(&[1, 2][..]));
+            assert_eq!(model.animations.clip_provenance(1), Some(&[1, 2][..]));
+            for id in [
+                entity(SourceEntityKind::Animation, None, 0),
+                entity(SourceEntityKind::Buffer, None, 3),
+                entity(SourceEntityKind::AnimationSampler, Some(1), 2),
+            ] {
+                assert!(profile.required(ctx, id).is_err());
+            }
+            physical.store(1, AtomicOrdering::Relaxed);
+            Ok(())
+        },
+        ResourceLimits::default(),
+        None,
+        &primary,
+        &[("input.bin", &input), ("output.bin", &output)],
+    );
+    assert_eq!(observation.physical, 1);
 }
 
 const DOCUMENT_EXTRAS: &str = r#"{ "标签" : [-0, 184467440737095516160, "\u0061"] }"#;
