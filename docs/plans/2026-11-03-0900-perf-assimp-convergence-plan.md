@@ -1,7 +1,7 @@
 ---
 title: "Converge maintained import workflows with Assimp before release"
 type: perf
-status: in_progress
+status: paused
 date: 2026-11-03
 baseline: e0a7b387371b71c28bc40f6e2cfd4c1ff5f91726
 ---
@@ -12,6 +12,14 @@ The user requires comparable performance before the first usable release. The co
 pre-release evolution does not satisfy this new release condition. Necessary interface,
 ownership, execution and representation changes may break compatibility. Publication remains
 closed while this plan is incomplete.
+
+Execution is paused for the user's device handoff on 2026-11-10. The
+[handoff](../reviews/2026-11-10-device-handoff.md) records the current development
+branch, qualified source, partial terminal Windows/GNU attempts and evidence
+that a Git clone can carry. Release acceptance remains HOLD. The user's latest
+request authorizes committing and pushing this development checkpoint to the
+Baozi GitHub remote; it does not accept native performance or merge the runtime
+into main.
 
 ## Evidence and Acceptance
 

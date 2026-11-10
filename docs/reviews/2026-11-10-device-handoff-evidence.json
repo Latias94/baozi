@@ -1,0 +1,433 @@
+{
+  "schema": "baozi-device-handoff/v1",
+  "captured_at": "2026-11-10T01:29:32.682009+00:00",
+  "repository": "https://github.com/Latias94/baozi",
+  "branch": "refactor/prepare-selection-owner",
+  "source_revision": "6203ce29850e18e71834f5010803f12e9cda2d52",
+  "control_revision": "b918256652e3bd15b08bd9a54de3d12caf125152",
+  "pre_closeout_head": "14119b64cb141bc1c2abb67a584207dbee0c88ec",
+  "goal_status": "paused",
+  "release_status": "HOLD",
+  "source_qualification": {
+    "source_receipt_sha256": "6d99c1e1dd42015d553144a5053921f1e2bc7c916620180e0d6e30d4c616556b",
+    "final_receipt_sha256": "7dd8bbd0fcf4cac30052f3d31508f0c4420a0e8109f3da46c9ad631bbabad3f7",
+    "qualified_inputs": 1066,
+    "current_inputs_match": true,
+    "gates": [
+      {
+        "name": "workspace-nextest",
+        "status": "passed",
+        "returncode": 0
+      },
+      {
+        "name": "workspace-docs",
+        "status": "passed",
+        "returncode": 0
+      },
+      {
+        "name": "workspace-clippy",
+        "status": "passed",
+        "returncode": 0
+      },
+      {
+        "name": "consumer-nextest",
+        "status": "passed",
+        "returncode": 0
+      },
+      {
+        "name": "consumer-clippy",
+        "status": "passed",
+        "returncode": 0
+      },
+      {
+        "name": "workspace-fmt",
+        "status": "passed",
+        "returncode": 0
+      },
+      {
+        "name": "consumer-fmt",
+        "status": "passed",
+        "returncode": 0
+      }
+    ],
+    "workspace_tests": {
+      "passed": 3992,
+      "manual_skips": 6
+    },
+    "doctests": {
+      "passed": 218
+    },
+    "consumer_tests": {
+      "passed": 138,
+      "manual_skips": 1
+    },
+    "scope": "Previously executed Windows source gates; current input hashes rechecked at closeout. No new Rust execution or GNU/wasm source-test claim."
+  },
+  "ordinary_protocol": {
+    "cases": 14,
+    "lanes": 110,
+    "warmup_pairs": 3,
+    "retained_pairs": 20,
+    "campaign_order": [
+      "C0",
+      "N0",
+      "N1",
+      "C1"
+    ],
+    "worker_timeout_seconds": 60,
+    "quiet_seconds": 20,
+    "start_deadline_seconds": 180
+  },
+  "export_correction": {
+    "original_exporter_sha256": "79f88351bb4b0342f71103912c2cc753b51e8bb4ab92329ad51c72a460432dd0",
+    "corrected_exporter_sha256": "33b338e31bb2a1267a87c9a7f34471e0aef65e1ef75b23d9c514972053480512",
+    "reason": "Original Windows export omitted the -attempt-1 suffix in the report directory and silently exported empty completed campaigns. Corrected export resolves that directory and requires a bound report for every completed campaign.",
+    "first_exports_retained_locally": true,
+    "new_measurements": false
+  },
+  "platforms": {
+    "windows": {
+      "status": "partial",
+      "decision_sha256": "87e1bf894cec5adbf2389cf6338691e2099f2ae495e2ec348a28373d3a27f7d6",
+      "owned_children_cleanup_confirmed": true,
+      "cleanup_failures": [],
+      "campaigns": {
+        "functional-control": {
+          "status": "completed",
+          "role": "control",
+          "returncode": 0,
+          "series": 110,
+          "commands": 222,
+          "failures": 0,
+          "elapsed_wait_seconds": null,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "ba917820cfc77997bfb0b3cd7a8d399646db241d639528bbfd852dadb8391354",
+          "waits_sha256": null,
+          "load_sha256": "57d3fad5d165ad1e7fa00345d0140ed87449249c621a00326fc973adfc3efa5d",
+          "raw_archive_sha256": null,
+          "receipt_sha256": "85995082e75577f5cae76f3145bc1af1c6eff699478d9111463160ee9bc1b50d",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "ed7d8409c25a1b776fc17102d69d7e38bc06029f4f2ac2269e935bec3b253c9d"
+          }
+        },
+        "functional-candidate": {
+          "status": "completed",
+          "role": "candidate",
+          "returncode": 0,
+          "series": 110,
+          "commands": 222,
+          "failures": 0,
+          "elapsed_wait_seconds": null,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "dad7e0bdaa13f6f1d5bf9bbdb209d843fc04cf78d38cdcaaa8b9a8b5e52ce65b",
+          "waits_sha256": null,
+          "load_sha256": "5dfbb8476ef02d63f284c2ae4cf437291c877a3ef009cd9e665af1f995a58e9b",
+          "raw_archive_sha256": null,
+          "receipt_sha256": "9e3d26ad68d84b8c278d55481f8a6c50df82cdb19f2cb74b79c7571cb552cba3",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "fb3c63f6e31616ca23d1e963036587c35900171af81b4374fae6d5ec107cf515"
+          }
+        },
+        "C0": {
+          "status": "completed",
+          "role": "control",
+          "returncode": 0,
+          "series": 110,
+          "commands": 5062,
+          "failures": 0,
+          "elapsed_wait_seconds": 90.92873450001935,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "4ba5cd6f2c9df297cec99bb64a4689ed2812a08bb02154e1818d1b4237622145",
+          "waits_sha256": "29e6b19adc31651f5c8633027348c814b08140e1e5f60e25b83e125ee36e6f98",
+          "load_sha256": "282e8350baa72a6d10435fd5534ade554cde8a7d240ee93339b97b84f2df8208",
+          "raw_archive_sha256": null,
+          "receipt_sha256": "866e9e5cd51137f460d58887ba02b6f23c29fdd96c6aaf47bc71a8d97cd8fb4e",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "10b7fdd3903586d7d44d82b37c97b9a61aa84c2e54e6f0b4d38eec95b86d6634"
+          },
+          "descriptive_counts": {
+            "populated_lanes": 110,
+            "pipeline_medians_above3x": 8,
+            "singlecampaign_endpoints_atleast10x": 33,
+            "load_samples": 150,
+            "local_busy_samples": 15,
+            "windows_busy_samples": null,
+            "stale_windows_samples": null
+          }
+        },
+        "N0": {
+          "status": "completed",
+          "role": "candidate",
+          "returncode": 0,
+          "series": 110,
+          "commands": 5062,
+          "failures": 0,
+          "elapsed_wait_seconds": 48.48652619999484,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "509335903dd4dd9075f3ad4828a253745a3bb63e1dc18d123acde4dcd6f185f7",
+          "waits_sha256": "c85a9c9482c132ef9cbafa67536d69960062df2d5f8f106fe18854ad53764686",
+          "load_sha256": "1c693c33f843d45d03d5d88e5e21123b71907d45fee1247c6751609e61059019",
+          "raw_archive_sha256": null,
+          "receipt_sha256": "efe94ebc145b59d0ea62184bd62c7364ee741eb4995e5af8ddcdcb4b235c2604",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "c9ea9802e8b20d4337f94a3af6469759b26e70b61a188a4e6d92301dc8599b06"
+          },
+          "descriptive_counts": {
+            "populated_lanes": 110,
+            "pipeline_medians_above3x": 9,
+            "singlecampaign_endpoints_atleast10x": 31,
+            "load_samples": 177,
+            "local_busy_samples": 168,
+            "windows_busy_samples": null,
+            "stale_windows_samples": null
+          }
+        },
+        "N1": {
+          "status": "completed",
+          "role": "candidate",
+          "returncode": 0,
+          "series": 110,
+          "commands": 5062,
+          "failures": 0,
+          "elapsed_wait_seconds": 45.7797067000065,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "e5140e12ca89f452378079a94112abcccbc28ed8a37e3fd645a5cfc3b88ebef7",
+          "waits_sha256": "977ed08d7c6f30fd22f23e06704b6333010abef65d9b43bfb1b82aa2e1fa78f9",
+          "load_sha256": "35ad6c5b8364c83fe0d7f00cf8f80ee55ad2c30cf97e8da8e6827fbf23ac0ebd",
+          "raw_archive_sha256": null,
+          "receipt_sha256": "aefc5a944f7ad031b83a5f64b385299371705f78a38682dc5a017552a5a278e7",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "238aacd239a9f3d52a001ffbad82e23a826e5205cf4a952aadade65522fd67ba"
+          },
+          "descriptive_counts": {
+            "populated_lanes": 110,
+            "pipeline_medians_above3x": 9,
+            "singlecampaign_endpoints_atleast10x": 31,
+            "load_samples": 162,
+            "local_busy_samples": 118,
+            "windows_busy_samples": null,
+            "stale_windows_samples": null
+          }
+        },
+        "C1": {
+          "status": "not_started",
+          "role": "control",
+          "returncode": null,
+          "series": null,
+          "commands": null,
+          "failures": null,
+          "elapsed_wait_seconds": 180.66525009999168,
+          "reason": "No20s namedtoolquiet interval within prospective180s startdeadline; pollingoverrun retained.",
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": null,
+          "waits_sha256": "58e60c92b0df11c6c650b174c1c4901dc4dc7d43671ccc53d036f838d1420996",
+          "load_sha256": null,
+          "raw_archive_sha256": null,
+          "receipt_sha256": "e0560e4ed2352b930fd982abc1f750863896ecc6e8cbe6d660fa94002745c4b3"
+        }
+      },
+      "csv": {
+        "path": "docs/reviews/2026-11-10-prepare-selection-owner-native-windows-lanes.csv",
+        "sha256": "5fadc3c9be13928b66b0d721be4512f5ef1094ce257d6d0b0a218966cc25c73a",
+        "rows": 440,
+        "columns": 41
+      },
+      "local_export_sha256": "ad06ca78bfa0073e0eb63ec4319f5973ed7e24b8078002194cfac3c5deb1be48",
+      "ordinary_results": {
+        "C0": true,
+        "N0": true,
+        "N1": true,
+        "C1": false
+      }
+    },
+    "linux": {
+      "status": "partial",
+      "decision_sha256": "10d2dcac3312f2636b1ef4e02cdc58e90cdaadcb3f6426f8974412baf3197612",
+      "owned_children_cleanup_confirmed": true,
+      "cleanup_failures": [],
+      "campaigns": {
+        "functional-control": {
+          "status": "completed",
+          "role": "control",
+          "returncode": 0,
+          "series": 110,
+          "commands": 222,
+          "failures": 0,
+          "elapsed_wait_seconds": null,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "cf5f66ce565c1fc203f0f09d2e461acb40a8f33b6ab8d63e320603fcbe906676",
+          "waits_sha256": null,
+          "load_sha256": "4814d0f9124d03ee448f330c777e1b68a87232b59a90536646290ba53e731157",
+          "raw_archive_sha256": "395b870129e447f8ba9dd2ead20aaba3344539c1f21b71f3f8dff71cf55d00d6",
+          "receipt_sha256": "0e1bd9312de89ceaa755cfce719b8b936795e9e9203aad6c1f5261e1bf9637d7",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "a9e3eac59bc3ac0089dffaf42b325cda7e451d34932f120dda076e67e31f1bf1"
+          }
+        },
+        "functional-candidate": {
+          "status": "completed",
+          "role": "candidate",
+          "returncode": 0,
+          "series": 110,
+          "commands": 222,
+          "failures": 0,
+          "elapsed_wait_seconds": null,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "c2aca25caebae799f409a3dee95148bf8174407ae8c7eb2a79036ef9776dac15",
+          "waits_sha256": null,
+          "load_sha256": "e745fa261150a58f4f6ef6837a726ee50b68d740211ab57e9ac7ca174413c4d3",
+          "raw_archive_sha256": "cbce9c4e3b4e6d6615fd29683cd3820f47bc723ed84ecfac8d0b13316e37e948",
+          "receipt_sha256": "31b5be602abcf4a9a90d809252256b144d14b9a7830aa74becaa0c584502f807",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "4a4de6b796c956a63a40b9ea505b6e590f027d0236584b04085bd9e4b8fecf53"
+          }
+        },
+        "C0": {
+          "status": "completed",
+          "role": "control",
+          "returncode": 0,
+          "series": 110,
+          "commands": 5062,
+          "failures": 0,
+          "elapsed_wait_seconds": 20.085176743999995,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "6bcdeff643c87c945f12229bf0e53001a5df40bac6db5b44aaf0884dfde0c626",
+          "waits_sha256": "60ee84ee1877732c93c1172a2d04a1ad819b187717352b0ff97498fd04c7c208",
+          "load_sha256": "e99bf19ef5b6cfc89e22a7e73b1dd9b7b51725429e74f1c2441730f71c1c1e98",
+          "raw_archive_sha256": "70d51170ec89495efbfa24731a98b5e39abb837146fde9d0c9c7decd6a519413",
+          "receipt_sha256": "2d4705b36eee7ca61965fc17f4471a34c3001aea7b4e2fcecd40e56f77441073",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "9ee9df7143edb81bf6cf4e97b35432b02fd59271ec9a4c0678273bd806025b9c"
+          },
+          "descriptive_counts": {
+            "populated_lanes": 110,
+            "pipeline_medians_above3x": 14,
+            "singlecampaign_endpoints_atleast10x": 30,
+            "load_samples": 54,
+            "local_busy_samples": 0,
+            "windows_busy_samples": 0,
+            "stale_windows_samples": 0
+          }
+        },
+        "N0": {
+          "status": "completed",
+          "role": "candidate",
+          "returncode": 0,
+          "series": 110,
+          "commands": 5062,
+          "failures": 0,
+          "elapsed_wait_seconds": 20.103434195000006,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "4f2614186e9d638e4d1a436b2364adb361690cef595a60845f32f1298a7505a0",
+          "waits_sha256": "94e0f7239363fed69c9dc7412aaa3e68bc8b02460aa58828509213da92d32cb8",
+          "load_sha256": "847fc7c1f28985feb64bf01844386fa3792e03631b40de75e15ae1914054c229",
+          "raw_archive_sha256": "447fdab82f52c2ac131b1b1d48e14b93c925275896a710d1c62b7fa9ec191c10",
+          "receipt_sha256": "b5170cdf05c5b4aac691595e65f72e256cf31c67fa434d393f16cd7ebf367a5d",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "328dca3283deb8093aca7f54b3d93c2c10e90b1f8088f964efae66dbf976ed42"
+          },
+          "descriptive_counts": {
+            "populated_lanes": 110,
+            "pipeline_medians_above3x": 14,
+            "singlecampaign_endpoints_atleast10x": 29,
+            "load_samples": 56,
+            "local_busy_samples": 0,
+            "windows_busy_samples": 14,
+            "stale_windows_samples": 0
+          }
+        },
+        "N1": {
+          "status": "not_started",
+          "role": "candidate",
+          "returncode": null,
+          "series": null,
+          "commands": null,
+          "failures": null,
+          "elapsed_wait_seconds": 180.698334671,
+          "reason": "No20s namedtoolquiet interval within prospective180s startdeadline; pollingoverrun retained.",
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": null,
+          "waits_sha256": "c78c372cdaf7481780a9bc8c9062120e3953b48bd1a50857895ac3c4de1ef2bd",
+          "load_sha256": null,
+          "raw_archive_sha256": null,
+          "receipt_sha256": "19b870196ec1abbdb927b61368d97aded31348dec593629f48f0bb6225d023f6"
+        },
+        "C1": {
+          "status": "completed",
+          "role": "control",
+          "returncode": 0,
+          "series": 110,
+          "commands": 5062,
+          "failures": 0,
+          "elapsed_wait_seconds": 116.42104167000002,
+          "reason": null,
+          "owned_child_cleanup_confirmed": true,
+          "report_sha256": "bbe6ce41e0359e81d7c83dd4d85baae90d798b4d8a102eba3ec17efc44188f13",
+          "waits_sha256": "490cb88906e82660a713c52eacd0bc8884307ff032e02c62be662e18c4a76aba",
+          "load_sha256": "d585b4640dbc9aaefc79eb0edb680dfbf77dfa9f050f38a0f664c847de934138",
+          "raw_archive_sha256": "83a67b5bf50512037199dd9987e75b6340c32032d13d96200c2a72e660aeb56a",
+          "receipt_sha256": "3e50eb4618cd54eea3397f3585ac8cd0c4f4158f510d86146a1b70482bea9cd7",
+          "literal_nonclock_contract": {
+            "passed": true,
+            "sha256": "c5f25b677729fe76f7b9c793ccb24ce3407c4333d082d7d1167ba17a76c51fe8"
+          },
+          "descriptive_counts": {
+            "populated_lanes": 110,
+            "pipeline_medians_above3x": 14,
+            "singlecampaign_endpoints_atleast10x": 28,
+            "load_samples": 56,
+            "local_busy_samples": 0,
+            "windows_busy_samples": 7,
+            "stale_windows_samples": 0
+          }
+        }
+      },
+      "csv": {
+        "path": "docs/reviews/2026-11-10-prepare-selection-owner-native-linux-lanes.csv",
+        "sha256": "d9319fae67b8287df27b10fef370620421dadbd180687d136439dde1e3547721",
+        "rows": 440,
+        "columns": 41
+      },
+      "local_export_sha256": "c9a8d35735732ff3b30bb1138fe7bfc853555198d81d6d36e34dab9a932761b6",
+      "ordinary_results": {
+        "C0": true,
+        "N0": true,
+        "N1": false,
+        "C1": true
+      },
+      "windows_monitor": {
+        "status": "partial",
+        "gnu_cleanup_confirmed": true,
+        "report_sha256": "e5b6391d6e4d5a95c0143413af9c61157184ca66f0316a6e60a38ff35e441156",
+        "supervisor_returncode": 2
+      }
+    }
+  },
+  "portability": {
+    "included": "Source history, plans/reviews, this compact snapshot and both corrected 440-row native CSV exports.",
+    "excluded": "Machine-local .git/baozi-review and target evidence, raw traces/workers, ignored repo-ref source checkouts, five pre-existing untracked user notes and the Codex conversation/goal state.",
+    "raw_review_status": "Full ordinary raw-pair independent review remains pending; this closeout checks terminal receipts, bound reports, contracts and every exported cell."
+  },
+  "heap": {
+    "status": "not_started",
+    "scope": "No separate heap campaign for preparation-selection candidate 6203ce2. Earlier campaigns remain tied to their own source identities."
+  }
+}

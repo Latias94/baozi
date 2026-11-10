@@ -233,5 +233,59 @@ represented as a tested interruption contract.
 This diagnostic still requires original Windows/GNU 14-case/110-lane
 C0/N0/N1/C1 comparisons, three warmups and twenty retained AB/BA pairs,
 comparable whole-child memory and separate representative heap attribution.
-The original engineering convergence targets remain active. Source retention,
+The original engineering convergence targets remain required. Source retention,
 main integration and release remain **HOLD**.
+
+## Attempt-1 ordinary closeout, 2026-11-10
+
+Both platform envelopes are now terminal `partial`, with original owned-child
+cleanup confirmed and no cleanup failures. The GNU Windows monitor also
+confirms GNU cleanup; its supervisor returns 2. No new sampling or separate
+heap capture is started during this closeout. The performance goal is paused
+for the user's device change.
+
+| Platform | Functional control/candidate | C0 | N0 | N1 | C1 |
+| --- | --- | --- | --- | --- | --- |
+| Windows | Both complete, 110 lanes each | Complete | Complete | Complete | Not started |
+| GNU | Both complete, 110 lanes each | Complete | Complete | Not started | Complete |
+
+Every completed functional matrix has 222 commands and zero failures. Every
+completed ordinary campaign has 110 lanes, 5,062 commands and zero failures,
+with three warmup and twenty retained fresh AB/BA pairs per lane. Their bound
+complete literal non-clock contracts pass, including import work and output
+capacities. These receipt/summary consistency checks do not replace the still
+pending independent review of every original ordinary raw pair.
+
+Windows C1 waits 180.6652501 seconds and GNU N1 waits 180.698334671 seconds
+without obtaining the prospective twenty-second named-tool quiet interval.
+Those campaigns remain missing. Actual load remains present after successful
+start gates too: Windows C0/N0/N1 have 15/168/118 local named-tool busy samples
+out of 150/177/162 load samples. GNU C0/N0/C1 have 0/14/7 joint Windows busy
+samples out of 54/56/56, with no local named-tool busy or stale monitor sample.
+These records do not establish machine isolation.
+
+The corrected [Windows](2026-11-10-prepare-selection-owner-native-windows-lanes.csv)
+and [GNU](2026-11-10-prepare-selection-owner-native-linux-lanes.csv) exports each
+retain all 440 lane/campaign rows and 41 columns. Missing campaigns and
+platform-inapplicable metrics remain empty. Closeout checks all 36,080 cells
+against bound original report medians and their stated ratio/change formulas.
+All populated ordinary metric distributions retain twenty samples per engine.
+
+The original export helper omits the `-attempt-1` suffix in its Windows report
+path, silently producing empty cells for completed campaigns. Its first outputs
+remain in the local evidence directory. The corrected offline helper selects
+the actual attempt directory and requires a bound report for every completed
+campaign. It produces the linked exports without running workers or changing
+any source, binary, sample or original prerecord. GNU CSV bytes are unchanged
+by the correction. The [portable evidence snapshot](2026-11-10-device-handoff-evidence.json)
+records both helper identities, terminal receipt/report/contract digests,
+cleanup, sample counts and export hashes.
+
+Windows N0 and N1 each retain 9/28 pipeline medians above 3x Assimp; GNU N0
+retains 14/28. Individual campaign endpoints at least 10x number 31/31 for
+Windows N0/N1 and 29 for GNU N0. These are descriptive campaign counts, not
+replacement confirmed-repeat or source-speed acceptance. The missing closing
+Windows control, missing second GNU candidate, actual contention and unreviewed
+raw evidence remain explicit. The existing instruction reductions do not
+establish ordinary elapsed benefit. Main integration, measured retention and
+release remain **HOLD**.

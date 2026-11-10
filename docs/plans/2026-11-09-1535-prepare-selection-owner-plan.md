@@ -4,7 +4,11 @@ Status: source `6203ce2` is implemented and passes all seven integrated gates,
 the prospective seven-task instruction predicate and independent actual
 source/QA/archive, instruction and compiled-owner reviews. Both ordinary
 candidate builds complete in the existing repository/target. Original
-Windows/GNU ordinary and separate heap qualification remain pending;
+Windows/GNU attempt 1 ends partial: Windows C1 and GNU N1 do not start;
+the other three ordinary campaigns and both functional matrices complete on
+each host. Independent ordinary raw review and separate heap qualification
+remain pending. Execution is paused for the
+[device handoff](../reviews/2026-11-10-device-handoff.md);
 native retention/main/release remain HOLD. See the
 [actual checkpoint](../reviews/2026-11-09-prepare-selection-owner.md).
 
